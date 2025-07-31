@@ -15,7 +15,7 @@ from .fitter import PolarizedBeamFitter
 from .noise_psd import (
     ClusterfinderPSDCalculator,
     EnsembleAsdMeanCalculator,
-    KxAveragedIndividualCalculator,
+    KxAveragedCalculator,
     NoisePSDCalculator,
     WhiteNoiseScaledCalculator,
     create_noise_psd_calculator,
@@ -61,7 +61,7 @@ __all__ = [
     "BeamModelBSplinesGaussian",
     "NoisePSDCalculator",
     "ClusterfinderPSDCalculator",
-    "KxAveragedIndividualCalculator",
+    "KxAveragedCalculator",
     "WhiteNoiseScaledCalculator",
     "EnsembleAsdMeanCalculator",
     "create_noise_psd_calculator",

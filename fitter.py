@@ -88,7 +88,7 @@ class PolarizedBeamFitter:
         # Create separate beam models for each band
         self.beam_models = {}
         for band in self.config.bands:
-            self.beam_models[band] = create_beam_model(self.config, self.x_grid, self.y_grid, band)
+            self.beam_models[band] = create_beam_model(self.config, self.y_grid, self.x_grid, band)
 
         self.apod_mask = make_apodization_mask(self.map_shape, config.apodization_width_pix)
         self.apod_mask_jax = jax.device_put(self.apod_mask.astype(jnp.float32))
@@ -257,7 +257,7 @@ class PolarizedBeamFitter:
         print(f"Creating T->P leakage template using {self.config.leakage_weighting} weighting...")
 
         if self.config.leakage_weighting == "median":
-            normalized_qu_templates = np.median(raw_maps[:, :, :, :, 1:3], axis=0) / gaussfit_initial_amp[:, :, 0]
+            normalized_qu_templates = np.median(raw_maps[:, :, :, :, 1:3], axis=0) / gaussfit_initial_amp
         else:
             # Proper weighted average over sources with per-source, per-band weights
             # raw_maps shape: (n_src, ny, nx, n_bands, 3)
@@ -453,7 +453,7 @@ class PolarizedBeamFitter:
         # Evaluate beam maps for all bands
         beam_maps_T, beam_maps_P = [], []
         for i, band in enumerate(self.config.bands):
-            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(beam_params_list[i], xoff, yoff)
+            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(beam_params_list[i], yoff, xoff)
             beam_maps_T.append(beam_T_map)
             beam_maps_P.append(beam_P_map)
 
@@ -492,10 +492,7 @@ class PolarizedBeamFitter:
         # Apply polarization focus and sum to get a single chi-squared value
         total_chi2 = jnp.sum(chi2_means_per_component * pol_weights)
 
-        # Normalize by the number of data points (degrees of freedom)
-        n_dof = jnp.prod(jnp.array(data_fft_source.shape))
-
-        return total_chi2 / n_dof
+        return total_chi2 / 1e6 # renormalize for numerical reasons
 
     def objective_function(self, params_logit, extra_args=None):
         """
@@ -569,7 +566,7 @@ class PolarizedBeamFitter:
 
         if sol.result != optx.RESULTS.successful:
             print(f"ERROR! BFGS did not converge successfully in {self.config.n_steps} steps.")
-            print(f"Final physical params: {self.get_physical_params(sol.value)}")
+            print(f"Final physical params: {params_from_logit(sol.value, self.config)}")
             raise RuntimeError(optx.RESULTS[sol.result])
 
         self.params_logit = sol.value
@@ -582,13 +579,7 @@ class PolarizedBeamFitter:
         self.latest_chi2s = np.array(final_chi2s)
         print(f"Final chi2: {np.sum(self.latest_chi2s)}")
 
-        return self.get_physical_params(self.params_logit)
-
-    def get_physical_params(self, params_logit=None):
-        """Convert parameters from logit space to physical space."""
-        if params_logit is None:
-            params_logit = self.params_logit
-        return params_from_logit(params_logit, self.config)
+        return params_from_logit(self.params_logit, self.config)
 
     # NUTS sampling methods
     def sample_with_nuts_uniform(
@@ -744,7 +735,7 @@ class PolarizedBeamFitter:
     def _nuts_init(self):
         """Initialize NUTS at current physical parameter values."""
         # Get the current best-fit parameters in physical space
-        phys = self.get_physical_params(self.params_logit)
+        phys = params_from_logit(self.params_logit, self.config)
 
         # Create numpyro-compatible initialization dictionary
         init_vals = {}

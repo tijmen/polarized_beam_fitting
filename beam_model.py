@@ -17,10 +17,10 @@ from .utils import linear_interp_differentiable
 class BeamModelBase(ABC):
     """Abstract base class for all beam models."""
 
-    def __init__(self, config, x_grid, y_grid, band):
+    def __init__(self, config, y_grid, x_grid, band):
         self.config = config
-        self.x_grid = x_grid
         self.y_grid = y_grid
+        self.x_grid = x_grid
         self.band = band
         self.band_GHz = self.band.replace("GHz", "")
 
@@ -30,14 +30,14 @@ class BeamModelBase(ABC):
         pass
 
     @abstractmethod
-    def evaluate_beam_maps(self, params, dx, dy):
+    def evaluate_beam_maps(self, params, dy, dx):
         """
         Evaluates the T and P beam maps.
 
         Args:
             params (dict): Dictionary containing the beam parameters.
-            dx (float): Source x-offset.
             dy (float): Source y-offset.
+            dx (float): Source x-offset.
 
         Returns:
             tuple: A tuple containing the T and P beam maps.
@@ -57,7 +57,7 @@ class BeamModelBase(ABC):
         """
         pass
 
-    def _calculate_r_map(self, dx, dy):
+    def _calculate_r_map(self, dy, dx):
         """Calculate radial distance map from source position."""
         return jnp.sqrt((self.x_grid - dx) ** 2 + (self.y_grid - dy) ** 2) * self.config.reso_arcmin
 
@@ -70,7 +70,7 @@ class BeamModelBspline(BeamModelBase):
     boundary conditions for the beam profile.
     """
 
-    def __init__(self, config, x_grid, y_grid, band, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
+    def __init__(self, config, y_grid, x_grid, band, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
         """
         Initialize the beam model.
 
@@ -83,7 +83,7 @@ class BeamModelBspline(BeamModelBase):
         knot_spacing_arcmin : float
             Spacing between knots in arcminutes
         """
-        super().__init__(config, x_grid, y_grid, band)
+        super().__init__(config, y_grid, x_grid, band)
         self.spline_k = spline_k
         self.spline_rmax_arcmin = spline_rmax_arcmin
         self.knot_spacing_arcmin = knot_spacing_arcmin
@@ -400,8 +400,8 @@ class BeamModelBspline(BeamModelBase):
 
         return coeffs
 
-    def evaluate_beam_maps(self, params, dx, dy):
-        r_map_arcmin = self._calculate_r_map(dx, dy)
+    def evaluate_beam_maps(self, params, dy, dx):
+        r_map_arcmin = self._calculate_r_map(dy, dx)
         beam_T_map = self.evaluate_beam_profile(params["T_coeffs"], r_map_arcmin)
         beam_P_map = self.evaluate_beam_profile(params["P_coeffs"], r_map_arcmin)
         return beam_T_map, beam_P_map
@@ -448,8 +448,8 @@ class BeamModelGaussian(BeamModelBase):
     A simple Gaussian beam model with separate T and P widths.
     """
 
-    def __init__(self, config, x_grid, y_grid, band):
-        super().__init__(config, x_grid, y_grid, band)
+    def __init__(self, config, y_grid, x_grid, band):
+        super().__init__(config, y_grid, x_grid, band)
         self.param_names = ["T_width_arcmin", "P_width_arcmin"]
         self.n_fittable_coeffs = 2
 
@@ -459,7 +459,7 @@ class BeamModelGaussian(BeamModelBase):
         band_fwhm = self.config.band_fwhm_arcmin[self.band]
         return {"T_width_arcmin": band_fwhm, "P_width_arcmin": band_fwhm}
 
-    def evaluate_beam_maps(self, params, dx, dy):
+    def evaluate_beam_maps(self, params, dy, dx):
         """
         Evaluates the T and P beam maps for the Gaussian model.
         """
@@ -469,7 +469,7 @@ class BeamModelGaussian(BeamModelBase):
         sigma_T_arcmin = T_width_arcmin / (2 * jnp.sqrt(2 * jnp.log(2)))
         sigma_P_arcmin = P_width_arcmin / (2 * jnp.sqrt(2 * jnp.log(2)))
 
-        r_map_arcmin = self._calculate_r_map(dx, dy)
+        r_map_arcmin = self._calculate_r_map(dy, dx)
         r_sq_arcmin = r_map_arcmin**2
 
         beam_T_map = jnp.exp(-0.5 * r_sq_arcmin / sigma_T_arcmin**2)
@@ -511,8 +511,8 @@ class BeamModelBetaPol(BeamModelBase):
     Polarization beam(r) = Bmain_r(r) + beta_pol * (BT_r(r) - Bmain_r(r))
     """
 
-    def __init__(self, config, x_grid, y_grid, band):
-        super().__init__(config, x_grid, y_grid, band)
+    def __init__(self, config, y_grid, x_grid, band):
+        super().__init__(config, y_grid, x_grid, band)
         self.param_names = ["beta_pol"]
         self.n_fittable_coeffs = 1
 
@@ -566,8 +566,8 @@ class BeamModelBetaPol(BeamModelBase):
         # Interpolate the final profile onto the requested r_values
         return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine)
 
-    def evaluate_beam_maps(self, params, dx, dy):
-        r_map_arcmin = self._calculate_r_map(dx, dy)
+    def evaluate_beam_maps(self, params, dy, dx):
+        r_map_arcmin = self._calculate_r_map(dy, dx)
         beam_T_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.BT_r_norm_jax)
         beam_P_map = self.evaluate_beam_profile_P(params, r_map_arcmin)
         return beam_T_map, beam_P_map
@@ -601,8 +601,8 @@ class BeamModelBetaTest(BeamModelBase):
     B_P_model = Bmain_r(r)
     """
 
-    def __init__(self, config, x_grid, y_grid, band):
-        super().__init__(config, x_grid, y_grid, band)
+    def __init__(self, config, y_grid, x_grid, band):
+        super().__init__(config, y_grid, x_grid, band)
         self.param_names = ["beta_T"]
         self.n_fittable_coeffs = 1
 
@@ -656,8 +656,8 @@ class BeamModelBetaTest(BeamModelBase):
         # Interpolate the final profile onto the requested r_values
         return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine)
 
-    def evaluate_beam_maps(self, params, dx, dy):
-        r_map_arcmin = self._calculate_r_map(dx, dy)
+    def evaluate_beam_maps(self, params, dy, dx):
+        r_map_arcmin = self._calculate_r_map(dy, dx)
         beam_T_map = self.evaluate_beam_profile_T(params, r_map_arcmin)
         beam_P_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.Bmain_r_norm_jax)
         return beam_T_map, beam_P_map
@@ -693,8 +693,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
     - No boundary conditions on B-splines
     """
 
-    def __init__(self, config, x_grid, y_grid, band):
-        super().__init__(config, x_grid, y_grid, band)
+    def __init__(self, config, y_grid, x_grid, band):
+        super().__init__(config, y_grid, x_grid, band)
         self.param_names = ["gaussian_sigma_arcmin", "bspline_coeffs_T", "bspline_coeffs_P"]
         self.spline_k = config.spline_k
         self.spline_rmax_arcmin = config.spline_rmax_arcmin
@@ -925,8 +925,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         return total_beam
 
-    def evaluate_beam_maps(self, params, dx, dy):
-        r_map_arcmin = self._calculate_r_map(dx, dy)
+    def evaluate_beam_maps(self, params, dy, dx):
+        r_map_arcmin = self._calculate_r_map(dy, dx)
         beam_T_map = self.evaluate_beam_profile(params["gaussian_sigma_arcmin"], params["bspline_coeffs_T"], r_map_arcmin)
         beam_P_map = self.evaluate_beam_profile(params["gaussian_sigma_arcmin"], params["bspline_coeffs_P"], r_map_arcmin)
         return beam_T_map, beam_P_map
@@ -960,24 +960,25 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         return r_fine, profile_T_fine, profile_P_fine, info
 
 
-def create_beam_model(config, x_grid, y_grid, band):
+def create_beam_model(config, y_grid, x_grid, band):
     """Factory function to create a beam model instance."""
     if config.beam_model_type == "b_spline":
         return BeamModelBspline(
             config,
-            x_grid,
             y_grid,
+            x_grid,
+            band,
             config.spline_k,
             config.spline_rmax_arcmin,
             config.knot_spacing_arcmin,
         )
     elif config.beam_model_type == "gaussian":
-        return BeamModelGaussian(config, x_grid, y_grid, band)
+        return BeamModelGaussian(config, y_grid, x_grid, band)
     elif config.beam_model_type == "betapol":
-        return BeamModelBetaPol(config, x_grid, y_grid, band)  # needs band because it relies on measured beam models
+        return BeamModelBetaPol(config, y_grid, x_grid, band)
     elif config.beam_model_type == "betatest":
-        return BeamModelBetaTest(config, x_grid, y_grid, band)
+        return BeamModelBetaTest(config, y_grid, x_grid, band)
     elif config.beam_model_type == "bsplines_plus_gaussian":
-        return BeamModelBSplinesGaussian(config, x_grid, y_grid, band)
+        return BeamModelBSplinesGaussian(config, y_grid, x_grid, band)
     else:
         raise ValueError(f"Unknown beam model type: {config.beam_model_type}")

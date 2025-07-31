@@ -49,7 +49,7 @@ class BeamFittingConfig:
     # Noise PSD options
     # Choose noise PSD method from available options:
     # 'clusterfinder_psd': Load pre-computed clusterfinder instrument noise PSD from FITS file
-    # 'kx_averaged_individual': Calculate individual noise PSDs using k_x averaging with max heuristic
+    # 'kx_averaged': Calculate individual noise PSDs using k_x averaging with max heuristic
     # 'white_noise_scaled': White noise assumption rescaled to center-excised standard deviation
     # 'ensemble_asd_mean': Average amplitude spectral densities across sources then convert to PSD
     noise_psd_method = "clusterfinder_psd"

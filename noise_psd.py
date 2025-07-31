@@ -9,7 +9,7 @@ differences is whether the noise PSD is fully diagonal (each ky,kx,band,stokes
 is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
-Currently, [clusterfinder_psd, kx_averaged_individual, white_noise_scaled, ensemble_asd_mean]
+Currently, [clusterfinder_psd, kx_averaged, white_noise_scaled, ensemble_asd_mean]
 are fully diagonal, and [multiband_covariance] is only diagonal in Fourier space.
 """
 
@@ -64,18 +64,6 @@ class NoisePSDCalculator(ABC):
         """
         pass
 
-    @abstractmethod
-    def is_individual_psds(self):
-        """
-        Return whether this calculator provides individual PSDs per source.
-
-        Returns:
-        --------
-        bool
-            True if individual PSDs per source, False if global PSD
-        """
-        pass
-
 
 class ClusterfinderPSDCalculator(NoisePSDCalculator):
     """
@@ -121,10 +109,6 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         noise_psd_array[:, :, 0, 2] = psd_resampled * 2  # U (2x noise)
 
         return noise_psd_array
-
-    def is_individual_psds(self):
-        """Return False since this provides a global PSD for all sources."""
-        return False
 
     def _resample_psd_to_target_resolution(self, psd_orig):
         """
@@ -202,9 +186,10 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         return rebinned
 
 
-class KxAveragedIndividualCalculator(NoisePSDCalculator):
+class KxAveragedCalculator(NoisePSDCalculator):
     """
-    Calculate individual noise PSDs using k_x averaging with max heuristic.
+    Calculate individual noise PSDs using k_x averaging with max heuristic,
+    then average over all sources.
 
     This implementation estimates noise by analyzing regions of each map that are
     away from the central source, then averages over k_y for each k_x mode and
@@ -257,14 +242,11 @@ class KxAveragedIndividualCalculator(NoisePSDCalculator):
             noise_psds_list.append(source_noise_psd)
 
         # Average the PSDs across all sources
-        global_noise_psd = np.mean(noise_psds_list, axis=0)
+        noise_psds = np.array(noise_psds_list)
+        global_noise_psd = np.mean(noise_psds, axis=0)
 
-        print("Individual noise PSD calculation complete.")
+        print("Noise PSD calculation complete.")
         return global_noise_psd
-
-    def is_individual_psds(self):
-        """Return False since this provides a global PSD for all sources."""
-        return False
 
     def _calculate_individual_noise_psd(self, map_2d, noise_mask, sentinel_value=1e12):
         """
@@ -313,67 +295,6 @@ class KxAveragedIndividualCalculator(NoisePSDCalculator):
 
         return psd
 
-
-class WhiteNoiseScaledCalculator(NoisePSDCalculator):
-    """
-    White noise assumption rescaled to center-excised standard deviation.
-
-    This implementation assumes white noise but rescales the amplitude based on
-    the empirical standard deviation calculated from center-excised regions of each map.
-    """
-
-    def calculate_noise_psd(self, prepared_data_py):
-        """
-        Calculate white noise PSDs rescaled to empirical standard deviations.
-
-        Parameters:
-        -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source
-
-        Returns:
-        --------
-        list
-            List of arrays with shape (ky,kx,band,stokes) containing white noise PSDs for each source
-        """
-        print("Calculating white noise PSDs rescaled to empirical standard deviations...")
-
-        # Create noise mask with hole in center to avoid the source signal
-        noise_mask = make_apod_mask_center_excised(self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin)
-
-        noise_psds_list = []
-        ny, nx = self.map_shape
-
-        for i, data_fft in enumerate(prepared_data_py):
-            print(f"  Processing source {i + 1}/{len(prepared_data_py)}")
-
-            # Create array for this source: (ky, kx, band, stokes)
-            source_noise_psd = np.zeros((ny, nx, self.n_bands, 3), dtype=np.float32)
-
-            # Process each band and Stokes parameter
-            for band_idx, band in enumerate(self.bands):
-                for stokes_idx, stokes in enumerate(["T", "Q", "U"]):
-                    # Extract data for this band and Stokes parameter
-                    real_map = np.fft.ifft2(data_fft[band][stokes]).real
-                    masked_map = real_map * noise_mask
-                    noise_power_level = np.mean(masked_map**2)
-                    white_psd = np.full(self.map_shape, noise_power_level, dtype=np.float32)
-
-                    # Set high values for k_x~0 modes to avoid division by zero
-                    white_psd[:, 0] *= 100
-                    white_psd[:, -1] *= 100
-                    white_psd[0, 0] *= 100
-
-                    source_noise_psd[:, :, band_idx, stokes_idx] = white_psd
-
-            noise_psds_list.append(source_noise_psd)
-
-        print("White noise PSD calculation complete.")
-        return noise_psds_list
-
-    def is_individual_psds(self):
-        """Return True since this provides individual PSDs per source."""
-        return True
 
 
 class EnsembleAsdMeanCalculator(NoisePSDCalculator):
@@ -442,10 +363,6 @@ class EnsembleAsdMeanCalculator(NoisePSDCalculator):
 
         print("Ensemble ASD averaging complete.")
         return mean_psd
-
-    def is_individual_psds(self):
-        """Return False since this provides a global ensemble-averaged PSD."""
-        return False
 
 
 class MultiBandCovarianceCalculator(NoisePSDCalculator):
@@ -526,10 +443,6 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         print(f"Multi-band covariance calculation complete using {n_sources} sources.")
         return covariance_psd
 
-    def is_individual_psds(self):
-        """Return False since this provides a global covariance matrix."""
-        return False
-
 
 # Factory function to create appropriate noise PSD calculator
 def create_noise_psd_calculator(config, map_shape):
@@ -550,10 +463,8 @@ def create_noise_psd_calculator(config, map_shape):
     """
     if config.noise_psd_method == "clusterfinder_psd":
         return ClusterfinderPSDCalculator(config, map_shape)
-    elif config.noise_psd_method == "kx_averaged_individual":
-        return KxAveragedIndividualCalculator(config, map_shape)
-    elif config.noise_psd_method == "white_noise_scaled":
-        return WhiteNoiseScaledCalculator(config, map_shape)
+    elif config.noise_psd_method == "kx_averaged":
+        return KxAveragedCalculator(config, map_shape)
     elif config.noise_psd_method == "ensemble_asd_mean":
         return EnsembleAsdMeanCalculator(config, map_shape)
     elif config.noise_psd_method == "multiband_covariance":

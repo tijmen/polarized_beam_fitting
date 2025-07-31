@@ -8,6 +8,7 @@ import numpy as np
 import optimistix as optx
 
 from .fitter import PolarizedBeamFitter
+from .utils import params_from_logit
 
 
 def make_bootstrap_objective(get_individual_chi2s_func, weight_array):
@@ -131,7 +132,7 @@ class BootstrapBeamFitter:
                 raise RuntimeError(f"BFGS failed: {optx.RESULTS[sol.result]} after {sol.stats['num_steps']} steps")
 
             # Convert logit parameters back to physical space for storage
-            physical_params = self.base_fitter.get_physical_params(sol.value)
+            physical_params = params_from_logit(sol.value, self.config)
 
             # Compute the final weighted chi2 for this bootstrap sample
             bootstrap_chi2 = float(jnp.sum(self.base_fitter._get_individual_chi2s(sol.value) * weight_array))
@@ -258,7 +259,3 @@ class BootstrapBeamFitter:
     @property
     def maps_numpy(self):
         return self.base_fitter.maps_numpy
-
-    @property
-    def config(self):
-        return self.base_fitter.config

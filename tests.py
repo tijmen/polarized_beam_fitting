@@ -35,7 +35,7 @@ def get_test_config(beam_model_type="gaussian"):
     config.reso_arcmin = 0.1
     config.apodization_width_pix = 5
     config.n_steps = 5000
-    config.noise_psd_method = "white_noise_scaled"
+    config.noise_psd_method = "ensemble_asd_mean"
     config.bands = ["150GHz"]
 
     # Use temporary directories
@@ -132,7 +132,7 @@ class TestBeamModelBspline(unittest.TestCase):
         x_coords = np.arange(-nx // 2, nx // 2)
         self.y_grid = y_coords[:, None] + np.zeros(nx, dtype=np.float32)
         self.x_grid = x_coords[None, :] + np.zeros((ny, 1), dtype=np.float32)
-        self.beam_model = create_beam_model(self.config, self.x_grid, self.y_grid)
+        self.beam_model = create_beam_model(self.config, self.y_grid, self.x_grid)
 
     def test_fit_gaussian_coefficients(self):
         """Verify B-spline basis can accurately model a Gaussian."""
@@ -160,7 +160,6 @@ class TestFitterRecovery(unittest.TestCase):
         mock_load_data.return_value = mock_data
 
         mock_noise_calc = MagicMock()
-        mock_noise_calc.is_individual_psds.return_value = False
         mock_noise_calc.calculate_noise_psd.return_value = create_mock_noise_psd(config)
         mock_create_noise.return_value = mock_noise_calc
 
