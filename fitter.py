@@ -142,7 +142,8 @@ class PolarizedBeamFitter:
         def _chi2_global(beams, yoff, xoff, flux):
             return vmap_chi2(beams, yoff, xoff, flux, self.gaussfit_initial_amp_jax_padded, self.maps_fft_jax_padded, self.noise_psd_jax).sum()
 
-        self._chi2_global = jax.jit(_chi2_global, in_shardings=(Rep, Sh, Sh, Sh), out_shardings=None)
+        #self._chi2_global = jax.jit(_chi2_global, in_shardings=(Rep, Sh, Sh, Sh), out_shardings=None)
+        self._chi2_global = jax.jit(_chi2_global)
 
     def _pad_data_for_devices(self):
         """Pad data to be evenly divisible by number of devices."""
@@ -192,7 +193,8 @@ class PolarizedBeamFitter:
         # Initialize beam parameters for each band
         for band in self.config.bands:
             beam_params = self.beam_models[band].get_initial_physical_params()
-            params_physical["beams"].append(beam_params)
+            beam_params_jax = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), beam_params)
+            params_physical["beams"].append(beam_params_jax)
 
         # Initialize source parameters using defaults from config
         yoff_init, xoff_init, flux_init = self.config.source_inits
@@ -617,7 +619,8 @@ class PolarizedBeamFitter:
         )
 
         rng_key = jax.random.PRNGKey(seed)
-        mcmc.run(rng_key, init_strategy=self._nuts_init())
+        with jax.sharding.use_mesh(self.mesh):
+            mcmc.run(rng_key, init_strategy=self._nuts_init())
         flat_samples = mcmc.get_samples(group_by_chain=False)
 
         # Unflatten samples back into the structured pytree
@@ -658,9 +661,11 @@ class PolarizedBeamFitter:
 
     def _nuts_likelihood(self, params_phys):
         """Likelihood function for NUTS that works directly with physical parameters."""
-        yoff = params_phys["sources"]["yoff"]
-        xoff = params_phys["sources"]["xoff"]
-        flux = params_phys["sources"]["flux_correction"]
+        # Explicitly shard the arrays to match the jit specification
+        Sh = jax.sharding.PartitionSpec("devices")
+        yoff = jax.device_put(params_phys["sources"]["yoff"], jax.sharding.NamedSharding(self.mesh, Sh))
+        xoff = jax.device_put(params_phys["sources"]["xoff"], jax.sharding.NamedSharding(self.mesh, Sh))
+        flux = jax.device_put(params_phys["sources"]["flux_correction"], jax.sharding.NamedSharding(self.mesh, Sh))
 
         # This call assumes _chi2_global can be JITted with these inputs
         total_chi2 = self._chi2_global(

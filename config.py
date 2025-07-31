@@ -61,7 +61,7 @@ class BeamFittingConfig:
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
 
     # Optimization parameters
-    n_steps = 15000
+    n_steps = 5000
     max_sources = None  # set to a finite number to only calculate the likelihood over a few sources e.g. for testing
     pol_focus = 1.0  # Factor to upweight the importance of polarization likelihood
 
