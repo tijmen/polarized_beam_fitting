@@ -82,8 +82,8 @@ class PolarizedBeamFitter:
         ny, nx = self.map_shape
         y_coords = jnp.arange(-ny // 2, ny // 2)
         x_coords = jnp.arange(-nx // 2, nx // 2)
-        self.y_grid = jax.device_put(y_coords[:, None] + jnp.zeros(nx, dtype=jnp.float32))
-        self.x_grid = jax.device_put(x_coords[None, :] + jnp.zeros((ny, 1), dtype=jnp.float32))
+        self.y_grid = jax.device_put(y_coords[:, None] + jnp.zeros(nx, dtype=jnp.float32)) # check if this is correct
+        self.x_grid = jax.device_put(x_coords[None, :] + jnp.zeros((ny, 1), dtype=jnp.float32)) # check if this is correct
 
         # Create separate beam models for each band
         self.beam_models = {}
@@ -200,7 +200,7 @@ class PolarizedBeamFitter:
         yoff_init, xoff_init, flux_init = self.config.source_inits
 
         params_physical["sources"] = {
-            "yoff": jnp.full((self.n_src_padded,), yoff_init, dtype=jnp.float32),
+            "yoff": jnp.full((self.n_src_padded,), yoff_init, dtype=jnp.float32), # TODO: set this to the gaussian fit value, and remove yoff_init and xoff_init from the config
             "xoff": jnp.full((self.n_src_padded,), xoff_init, dtype=jnp.float32),
             "flux_correction": jnp.full((self.n_src_padded, self.n_bands, 3), flux_init, dtype=jnp.float32),
         }
