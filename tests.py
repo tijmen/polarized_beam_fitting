@@ -17,7 +17,7 @@ from unittest.mock import patch, MagicMock
 import tempfile
 
 from .utils import make_apodization_mask
-from .beam_model import BeamModelBspline, BeamModelBetaPol
+from .beam_model import BeamModelBspline, BeamModelBetaPol, create_beam_model
 from .fitter import PolarizedBeamFitter
 from .config import BeamFittingConfig
 
@@ -104,7 +104,7 @@ def generate_mock_data(config, n_sources=10):
     # Mock data - these aren't used in the optimization but need to exist
     raw_maps = np.zeros_like(maps_numpy)
     normalized_qu_templates = np.zeros((shape[0], shape[1], n_bands, 2))  # Only Q, U
-    source_ids = [f"mock_source_{i+1}" for i in range(n_sources)]
+    source_ids = np.array([f"mock_source_{i+1}" for i in range(n_sources)])
     
     return (gaussfit_yoff, gaussfit_xoff, gaussfit_initial_amp, raw_maps, 
             normalized_qu_templates, maps_numpy, maps_fft_numpy, source_ids, n_sources)
@@ -127,16 +127,12 @@ class TestBeamModelBspline(unittest.TestCase):
     def setUp(self):
         self.config = get_test_config(beam_model_type="b_spline")
         shape = (self.config.map_size_pix, self.config.map_size_pix)
-        y, x = np.ogrid[-shape[0] // 2 : shape[0] // 2, -shape[1] // 2 : shape[1] // 2]
-        self.x_grid, self.y_grid = np.meshgrid(x, y)
-        self.beam_model = BeamModelBspline(
-            config=self.config,
-            x_grid=self.x_grid,
-            y_grid=self.y_grid,
-            spline_k=self.config.spline_k,
-            spline_rmax_arcmin=self.config.spline_rmax_arcmin,
-            knot_spacing_arcmin=self.config.knot_spacing_arcmin,
-        )
+        ny, nx = shape
+        y_coords = np.arange(-ny // 2, ny // 2)
+        x_coords = np.arange(-nx // 2, nx // 2)
+        self.y_grid = y_coords[:, None] + np.zeros(nx, dtype=np.float32)
+        self.x_grid = x_coords[None, :] + np.zeros((ny, 1), dtype=np.float32)
+        self.beam_model = create_beam_model(self.config, self.x_grid, self.y_grid)
 
     def test_fit_gaussian_coefficients(self):
         """Verify B-spline basis can accurately model a Gaussian."""
@@ -180,10 +176,10 @@ class TestFitterRecovery(unittest.TestCase):
             mock_load_data, mock_create_noise, "gaussian"
         )
         
-        # Check beam parameters
+        # Check beam parameters (first band)
         true_fwhm = fitter.config.band_fwhm_arcmin[fitter.config.bands[0]]
-        self.assertAlmostEqual(best_fit_params["beam"]["T_width_arcmin"], true_fwhm, delta=0.05)
-        self.assertAlmostEqual(best_fit_params["beam"]["P_width_arcmin"], true_fwhm, delta=0.05)
+        self.assertAlmostEqual(best_fit_params["beams"][0]["T_width_arcmin"], true_fwhm, delta=0.05)
+        self.assertAlmostEqual(best_fit_params["beams"][0]["P_width_arcmin"], true_fwhm, delta=0.05)
         
         print("✓ Gaussian recovery successful.")
 
@@ -197,13 +193,14 @@ class TestFitterRecovery(unittest.TestCase):
         
         # Check that profiles are reasonable (not exact due to noise and optimization)
         true_fwhm = fitter.config.band_fwhm_arcmin[fitter.config.bands[0]]
-        true_profile = fitter.beam_model.evaluate_beam_profile(
-            fitter.beam_model.fit_gaussian_coefficients(true_fwhm), 
-            fitter.beam_model.r_fine_jax
+        beam_model = fitter.beam_models[fitter.config.bands[0]]
+        true_profile = beam_model.evaluate_beam_profile(
+            beam_model.fit_gaussian_coefficients(true_fwhm), 
+            beam_model.r_fine_jax
         )
-        fit_profile_T = fitter.beam_model.evaluate_beam_profile(
-            best_fit_params["beam"]["beam_T_coeffs"], 
-            fitter.beam_model.r_fine_jax
+        fit_profile_T = beam_model.evaluate_beam_profile(
+            best_fit_params["beams"][0]["T_coeffs"], 
+            beam_model.r_fine_jax
         )
         
         max_dev = np.max(np.abs(true_profile - fit_profile_T))

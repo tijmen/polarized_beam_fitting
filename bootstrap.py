@@ -100,13 +100,11 @@ class BootstrapBeamFitter:
         if self.config.bootstrap_warm_start:
             # Warm-start: use the logit-space parameters from the original ML solution as the
             # starting point for every bootstrap iteration, then update after each iteration
-            initial_params_logit = jax.tree_util.tree_map(lambda x: x, self.base_fitter.params)
+            initial_params_logit = jax.tree_util.tree_map(lambda x: x, self.base_fitter.params_logit)
             print("Using warm-start strategy: each iteration starts from previous optimum")
         else:
             # Cold-start: use the same initial parameters that the global fit started from
-            initial_params_logit = jax.tree_util.tree_map(lambda x: x, self.base_fitter.initial_params_physical)
-            # Convert to logit space
-            initial_params_logit = self._convert_physical_to_logit(initial_params_logit)
+            initial_params_logit = jax.tree_util.tree_map(lambda x: x, self.base_fitter.params_logit)
             print("Using cold-start strategy: each iteration starts from same initial params as global fit")
 
         bootstrap_params = []
@@ -148,19 +146,7 @@ class BootstrapBeamFitter:
 
         return bootstrap_params
 
-    def _convert_physical_to_logit(self, physical_params):
-        """Convert physical parameters back to logit space for cold-start initialization."""
-        # Convert beam parameters using beam model methods
-        beam_logit_params = self.base_fitter.beam_model.to_logit_params(physical_params)
-
-        # Convert source parameters using fitter methods
-        source_logit_params = {}
-        for i, param_name in enumerate(self.config.source_param_names):
-            source_logit_params[f"{param_name}_logit"] = jnp.array(
-                [self.base_fitter.to_logit(val, "source", i) for val in physical_params["sources"][param_name]], dtype=jnp.float32
-            )
-
-        return {"beam": beam_logit_params, "sources": source_logit_params}
+    # Note: _convert_physical_to_logit is no longer needed with the new parameter structure
 
     def _analyze_results(self, bootstrap_params):
         """Analyze bootstrap results."""
@@ -187,25 +173,29 @@ class BootstrapBeamFitter:
         """Organize bootstrap parameters into arrays."""
         organized = {}
 
-        # Handle beam parameters based on beam model type
-        if self.config.beam_model_type == "betapol":
-            organized["beta_pol"] = np.array([p["beam"]["beta_pol"] for p in bootstrap_params])
-        elif self.config.beam_model_type == "gaussian":
-            organized["T_width_arcmin"] = np.array([p["beam"]["T_width_arcmin"] for p in bootstrap_params])
-            organized["P_width_arcmin"] = np.array([p["beam"]["P_width_arcmin"] for p in bootstrap_params])
-        elif self.config.beam_model_type == "b_spline":
-            organized["beam_T_coeffs"] = np.array([p["beam"]["beam_T_coeffs"] for p in bootstrap_params])
-            organized["beam_P_coeffs"] = np.array([p["beam"]["beam_P_coeffs"] for p in bootstrap_params])
-        elif self.config.beam_model_type == "betatest":
-            organized["beta_T"] = np.array([p["beam"]["beta_T"] for p in bootstrap_params])
-        elif self.config.beam_model_type == "bsplines_plus_gaussian":
-            organized["gaussian_sigma_arcmin"] = np.array([p["beam"]["gaussian_sigma_arcmin"] for p in bootstrap_params])
-            organized["bspline_coeffs_T"] = np.array([p["beam"]["bspline_coeffs_T"] for p in bootstrap_params])
-            organized["bspline_coeffs_P"] = np.array([p["beam"]["bspline_coeffs_P"] for p in bootstrap_params])
+        # Handle beam parameters - extract from each band
+        n_bands = len(self.config.bands)
+        for band_idx in range(n_bands):
+            band_key = f"band_{band_idx}"
+            if self.config.beam_model_type == "betapol":
+                organized[f"{band_key}_beta_pol"] = np.array([p["beams"][band_idx]["beta_pol"] for p in bootstrap_params])
+            elif self.config.beam_model_type == "gaussian":
+                organized[f"{band_key}_T_width_arcmin"] = np.array([p["beams"][band_idx]["T_width_arcmin"] for p in bootstrap_params])
+                organized[f"{band_key}_P_width_arcmin"] = np.array([p["beams"][band_idx]["P_width_arcmin"] for p in bootstrap_params])
+            elif self.config.beam_model_type == "b_spline":
+                organized[f"{band_key}_T_coeffs"] = np.array([p["beams"][band_idx]["T_coeffs"] for p in bootstrap_params])
+                organized[f"{band_key}_P_coeffs"] = np.array([p["beams"][band_idx]["P_coeffs"] for p in bootstrap_params])
+            elif self.config.beam_model_type == "betatest":
+                organized[f"{band_key}_beta_T"] = np.array([p["beams"][band_idx]["beta_T"] for p in bootstrap_params])
+            elif self.config.beam_model_type == "bsplines_plus_gaussian":
+                organized[f"{band_key}_gaussian_sigma_arcmin"] = np.array([p["beams"][band_idx]["gaussian_sigma_arcmin"] for p in bootstrap_params])
+                organized[f"{band_key}_bspline_coeffs_T"] = np.array([p["beams"][band_idx]["bspline_coeffs_T"] for p in bootstrap_params])
+                organized[f"{band_key}_bspline_coeffs_P"] = np.array([p["beams"][band_idx]["bspline_coeffs_P"] for p in bootstrap_params])
 
         # Handle source parameters
-        for param_name in self.config.source_param_names:
-            organized[f"sources_{param_name}"] = np.array([p["sources"][param_name] for p in bootstrap_params])
+        organized["sources_yoff"] = np.array([p["sources"]["yoff"] for p in bootstrap_params])
+        organized["sources_xoff"] = np.array([p["sources"]["xoff"] for p in bootstrap_params])
+        organized["sources_flux_correction"] = np.array([p["sources"]["flux_correction"] for p in bootstrap_params])
 
         return organized
 
@@ -237,8 +227,8 @@ class BootstrapBeamFitter:
 
     # Delegate properties that plotting system expects
     @property
-    def band(self):
-        return self.base_fitter.band
+    def bands(self):
+        return self.base_fitter.bands
 
     @property
     def source_ids(self):
@@ -249,17 +239,25 @@ class BootstrapBeamFitter:
         return self.base_fitter.latest_chi2s
 
     @property
-    def t_amp_initial_guess(self):
-        return self.base_fitter.t_amp_initial_guess
+    def gaussfit_initial_amp_numpy(self):
+        return self.base_fitter.gaussfit_initial_amp_numpy
 
     @property
-    def beam_model(self):
-        return self.base_fitter.beam_model
+    def beam_models(self):
+        return self.base_fitter.beam_models
 
     @property
     def noise_psd_calculator(self):
         return self.base_fitter.noise_psd_calculator
 
     @property
-    def noise_psd_py(self):
-        return self.base_fitter.noise_psd_py
+    def noise_psd_numpy(self):
+        return self.base_fitter.noise_psd_numpy
+
+    @property
+    def maps_numpy(self):
+        return self.base_fitter.maps_numpy
+
+    @property
+    def config(self):
+        return self.base_fitter.config

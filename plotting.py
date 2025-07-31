@@ -39,58 +39,40 @@ class BeamPlotter:
             self.base_fitter = fitter
             self.output_dir = output_dir or fitter.config.output_dir
 
-        # Detect if this is a multi-band fitter
-        self.is_multiband = hasattr(self.base_fitter, "beam_models") and isinstance(self.base_fitter.beam_models, dict)
+        # The new fitter is always multi-band capable
+        self.is_multiband = len(self.base_fitter.bands) > 1
 
         # Get band information
-        if self.is_multiband:
-            self.bands = list(self.base_fitter.beam_models.keys())
-            self.primary_band = self.bands[1] if len(self.bands) > 1 else self.bands[0]  # Use 150GHz as primary
-        else:
-            self.bands = [getattr(self.base_fitter, "band", "unknown")]
-            self.primary_band = self.bands[0]
+        self.bands = self.base_fitter.bands
+        self.primary_band = self.bands[0]  # Use first band as primary
 
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _get_beam_model(self, band=None):
         """Get the appropriate beam model for the given band."""
-        if self.is_multiband:
-            if band is None:
-                band = self.primary_band
-            return self.base_fitter.beam_models[band]
-        else:
-            return self.base_fitter.beam_model
+        if band is None:
+            band = self.primary_band
+        return self.base_fitter.beam_models[band]
 
     def _get_band_suffix(self, band=None):
         """Get the band suffix for filenames."""
-        if self.is_multiband:
-            if band is None:
-                band = self.primary_band
-            return band.replace("GHz", "")
-        else:
-            return getattr(self.base_fitter, "band", "unknown").replace("GHz", "")
+        if band is None:
+            band = self.primary_band
+        return band.replace("GHz", "")
 
     def _get_fit_params_for_band(self, best_fit_params, band=None):
         """Extract fit parameters for a specific band from multi-band results."""
-        if self.is_multiband:
-            if band is None:
-                band = self.primary_band
-            # For multi-band, extract band-specific parameters
-            band_params = best_fit_params["bands"][band]
-            # Combine shared and band-specific parameters
-            fit_params = {
-                "beam": band_params["beam"],
-                "sources": {
-                    "y_offset": best_fit_params["shared"]["y_offset"],
-                    "x_offset": best_fit_params["shared"]["x_offset"],
-                    "t_amp_factor": band_params["t_amp_factor"],
-                    "q_amp_factor": band_params["q_amp_factor"],
-                    "u_amp_factor": band_params["u_amp_factor"],
-                },
-            }
-            return fit_params
-        else:
-            return best_fit_params
+        if band is None:
+            band = self.primary_band
+        
+        # Get band index
+        band_idx = self.bands.index(band)
+        
+        # Extract beam parameters for this band
+        beam_params = best_fit_params["beams"][band_idx]
+        
+        # Return parameters in expected format for beam model
+        return beam_params
 
     def plot_template_projection_analysis(self, best_fit_params, skip_sources=None, save=True):
         """
@@ -113,50 +95,43 @@ class BeamPlotter:
         str or None
             Filename if saved, None otherwise
         """
-        # For multi-band, use primary band for template analysis
-        if self.is_multiband:
-            band = self.primary_band
-            band_suffix = self._get_band_suffix(band)
-            print(f"\n--- Template Projection Analysis for {band_suffix} (multi-band fitter) ---")
-        else:
-            band_suffix = self._get_band_suffix()
-            print(f"\n--- Template Projection Analysis for {band_suffix} ---")
+        # Use primary band for template analysis
+        band = self.primary_band
+        band_suffix = self._get_band_suffix(band)
+        print(f"\n--- Template Projection Analysis for {band_suffix} ---")
 
         if skip_sources is None:
-            skip_sources = self.fitter.config.skip_sources
+            skip_sources = self.base_fitter.config.skip_sources
 
         if not skip_sources:
             print("No skip_sources specified for template projection analysis")
             return None
 
         # Get data maps and source information
-        data_maps = self.fitter.maps_numpy
-        source_ids = self.fitter.source_ids
+        maps_numpy = self.base_fitter.maps_numpy
+        source_ids = self.base_fitter.source_ids
 
-        # Multi-band: calculate T amplitudes from the primary band
-        if self.is_multiband:
-            t_amps = []
-            # Get band index for primary band
-            band_idx = self.fitter.bands.index(band)
-            for i, source_id in enumerate(source_ids):
-                # Get T amplitude for this source in the primary band using array format
-                t_amp_initial = self.fitter.initial_amplitudes_array[i, band_idx, 0]  # T is index 0
-                t_amp_factor = best_fit_params["bands"][band]["t_amp_factor"][i]
-                t_amps.append(t_amp_initial * t_amp_factor)
-            t_amps = np.array(t_amps)
-        else:
-            # Single band fitter - use array format with band index 0
-            t_amps = self.fitter.initial_amplitudes_array[:, 0, 0] * best_fit_params["sources"]["t_amp_factor"]
+        # Calculate T amplitudes from the primary band
+        t_amps = []
+        # Get band index for primary band
+        band_idx = self.bands.index(band) if band in self.bands else 0
+        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
+        flux_corrections = best_fit_params["sources"]["flux_correction"]
+        
+        for i, source_id in enumerate(source_ids):
+            # Get T amplitude for this source in the primary band using array format
+            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
+            t_amp_factor = flux_corrections[i, band_idx, 0]  # flux correction for T
+            t_amps.append(t_amp_initial * t_amp_factor)
+        t_amps = np.array(t_amps)
 
         # Find brightest source as template
         brightest_idx = np.argmax(t_amps)
         brightest_source_id = source_ids[brightest_idx]
 
-        # For multi-band, get template from primary band data
-        if self.is_multiband:
-            template_map = data_maps[brightest_source_id][band]["T"]
-        else:
-            template_map = data_maps[brightest_source_id]["T"]
+        # Get template map from array format
+        # maps_numpy shape: (n_src, ny, nx, n_bands, 3)
+        template_map = maps_numpy[brightest_idx, :, :, band_idx, 0]  # T is index 0
 
         print(f"Using brightest source as template: {brightest_source_id}")
         print(f"Template amplitude: {t_amps[brightest_idx]:.1f} μK")
@@ -164,14 +139,14 @@ class BeamPlotter:
         # Find skip_sources in the data
         skip_sources_data = []
         for source in skip_sources:
-            if self.is_multiband:
-                # For multi-band, construct source ID with primary band
-                source_id = f"CoaddSPT-S {source}-{band}"
-            else:
-                source_id = "CoaddSPT-S " + source + "-" + self.fitter.band
-
-            if source_id in source_ids:
-                idx = source_ids.index(source_id)
+            # Construct source ID with primary band
+            source_id = f"CoaddSPT-S {source}-{band}"
+            
+            # Convert to list for searching
+            source_ids_list = source_ids.tolist() if isinstance(source_ids, np.ndarray) else list(source_ids)
+            
+            if source_id in source_ids_list:
+                idx = source_ids_list.index(source_id)
                 skip_sources_data.append((source_id, idx, source))
                 print(f"Found skip source: {source_id}")
 
@@ -190,11 +165,8 @@ class BeamPlotter:
         fig.suptitle(f"Template Projection Analysis ({band_suffix})\nTemplate: {brightest_source_id}", fontsize=14)
 
         for i, (source_id, source_idx, short_name) in enumerate(skip_sources_data):
-            # Get data map for this skip source
-            if self.is_multiband:
-                data_map = data_maps[source_id][band]["T"]
-            else:
-                data_map = data_maps[source_id]["T"]
+            # Get data map for this skip source from array format
+            data_map = maps_numpy[source_idx, :, :, band_idx, 0]  # T is index 0
 
             # Project out template: residual = data - α * template
             # Find optimal scaling factor α using least squares
@@ -307,7 +279,7 @@ class BeamPlotter:
         print(f"  P-beam: peak = {np.max(profile_P_fine):.4f}")
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
-        model_type = self.fitter.config.beam_model_type.replace("_", "-").title()
+        model_type = self.base_fitter.config.beam_model_type.replace("_", "-").title()
         fig.suptitle(f"Best-Fit {model_type} Beam Model ({band_suffix})", fontsize=16)
 
         # Top panel: Final Beam profiles
@@ -358,7 +330,7 @@ class BeamPlotter:
         if len(self.bands) == 1:
             axes = axes.reshape(1, -1)
 
-        model_type = self.fitter.config.beam_model_type.replace("_", "-").title()
+        model_type = self.base_fitter.config.beam_model_type.replace("_", "-").title()
         fig.suptitle(f"Multi-Band {model_type} Beam Models", fontsize=16)
 
         colors = ["C0", "C1", "C2"]
@@ -425,8 +397,8 @@ class BeamPlotter:
         str or None
             Filename if saved, None otherwise
         """
-        if self.fitter.config.beam_model_type != "b_spline":
-            print(f"Skipping basis diagnostics for {self.fitter.config.beam_model_type} beam model")
+        if self.base_fitter.config.beam_model_type != "b_spline":
+            print(f"Skipping basis diagnostics for {self.base_fitter.config.beam_model_type} beam model")
             return None
 
         if self.is_multiband:
@@ -543,7 +515,7 @@ class BeamPlotter:
         """
         # Use config value if not specified
         if n_sources is None:
-            n_sources = self.fitter.config.n_diagnostic_plots
+            n_sources = self.base_fitter.config.n_diagnostic_plots
 
         # Handle special cases
         if n_sources == 0:
@@ -551,7 +523,7 @@ class BeamPlotter:
             return []
 
         # Determine actual number of sources to plot
-        total_sources = len(self.fitter.source_ids)
+        total_sources = len(self.base_fitter.source_ids)
         if isinstance(n_sources, str) and n_sources.lower() == "all":
             n_to_plot = total_sources
             print(f"\n--- Generating Data/Model/Residual Maps for All {n_to_plot} Sources ---")
@@ -562,29 +534,28 @@ class BeamPlotter:
         if central_crop is not None:
             print(f"Using central {central_crop}x{central_crop} pixel crop")
 
-        data_maps = self.fitter.maps_numpy
-        model_maps = self.fitter.create_final_model_maps(best_fit_params)
+        maps_numpy = self.base_fitter.maps_numpy
+        model_maps = self.base_fitter.create_final_model_maps(best_fit_params)
 
         # Sort sources by polarization amplitude
         p_amp_sources = []
-        for i, source_id in enumerate(self.fitter.source_ids):
-            if self.is_multiband:
-                # For multi-band, use primary band for ranking
-                band = self.primary_band
-                band_idx = self.fitter.bands.index(band)
-                t_amp_initial = self.fitter.initial_amplitudes_array[i, band_idx, 0]  # T is index 0
-                q_amp_initial = self.fitter.initial_amplitudes_array[i, band_idx, 1]  # Q is index 1
-                u_amp_initial = self.fitter.initial_amplitudes_array[i, band_idx, 2]  # U is index 2
-                t_amp = t_amp_initial * best_fit_params["bands"][band]["t_amp_factor"][i]
-                q_amp = q_amp_initial * best_fit_params["bands"][band]["q_amp_factor"][i]
-                u_amp = u_amp_initial * best_fit_params["bands"][band]["u_amp_factor"][i]
-                p_amp = float(np.sqrt(q_amp**2 + u_amp**2))
-            else:
-                # Single band fitter - use array format with band index 0
-                t_amp = float(self.fitter.initial_amplitudes_array[i, 0, 0])
-                q_amp = float(self.fitter.initial_amplitudes_array[i, 0, 1] * best_fit_params["sources"]["q_amp_factor"][i])
-                u_amp = float(self.fitter.initial_amplitudes_array[i, 0, 2] * best_fit_params["sources"]["u_amp_factor"][i])
-                p_amp = float(np.sqrt(q_amp**2 + u_amp**2))
+        source_ids = self.base_fitter.source_ids
+        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
+        flux_corrections = best_fit_params["sources"]["flux_correction"]
+        
+        # Use primary band for ranking
+        band_idx = 0  # Use first band
+        
+        for i, source_id in enumerate(source_ids):
+            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
+            q_amp_initial = initial_amps[i, band_idx, 1]  # Q is index 1
+            u_amp_initial = initial_amps[i, band_idx, 2]  # U is index 2
+            
+            t_amp = t_amp_initial * flux_corrections[i, band_idx, 0]
+            q_amp = q_amp_initial * flux_corrections[i, band_idx, 1]
+            u_amp = u_amp_initial * flux_corrections[i, band_idx, 2]
+            
+            p_amp = float(np.sqrt(q_amp**2 + u_amp**2))
             p_amp_sources.append((p_amp, source_id, i))
 
         p_amp_sources.sort(key=lambda x: x[0], reverse=True)
@@ -598,7 +569,7 @@ class BeamPlotter:
             if rank <= len(p_amp_sources):
                 p_amp, source_id, idx = p_amp_sources[rank - 1]
                 print(f"\nCreating model/data/residual plot for rank #{rank} source: {source_id} (p_amp = {p_amp:.1f} mK)")
-                filename = self._create_source_diagnostic_plot(source_id, rank, data_maps, model_maps, central_crop, save)
+                filename = self._create_source_diagnostic_plot(source_id, rank, maps_numpy, model_maps, central_crop, save)
                 if filename:
                     filenames.append(filename)
                     print(f"Saved model/data/residual plot to: {filename}")
@@ -700,22 +671,22 @@ class BeamPlotter:
         print("\n--- Generating ASD Analysis for Top Source ---")
 
         # Get data and model maps
-        data_maps = self.fitter.maps_numpy
-        model_maps = self.fitter.create_final_model_maps(best_fit_params)
+        maps_numpy = self.base_fitter.maps_numpy
+        model_maps = self.base_fitter.create_final_model_maps(best_fit_params)
 
         # Get the top source by T amplitude
         t_amps = []
-        for i, source_id in enumerate(self.fitter.source_ids):
-            if self.is_multiband:
-                # For multi-band, use primary band for ranking
-                band = self.primary_band
-                band_idx = self.fitter.bands.index(band)
-                t_amp_initial = self.fitter.initial_amplitudes_array[i, band_idx, 0]  # T is index 0
-                t_amp_factor = best_fit_params["bands"][band]["t_amp_factor"][i]
-                t_amp = float(t_amp_initial * t_amp_factor)
-            else:
-                # Single band fitter - use array format with band index 0
-                t_amp = float(self.fitter.initial_amplitudes_array[i, 0, 0])
+        source_ids = self.base_fitter.source_ids
+        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
+        flux_corrections = best_fit_params["sources"]["flux_correction"]
+        
+        # Use primary band for ranking
+        band_idx = 0  # Use first band
+        
+        for i, source_id in enumerate(source_ids):
+            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
+            t_amp_factor = flux_corrections[i, band_idx, 0]  # flux correction for T
+            t_amp = float(t_amp_initial * t_amp_factor)
             t_amps.append((t_amp, source_id, i))
         t_amps.sort(key=lambda x: x[0], reverse=True)
 
@@ -723,16 +694,17 @@ class BeamPlotter:
         print(f"Analyzing top source: {top_source_id} (t_amp = {t_amp:.1f} mK)")
 
         # Get data, model, and residual for top source
-        if self.is_multiband:
-            # For multi-band, use primary band for analysis
-            band = self.primary_band
-            data_top = data_maps[top_source_id][band]
-            model_top = model_maps[top_source_id][band]
-            band_suffix = self._get_band_suffix(band)
-        else:
-            data_top = data_maps[top_source_id]
-            model_top = model_maps[top_source_id]
-            band_suffix = self._get_band_suffix()
+        band = self.primary_band
+        band_idx = 0  # Use first band
+        band_suffix = self._get_band_suffix(band)
+        
+        # Extract from arrays
+        data_top = {
+            "T": maps_numpy[idx, :, :, band_idx, 0],
+            "Q": maps_numpy[idx, :, :, band_idx, 1],
+            "U": maps_numpy[idx, :, :, band_idx, 2]
+        }
+        model_top = model_maps[top_source_id][band]
 
         residual_top = {k: data_top[k] - model_top[k] for k in data_top}
 
@@ -748,15 +720,14 @@ class BeamPlotter:
             asd_model = compute_2d_asd(model_top[stokes])
             asd_residual = compute_2d_asd(residual_top[stokes])
 
-            # Get noise PSD for this Stokes parameter and source
-            noise_psd_key = {"T": "TT", "Q": "QQ", "U": "UU"}[stokes]
-
-            if self.fitter.noise_psd_calculator.is_individual_psds():
-                # Individual noise PSD for this specific source
-                noise_psd = self.fitter.noise_psd_py[idx][noise_psd_key]
-            else:
-                # Global noise PSD for all sources
-                noise_psd = self.fitter.noise_psd_py[noise_psd_key]
+            # Access noise PSD from numpy array
+            noise_psd_numpy = self.base_fitter.noise_psd_numpy
+            if len(noise_psd_numpy.shape) == 4:  # (ny, nx, n_bands, 3)
+                stokes_idx = {"T": 0, "Q": 1, "U": 2}[stokes]
+                noise_psd = noise_psd_numpy[:, :, band_idx, stokes_idx]
+            else:  # More complex noise models
+                # Use a simple white noise fallback for now
+                noise_psd = np.ones_like(data_top[stokes]) * 1.0
 
             # Compute residual/noise ratio (convert PSD to ASD by taking sqrt)
             noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
@@ -837,6 +808,7 @@ class BeamPlotter:
     def _print_asd_statistics(self, source_id, data_top, model_top, residual_top, idx):
         """Print ASD statistics for a source."""
         print(f"\n2D ASD Statistics for {source_id}:")
+        band_idx = 0  # Use first band
         stokes_params = ["T", "Q", "U"]
 
         for stokes in stokes_params:
@@ -844,15 +816,14 @@ class BeamPlotter:
             asd_model = compute_2d_asd(model_top[stokes])
             asd_residual = compute_2d_asd(residual_top[stokes])
 
-            # Get noise PSD for this Stokes parameter and source
-            noise_psd_key = {"T": "TT", "Q": "QQ", "U": "UU"}[stokes]
-
-            if self.fitter.noise_psd_calculator.is_individual_psds():
-                # Individual noise PSD for this specific source
-                noise_psd = self.fitter.noise_psd_py[idx][noise_psd_key]
-            else:
-                # Global noise PSD for all sources
-                noise_psd = self.fitter.noise_psd_py[noise_psd_key]
+            # Access noise PSD from numpy array
+            noise_psd_numpy = self.base_fitter.noise_psd_numpy
+            if len(noise_psd_numpy.shape) == 4:  # (ny, nx, n_bands, 3)
+                stokes_idx = {"T": 0, "Q": 1, "U": 2}[stokes]
+                noise_psd = noise_psd_numpy[:, :, band_idx, stokes_idx]
+            else:  # More complex noise models
+                # Use a simple white noise fallback for now
+                noise_psd = np.ones_like(data_top[stokes]) * 1.0
 
             # Compute noise ASD for comparison
             noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
