@@ -4,12 +4,12 @@ Utility functions for polarized beam fitting.
 Contains helper functions for data processing, apodization, and coordinate transformations.
 """
 
-import numpy as np
+import os
+
 import jax
 import jax.numpy as jnp
-import re
-import os
-from scipy.special import j0
+import numpy as np
+from scipy.special import j0  # pylint: disable=no-name-in-module
 
 
 def make_apodization_mask(map_shape, width):
@@ -65,12 +65,10 @@ def make_apod_mask_center_excised(map_shape, apod_width, hole_radius_arcmin, res
     # Start with regular apodization mask
     mask = make_apodization_mask(map_shape, apod_width)
 
-    # Create coordinate grids centered on the map
+    # Create coordinate grids and calculate radial distance
     y_coords = np.arange(-ny // 2, ny // 2)
     x_coords = np.arange(-nx // 2, nx // 2)
     y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing="ij")
-
-    # Calculate radial distance in arcminutes
     r_arcmin = np.sqrt(x_grid**2 + y_grid**2) * reso_arcmin
 
     # Create smooth hole using cosine taper
@@ -81,22 +79,19 @@ def make_apod_mask_center_excised(map_shape, apod_width, hole_radius_arcmin, res
     hole_mask = np.ones_like(r_arcmin)
 
     # Inner region (complete hole)
-    inner_region = r_arcmin <= (hole_radius_arcmin - taper_width_pix * reso_arcmin)
-    hole_mask[inner_region] = 0.0
+    inner_boundary = hole_radius_arcmin - taper_width_pix * reso_arcmin
+    hole_mask[r_arcmin <= inner_boundary] = 0.0
 
     # Transition region (smooth taper)
-    transition_region = (r_arcmin > (hole_radius_arcmin - taper_width_pix * reso_arcmin)) & (r_arcmin < (hole_radius_arcmin + taper_width_pix * reso_arcmin))
+    outer_boundary = hole_radius_arcmin + taper_width_pix * reso_arcmin
+    transition_mask = (r_arcmin > inner_boundary) & (r_arcmin < outer_boundary)
 
-    if np.any(transition_region):
-        # Cosine taper from 0 to 1
-        r_transition = r_arcmin[transition_region]
-        taper_arg = (r_transition - (hole_radius_arcmin - taper_width_pix * reso_arcmin)) / (2 * taper_width_pix * reso_arcmin)
-        hole_mask[transition_region] = 0.5 * (1 - np.cos(np.pi * taper_arg))
+    if np.any(transition_mask):
+        r_transition = r_arcmin[transition_mask]
+        taper_arg = (r_transition - inner_boundary) / (2 * taper_width_pix * reso_arcmin)
+        hole_mask[transition_mask] = 0.5 * (1 - np.cos(np.pi * taper_arg))  # cosine taper
 
-    # Combine with edge apodization
-    mask *= hole_mask
-
-    return mask
+    return mask * hole_mask
 
 
 def check_zero_fraction(t_map, source_id, max_zero_fraction=0.05):
@@ -248,7 +243,7 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
     array
         Beam profile in real space
     """
-    print(f"Performing Hankel transform...")
+    print("Performing Hankel transform...")
     print(f"  ell range: {ell.min()} to {ell.max()}")
     print(f"  r range: {r_arcmin.min():.3f} to {r_arcmin.max():.3f} arcmin")
 
@@ -282,9 +277,9 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
         # Normalize to 1 at r=0
         if B_r[0] != 0:
             B_r = B_r / B_r[0]
-            print(f"  Normalized beam peak to 1.0")
+            print("  Normalized beam peak to 1.0")
         else:
-            print(f"  Warning: Beam is zero at r=0, cannot normalize")
+            print("  Warning: Beam is zero at r=0, cannot normalize")
 
     print(f"  Beam range after transform: {B_r.min():.6f} to {B_r.max():.6f}")
     return B_r
@@ -311,7 +306,7 @@ def load_fieldlevel_data():
     if not os.path.exists(rc4_beam_file):
         raise FileNotFoundError(f"RC4 beam file not found: {rc4_beam_file}")
 
-    print(f"Loading field-level beam data...")
+    print("Loading field-level beam data...")
     print(f"  Main beam: {main_beam_file}")
     print(f"  RC4 beam: {rc4_beam_file}")
 
@@ -372,9 +367,9 @@ def create_betapol_data():
 
     # Process each band
     for band in bands:
-        print(f"\n" + "=" * 40)
+        print("\n" + "=" * 40)
         print(f"Processing {band} GHz")
-        print(f"=" * 40)
+        print("=" * 40)
 
         # Get multipole-space data
         Bmain_ell = data["Bmain"][band]
@@ -384,10 +379,10 @@ def create_betapol_data():
         print(f"BT_ell range: {BT_ell.min():.6f} to {BT_ell.max():.6f}")
 
         # Perform Hankel transforms
-        print(f"\nTransforming Bmain...")
+        print("\nTransforming Bmain...")
         Bmain_r = hankel_transform_beam(ell, Bmain_ell, r_arcmin, normalize=True)
 
-        print(f"\nTransforming BT...")
+        print("\nTransforming BT...")
         BT_r = hankel_transform_beam(ell, BT_ell, r_arcmin, normalize=True)
 
         # Store results
@@ -403,7 +398,7 @@ def create_betapol_data():
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "betapol.npz")
 
-    print(f"\n" + "=" * 60)
+    print("\n" + "=" * 60)
     print(f"Saving betapol data to: {output_file}")
     np.savez(output_file, **output_data)
 
@@ -584,7 +579,7 @@ def params_to_logit(physical_params, config):
     logit_params = {"beams": [], "sources": {}}
 
     # Convert beam parameters for each band
-    for band_idx, beam_params in enumerate(physical_params["beams"]):
+    for _, beam_params in enumerate(physical_params["beams"]):
         beam_logit = {}
         for param_name, param_value in beam_params.items():
             bounds = config.beam_coeff_bounds[param_name]
@@ -621,7 +616,7 @@ def params_from_logit(logit_params, config):
     physical_params = {"beams": [], "sources": {}}
 
     # Convert beam parameters for each band
-    for band_idx, beam_logit in enumerate(logit_params["beams"]):
+    for _, beam_logit in enumerate(logit_params["beams"]):
         beam_physical = {}
         for param_name, logit_value in beam_logit.items():
             bounds = config.beam_coeff_bounds[param_name]

@@ -2,11 +2,11 @@
 Bootstrap uncertainty estimation for polarized beam fitting.
 """
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optimistix as optx
-import time
+
 from .fitter import PolarizedBeamFitter
 
 

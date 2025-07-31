@@ -4,12 +4,14 @@ temperature and polarization beams. They inherit from a base class and
 are intended to present a uniform beam model for use in the fitter and plotter.
 """
 
-import numpy as np
+from abc import ABC, abstractmethod
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 from scipy import interpolate
+
 from .utils import linear_interp_differentiable
-from abc import ABC, abstractmethod
 
 
 class BeamModelBase(ABC):
@@ -191,8 +193,8 @@ class BeamModelBspline(BeamModelBase):
         x_gaussian = P_null @ C_proj_pinv @ (d - C @ x_constraint)  # Gaussian fit in null space
         particular_solution = x_constraint + x_gaussian
 
-        print(f"Particular solution fitting:")
-        print(f"  Constraint satisfaction: exact (using pseudoinverse)")
+        print("Particular solution fitting:")
+        print("  Constraint satisfaction: exact (using pseudoinverse)")
 
         # Evaluate Gaussian approximation quality
         approx_gaussian = target_basis_matrix @ particular_solution
@@ -208,7 +210,7 @@ class BeamModelBspline(BeamModelBase):
         if max_violation > 1e-10:
             print(f"WARNING: Large constraint violation: {max_violation:.2e}")
         else:
-            print(f"Constraints satisfied to machine precision")
+            print("Constraints satisfied to machine precision")
 
         # Find null space of A (these are the free directions)
         U, s, Vt = np.linalg.svd(A)
@@ -767,7 +769,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         constraint_values.append(0.0)
 
         A = np.vstack(constraint_rows)
-        b = np.array(constraint_values)
+        _ = np.array(constraint_values)  # we don't actually need this if the boundary conditions are all zero
 
         print(f"Constraint matrix condition number: {np.linalg.cond(A):.2e}")
 
@@ -868,7 +870,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         r_fine_jax = jax.device_put(r_fine)
         ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs)
 
-        print(f"Area-normalized B-spline basis setup complete:")
+        print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
         print(f"  {self.n_bspline_coeffs} orthonormal basis functions")
         print(f"  B-splines start at r = {r_min:.1f} arcmin with B(r_min) = B'(r_min) = 0 constraints")

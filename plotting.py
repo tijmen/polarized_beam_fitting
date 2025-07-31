@@ -5,10 +5,11 @@ Contains functions for creating diagnostic plots, beam profiles, and analysis vi
 """
 
 import os
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
+
 from .utils import compute_2d_asd, safe_filename
-from spt3g import core
 
 
 class BeamPlotter:
@@ -64,13 +65,13 @@ class BeamPlotter:
         """Extract fit parameters for a specific band from multi-band results."""
         if band is None:
             band = self.primary_band
-        
+
         # Get band index
         band_idx = self.bands.index(band)
-        
+
         # Extract beam parameters for this band
         beam_params = best_fit_params["beams"][band_idx]
-        
+
         # Return parameters in expected format for beam model
         return beam_params
 
@@ -117,7 +118,7 @@ class BeamPlotter:
         band_idx = self.bands.index(band) if band in self.bands else 0
         initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
         flux_corrections = best_fit_params["sources"]["flux_correction"]
-        
+
         for i, source_id in enumerate(source_ids):
             # Get T amplitude for this source in the primary band using array format
             t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
@@ -141,10 +142,10 @@ class BeamPlotter:
         for source in skip_sources:
             # Construct source ID with primary band
             source_id = f"CoaddSPT-S {source}-{band}"
-            
+
             # Convert to list for searching
             source_ids_list = source_ids.tolist() if isinstance(source_ids, np.ndarray) else list(source_ids)
-            
+
             if source_id in source_ids_list:
                 idx = source_ids_list.index(source_id)
                 skip_sources_data.append((source_id, idx, source))
@@ -220,9 +221,9 @@ class BeamPlotter:
             print(f"\nSaved template projection analysis plot to: {plot_filename}")
             print(f"=== Template projection analysis complete for {band_suffix} ===")
             return plot_filename
-        else:
-            plt.show()
-            return None
+
+        plt.show()
+        return None
 
     def plot_beam_profiles(self, best_fit_params, save=True, band=None):
         """
@@ -298,7 +299,7 @@ class BeamPlotter:
 
         ax1.grid(True, which="both", linestyle=":", alpha=0.5)
         ax1.set_ylabel(ylabel, fontsize=12)
-        ax1.set_title(f"Reconstructed Beam Profiles", fontsize=14)
+        ax1.set_title("Reconstructed Beam Profiles", fontsize=14)
         ax1.legend(fontsize=11)
 
         # Bottom panel: T beam minus P beam
@@ -542,19 +543,17 @@ class BeamPlotter:
         source_ids = self.base_fitter.source_ids
         initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
         flux_corrections = best_fit_params["sources"]["flux_correction"]
-        
+
         # Use primary band for ranking
         band_idx = 0  # Use first band
-        
+
         for i, source_id in enumerate(source_ids):
-            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
-            q_amp_initial = initial_amps[i, band_idx, 1]  # Q is index 1
+            q_amp_initial = initial_amps[i, band_idx, 1]  # Q is index 1, T is index 0
             u_amp_initial = initial_amps[i, band_idx, 2]  # U is index 2
-            
-            t_amp = t_amp_initial * flux_corrections[i, band_idx, 0]
+
             q_amp = q_amp_initial * flux_corrections[i, band_idx, 1]
             u_amp = u_amp_initial * flux_corrections[i, band_idx, 2]
-            
+
             p_amp = float(np.sqrt(q_amp**2 + u_amp**2))
             p_amp_sources.append((p_amp, source_id, i))
 
@@ -679,10 +678,10 @@ class BeamPlotter:
         source_ids = self.base_fitter.source_ids
         initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
         flux_corrections = best_fit_params["sources"]["flux_correction"]
-        
+
         # Use primary band for ranking
         band_idx = 0  # Use first band
-        
+
         for i, source_id in enumerate(source_ids):
             t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
             t_amp_factor = flux_corrections[i, band_idx, 0]  # flux correction for T
@@ -697,13 +696,9 @@ class BeamPlotter:
         band = self.primary_band
         band_idx = 0  # Use first band
         band_suffix = self._get_band_suffix(band)
-        
+
         # Extract from arrays
-        data_top = {
-            "T": maps_numpy[idx, :, :, band_idx, 0],
-            "Q": maps_numpy[idx, :, :, band_idx, 1],
-            "U": maps_numpy[idx, :, :, band_idx, 2]
-        }
+        data_top = {"T": maps_numpy[idx, :, :, band_idx, 0], "Q": maps_numpy[idx, :, :, band_idx, 1], "U": maps_numpy[idx, :, :, band_idx, 2]}
         model_top = model_maps[top_source_id][band]
 
         residual_top = {k: data_top[k] - model_top[k] for k in data_top}

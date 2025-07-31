@@ -6,6 +6,7 @@ Contains all the constants and parameters used in the analysis.
 
 import os
 from dataclasses import dataclass
+
 from spt3g import core
 
 
@@ -40,7 +41,6 @@ class BeamFittingConfig:
     # Source selection criteria
     min_t_amplitude = 500 * core.G3Units.uK
     max_zero_fraction = 0.05
-    skip_sources = None
     exclude_from_leakage_template = None
 
     # Processing options

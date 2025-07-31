@@ -13,9 +13,11 @@ Currently, [clusterfinder_psd, kx_averaged_individual, white_noise_scaled, ensem
 are fully diagonal, and [multiband_covariance] is only diagonal in Fourier space.
 """
 
-import numpy as np
 from abc import ABC, abstractmethod
+
+import numpy as np
 from astropy.io import fits
+
 from .utils import make_apod_mask_center_excised
 
 

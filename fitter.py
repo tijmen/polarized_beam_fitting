@@ -6,23 +6,23 @@ and NUTS sampling, supports single and multi-band configurations, and provides
 efficient pmap/vmap parallelization across devices.
 """
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, PartitionSpec
 import jax.sharding
-import optimistix as optx
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
+import optimistix as optx
+from jax.sharding import Mesh, PartitionSpec
 from numpyro.infer import MCMC, NUTS
 from numpyro.infer.initialization import init_to_value
 from spt3g import core, maps
-from .utils import make_apodization_mask, check_zero_fraction
-from .source_fitting import gaussfit_source
+
 from .beam_model import create_beam_model
-from .noise_psd import create_noise_psd_calculator
 from .cache import CacheManager
-from .utils import params_to_logit, params_from_logit
+from .noise_psd import create_noise_psd_calculator
+from .source_fitting import gaussfit_source
+from .utils import check_zero_fraction, make_apodization_mask, params_from_logit, params_to_logit
 
 
 def _q16_50_84(x):
@@ -131,23 +131,18 @@ class PolarizedBeamFitter:
         self.mesh = Mesh(devices, ("devices",))
 
         # Helper specs
-        Rep = PartitionSpec()          # replicated
-        Sh  = PartitionSpec("devices") # sharded on mesh axis "devices"
+        Rep = PartitionSpec()  # replicated
+        Sh = PartitionSpec("devices")  # sharded on mesh axis "devices"
 
-        vmap_chi2 = jax.vmap(          # still batch over sources
+        vmap_chi2 = jax.vmap(  # still batch over sources
             self._objective_function_single_source,
             in_axes=(None, 0, 0, 0, 0, 0, None),
         )
 
-        def _chi2_global(beams, yoff, xoff, flux, init_amp, data_fft, noise_psd):
-            return vmap_chi2(beams, yoff, xoff, flux,
-                             init_amp, data_fft, noise_psd).sum()
+        def _chi2_global(beams, yoff, xoff, flux):
+            return vmap_chi2(beams, yoff, xoff, flux, self.gaussfit_initial_amp_jax_padded, self.maps_fft_jax_padded, self.noise_psd_jax).sum()
 
-        self._chi2_global = jax.jit(
-            _chi2_global,
-            in_shardings=(Rep, Sh, Sh, Sh, Sh, Sh, Rep),
-            out_shardings=None         # replicate the scalar χ²
-        )
+        self._chi2_global = jax.jit(_chi2_global, in_shardings=(Rep, Sh, Sh, Sh), out_shardings=None)
 
     def _pad_data_for_devices(self):
         """Pad data to be evenly divisible by number of devices."""
@@ -299,7 +294,7 @@ class PolarizedBeamFitter:
                         continue
 
                     t_map, q_map, u_map, weight = frame["T"], frame["Q"], frame["U"], frame["Wpol"]
-                    maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)  # IGNORE pylint errors, this is correct
+                    maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)  # pylint: disable=no-member
 
                     if not check_zero_fraction(t_map, source_id, max_zero_fraction=self.config.max_zero_fraction):
                         continue
@@ -368,7 +363,6 @@ class PolarizedBeamFitter:
         ny, nx = self.map_shape
         map_array = np.zeros((self.n_src, ny, nx, self.n_bands, 3))
         map_fft_array = np.zeros((self.n_src, ny, nx, self.n_bands, 3))
-        gaussfit_amplitudes = np.zeros((self.n_src, self.n_bands, 3))
 
         for source_idx in range(self.n_src):
             for band_idx, band in enumerate(self.bands):
@@ -419,13 +413,23 @@ class PolarizedBeamFitter:
             The calculated chi-squared value for the source, normalized by the degrees of freedom.
         """
         # check shapes
-        assert len(beam_params_list) == len(self.config.bands), f"_objective_function_single_source received {len(beam_params_list)} beam parameters, expected one for each of {self.config.bands}"
+        assert len(beam_params_list) == len(self.config.bands), (
+            f"_objective_function_single_source received {len(beam_params_list)} beam parameters, expected one for each of {self.config.bands}"
+        )
         assert yoff.shape == (), f"_objective_function_single_source received yoff of shape {yoff.shape}, expected a scalar"
         assert xoff.shape == (), f"_objective_function_single_source received xoff of shape {xoff.shape}, expected a scalar"
-        assert flux_correction.shape == (self.n_bands, 3), f"_objective_function_single_source received flux_correction of shape {flux_correction.shape}, expected ({self.n_bands}, 3)"
-        assert initial_amplitudes_source.shape == (self.n_bands, 3), f"_objective_function_single_source received initial_amplitudes_source of shape {initial_amplitudes_source.shape}, expected ({self.n_bands}, 3)"
-        assert data_fft_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), f"_objective_function_single_source received data_fft_source of shape {data_fft_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
-        assert noise_psd_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), f"_objective_function_single_source received noise_psd_source of shape {noise_psd_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
+        assert flux_correction.shape == (self.n_bands, 3), (
+            f"_objective_function_single_source received flux_correction of shape {flux_correction.shape}, expected ({self.n_bands}, 3)"
+        )
+        assert initial_amplitudes_source.shape == (self.n_bands, 3), (
+            f"_objective_function_single_source received initial_amplitudes_source of shape {initial_amplitudes_source.shape}, expected ({self.n_bands}, 3)"
+        )
+        assert data_fft_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), (
+            f"_objective_function_single_source received data_fft_source of shape {data_fft_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
+        )
+        assert noise_psd_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), (
+            f"_objective_function_single_source received noise_psd_source of shape {noise_psd_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
+        )
 
         # Evaluate beam maps for all bands
         beam_maps_T, beam_maps_P = [], []
@@ -488,9 +492,6 @@ class PolarizedBeamFitter:
         """
         params_phys = params_from_logit(params_logit, self.config)
 
-        n_devices = jax.local_device_count()
-        n_src_per_device = self.n_src_padded // n_devices
-
         yoff = params_phys["sources"]["yoff"]
         xoff = params_phys["sources"]["xoff"]
         flux = params_phys["sources"]["flux_correction"]
@@ -500,11 +501,8 @@ class PolarizedBeamFitter:
             yoff,
             xoff,
             flux,
-            self.gaussfit_initial_amp_jax_padded,
-            self.maps_fft_jax_padded,
-            self.noise_psd_jax,
         )
-        return total_chi2            # already replicated, no psum needed
+        return total_chi2  # already replicated, no psum needed
 
     def _get_individual_chi2s(self, params_logit):
         """Get individual chi2 values for each source (not JIT compiled)."""
@@ -544,7 +542,7 @@ class PolarizedBeamFitter:
 
         solver = optx.BFGS(rtol=1e-12, atol=1e-12)
         y0 = self.params_logit
-        
+
         with jax.sharding.use_mesh(self.mesh):
             sol = optx.minimise(self.objective_function, solver, y0, max_steps=self.config.n_steps, throw=False)
 

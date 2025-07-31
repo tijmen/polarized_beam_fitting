@@ -8,8 +8,8 @@ This is mostly copied from the spt3g_software source_fitting module and therefor
 
 import numpy as np
 from scipy import optimize
-from spt3g.sources import fitting as source_fitting
 from spt3g import core
+from spt3g.sources import fitting as source_fitting
 
 
 def gaussfit_source(t_map, q_map, u_map, weight, config=None):

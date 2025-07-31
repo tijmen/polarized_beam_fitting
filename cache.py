@@ -1,6 +1,6 @@
-import pickle
 import hashlib
 import os
+import pickle
 
 
 class CacheManager:
