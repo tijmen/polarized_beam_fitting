@@ -18,6 +18,10 @@ from .utils import (
     check_zero_fraction,
     compute_2d_asd,
     safe_filename,
+    to_logit,
+    from_logit,
+    params_to_logit,
+    params_from_logit,
 )
 
 from .source_fitting import gaussfit_source, fit_map_amplitude
@@ -30,7 +34,6 @@ from .noise_psd import (
     EnsembleAsdMeanCalculator,
     create_noise_psd_calculator,
 )
-from .param_manager import ParameterManager, to_logit, from_logit
 
 __version__ = "1.0.0"
 __author__ = "Tijmen de Haan"
@@ -46,6 +49,10 @@ __all__ = [
     "check_zero_fraction",
     "compute_2d_asd",
     "safe_filename",
+    "to_logit",
+    "from_logit",
+    "params_to_logit",
+    "params_from_logit",
     "gaussfit_source",
     "fit_map_amplitude",
     "BeamModelBspline",
@@ -59,7 +66,4 @@ __all__ = [
     "WhiteNoiseScaledCalculator",
     "EnsembleAsdMeanCalculator",
     "create_noise_psd_calculator",
-    "ParameterManager",
-    "to_logit",
-    "from_logit",
 ]

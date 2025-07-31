@@ -254,12 +254,15 @@ class KxAveragedIndividualCalculator(NoisePSDCalculator):
 
             noise_psds_list.append(source_noise_psd)
 
+        # Average the PSDs across all sources
+        global_noise_psd = np.mean(noise_psds_list, axis=0)
+
         print("Individual noise PSD calculation complete.")
-        return noise_psds_list
+        return global_noise_psd
 
     def is_individual_psds(self):
-        """Return True since this provides individual PSDs per source."""
-        return True
+        """Return False since this provides a global PSD for all sources."""
+        return False
 
     def _calculate_individual_noise_psd(self, map_2d, noise_mask, sentinel_value=1e12):
         """

@@ -85,7 +85,6 @@ class BeamFittingConfig:
 
     # Initial parameter values
     source_inits = (-0.49, -0.49, 0.99)  # yoff, xoff, flux_correction
-    source_param_names = None
 
     # Debug options
     debug = False

@@ -9,6 +9,8 @@ efficient pmap/vmap parallelization across devices.
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, PartitionSpec
+import jax.sharding
 import optimistix as optx
 import numpyro
 import numpyro.distributions as dist
@@ -20,7 +22,7 @@ from .source_fitting import gaussfit_source
 from .beam_model import create_beam_model
 from .noise_psd import create_noise_psd_calculator
 from .cache import CacheManager
-from .param_manager import ParameterManager
+from .utils import params_to_logit, params_from_logit
 
 
 def _q16_50_84(x):
@@ -29,10 +31,19 @@ def _q16_50_84(x):
 
 class PolarizedBeamFitter:
     """
-    Polarized beam fitter supporting both single and multi-band configurations.
+    Polarized beam fitting code
+    - supports both single and multi-band configurations
     - ML optimization with optimistix or NUTS sampling with numpyro
-    - Efficient JAX pmap across devices and vmap within devices
-    - CPU, single GPU, and multi-GPU support
+    - Efficient JAX pmap across devices and vmap within devices giving CPU, single GPU, and multi-GPU support
+
+    Usage example:
+
+    ```python
+    from polarized_beam_fitting import PolarizedBeamFitter, BeamFittingConfig
+    config = BeamFittingConfig()
+    fitter = PolarizedBeamFitter(config=config)
+    best_fit_params = fitter.run_fit()
+    ```
 
     Author: Tijmen de Haan <tijmen.dehaan@gmail.com>
     Initial Version: 2025-06-03
@@ -97,7 +108,7 @@ class PolarizedBeamFitter:
         ) = cache_manager.load_or_create(self._load_and_prepare_data)
 
         # Pad data for even distribution across devices
-        self.n_src_padded, self.source_ids_padded, self.maps_fft_numpy_padded, self.gaussfit_initial_amp_numpy_padded, self.gaussfit_yoff_numpy_padded, self.gaussfit_xoff_numpy_padded = self._pad_data_for_devices()
+        self.n_src_padded, self.source_ids_padded, self.maps_fft_numpy_padded, self.gaussfit_initial_amp_numpy_padded = self._pad_data_for_devices()
 
         # Initialize noise PSD calculator
         self.noise_psd_calculator = create_noise_psd_calculator(self.config, self.map_shape)
@@ -110,56 +121,94 @@ class PolarizedBeamFitter:
         self.noise_psd_jax = jax.device_put(self.noise_psd_numpy.astype(self.psd_dtype))
         self.gaussfit_initial_amp_jax_padded = jax.device_put(self.gaussfit_initial_amp_numpy_padded.astype(jnp.float32))
         self.maps_fft_jax_padded = jax.device_put(self.maps_fft_numpy_padded.astype(jnp.complex64))
-        self.gaussfit_yoff_jax_padded = jax.device_put(self.gaussfit_yoff_numpy_padded.astype(jnp.float32))
-        self.gaussfit_xoff_jax_padded = jax.device_put(self.gaussfit_xoff_numpy_padded.astype(jnp.float32))
 
-        # Initialize parameter manager and parameters
-        self.param_manager = ParameterManager(self.config, self.beam_models, self.n_src_padded)
-        self.params = self.param_manager.get_initial_params(
-            initial_yoff=self.gaussfit_yoff_jax_padded,
-            initial_xoff=self.gaussfit_xoff_jax_padded,
-            in_logit_space=True
+        # Initialize parameters using new simple structure
+        self.params_physical = self._get_initial_physical_params()
+        self.params_logit = params_to_logit(self.params_physical, self.config)
+
+        # Set up JAX Mesh for sharding
+        devices = np.array(jax.devices())
+        self.mesh = Mesh(devices, ("devices",))
+
+        # Helper specs
+        Rep = PartitionSpec()          # replicated
+        Sh  = PartitionSpec("devices") # sharded on mesh axis "devices"
+
+        vmap_chi2 = jax.vmap(          # still batch over sources
+            self._objective_function_single_source,
+            in_axes=(None, 0, 0, 0, 0, 0, None),
         )
-        self.initial_params_physical = self.param_manager.to_physical(self.params)
-        self._pmapped_chi2_calculator = self._create_pmapped_objective()
+
+        def _chi2_global(beams, yoff, xoff, flux, init_amp, data_fft, noise_psd):
+            return vmap_chi2(beams, yoff, xoff, flux,
+                             init_amp, data_fft, noise_psd).sum()
+
+        self._chi2_global = jax.jit(
+            _chi2_global,
+            in_shardings=(Rep, Sh, Sh, Sh, Sh, Sh, Rep),
+            out_shardings=None         # replicate the scalar χ²
+        )
 
     def _pad_data_for_devices(self):
         """Pad data to be evenly divisible by number of devices."""
         n_devices = jax.local_device_count()
         n_src_real = len(self.source_ids)
-        n_src_padded = int(n_devices * np.ceil(n_src_real / n_devices))  # round up to the nearest multiple of n_devices
+        n_src_padded = int(n_devices * np.ceil(n_src_real / n_devices))
         n_pad = n_src_padded - n_src_real
 
-        # Start with unpadded arrays
         source_ids_padded = self.source_ids
         maps_fft_numpy_padded = self.maps_fft_numpy
         gaussfit_initial_amp_numpy_padded = self.gaussfit_initial_amp_numpy
-        # THE FIX: Initialize padded yoff/xoff with the unpadded versions
-        gaussfit_yoff_numpy_padded = self.gaussfit_yoff_numpy
-        gaussfit_xoff_numpy_padded = self.gaussfit_xoff_numpy
 
         if n_pad > 0:
             print(f"Adding {n_pad} sources to make the new total ({n_src_padded}) divisible by {n_devices} devices.")
 
-            # Pad source_ids
             source_ids_padded = np.concatenate([self.source_ids, [f"PAD_{i}" for i in range(n_pad)]])
 
-            # Pad data array
             ny, nx = self.map_shape
             dummy_shape = (n_pad, ny, nx, self.n_bands, 3)
             dummy_data = np.zeros(dummy_shape, dtype=self.maps_fft_numpy.dtype)
             maps_fft_numpy_padded = np.concatenate([self.maps_fft_numpy, dummy_data], axis=0)
 
-            # Pad initial amplitudes
             dummy_amps = np.zeros((n_pad, self.n_bands, 3), dtype=self.gaussfit_initial_amp_numpy.dtype)
             gaussfit_initial_amp_numpy_padded = np.concatenate([self.gaussfit_initial_amp_numpy, dummy_amps], axis=0)
-            
-            dummy_offsets = np.zeros((n_pad, self.n_bands), dtype=self.gaussfit_yoff_numpy.dtype)
-            gaussfit_yoff_numpy_padded = np.concatenate([self.gaussfit_yoff_numpy, dummy_offsets], axis=0)
-            gaussfit_xoff_numpy_padded = np.concatenate([self.gaussfit_xoff_numpy, dummy_offsets], axis=0)
 
-        # Return all the new padded quantities
-        return n_src_padded, source_ids_padded, maps_fft_numpy_padded, gaussfit_initial_amp_numpy_padded, gaussfit_yoff_numpy_padded, gaussfit_xoff_numpy_padded
+        return n_src_padded, source_ids_padded, maps_fft_numpy_padded, gaussfit_initial_amp_numpy_padded
+
+    def _get_initial_physical_params(self):
+        """
+        Initialize parameters using the new simple structure.
+
+        Returns:
+        --------
+        dict
+            Physical parameters with structure:
+            {
+                "beams": [beam_params_band0, beam_params_band1, ...],
+                "sources": {
+                    "yoff": array (n_src,),
+                    "xoff": array (n_src,),
+                    "flux_correction": array (n_src, n_bands, 3)
+                }
+            }
+        """
+        params_physical = {"beams": [], "sources": {}}
+
+        # Initialize beam parameters for each band
+        for band in self.config.bands:
+            beam_params = self.beam_models[band].get_initial_physical_params()
+            params_physical["beams"].append(beam_params)
+
+        # Initialize source parameters using defaults from config
+        yoff_init, xoff_init, flux_init = self.config.source_inits
+
+        params_physical["sources"] = {
+            "yoff": jnp.full((self.n_src_padded,), yoff_init, dtype=jnp.float32),
+            "xoff": jnp.full((self.n_src_padded,), xoff_init, dtype=jnp.float32),
+            "flux_correction": jnp.full((self.n_src_padded, self.n_bands, 3), flux_init, dtype=jnp.float32),
+        }
+
+        return params_physical
 
     def _load_and_prepare_data(self):
         """Load and prepare source data."""
@@ -332,7 +381,7 @@ class PolarizedBeamFitter:
                 )  # is there a one-line way to do this?
 
                 # Apply apod mask
-                map_array_apodized = map_array[source_idx, :, :, band_idx, :] * self.apod_mask.reshape(ny, nx, 1)
+                map_array_apodized = map_array[source_idx, :, :, band_idx, :] * self.apod_mask[:, :, None]
 
                 # Go to Fourier space
                 map_fft_array[source_idx, :, :, band_idx, :] = np.fft.fft2(map_array_apodized, axes=(0, 1))
@@ -341,17 +390,20 @@ class PolarizedBeamFitter:
 
         return map_array, map_fft_array
 
-    def _objective_function_single_source_core(self, beam_params_phys, source_params_phys, initial_amplitudes_source, data_fft_source, noise_psd_source):
+    def _objective_function_single_source(self, beam_params_list, yoff, xoff, flux_correction, initial_amplitudes_source, data_fft_source, noise_psd_source):
         """
-        Loss function for a single source, vectorized across bands and Stokes parameters.
-        Now takes physical parameters directly (no logit conversion needed).
+        Loss function for a single source, decorated with pmap to run over multiple sources.
 
         Parameters:
         -----------
-        beam_params_phys : dict
-            Dictionary of physical beam parameters for all bands {band: {param: value}}
-        source_params_phys : dict
-            Dictionary of physical source parameters ('yoff', 'xoff', 'flux_correction')
+        beam_params_list : list
+            List of physical beam parameters for each band [beam_params_band0, beam_params_band1, ...]
+        yoff : jax.Array
+            Y offset of the source. Shape: (n_src,)
+        xoff : jax.Array
+            X offset of the source. Shape: (n_src,)
+        flux_correction : jax.Array
+            Flux correction for the source. Shape: (n_src, n_bands, 3)
         initial_amplitudes_source : jax.Array
             Initial T, Q, U amplitudes for the source. Shape: (n_bands, 3)
         data_fft_source : jax.Array
@@ -366,15 +418,19 @@ class PolarizedBeamFitter:
         float
             The calculated chi-squared value for the source, normalized by the degrees of freedom.
         """
-        # Get physical source position and flux correction factors (already in physical space)
-        dy = source_params_phys["yoff"]
-        dx = source_params_phys["xoff"]
-        flux_correction_factors = source_params_phys["flux_correction"]  # Shape: (n_bands, 3)
+        # check shapes
+        assert len(beam_params_list) == len(self.config.bands), f"_objective_function_single_source received {len(beam_params_list)} beam parameters, expected one for each of {self.config.bands}"
+        assert yoff.shape == (), f"_objective_function_single_source received yoff of shape {yoff.shape}, expected a scalar"
+        assert xoff.shape == (), f"_objective_function_single_source received xoff of shape {xoff.shape}, expected a scalar"
+        assert flux_correction.shape == (self.n_bands, 3), f"_objective_function_single_source received flux_correction of shape {flux_correction.shape}, expected ({self.n_bands}, 3)"
+        assert initial_amplitudes_source.shape == (self.n_bands, 3), f"_objective_function_single_source received initial_amplitudes_source of shape {initial_amplitudes_source.shape}, expected ({self.n_bands}, 3)"
+        assert data_fft_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), f"_objective_function_single_source received data_fft_source of shape {data_fft_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
+        assert noise_psd_source.shape == (self.map_shape[0], self.map_shape[1], self.n_bands, 3), f"_objective_function_single_source received noise_psd_source of shape {noise_psd_source.shape}, expected ({self.map_shape[0]}, {self.map_shape[1]}, {self.n_bands}, 3)"
 
         # Evaluate beam maps for all bands
         beam_maps_T, beam_maps_P = [], []
         for i, band in enumerate(self.config.bands):
-            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(beam_params_phys[band], dx, dy)
+            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(beam_params_list[i], xoff, yoff)
             beam_maps_T.append(beam_T_map)
             beam_maps_P.append(beam_P_map)
 
@@ -390,7 +446,7 @@ class PolarizedBeamFitter:
         )
 
         # Calculate final T, Q, U amplitudes by applying the correction factor
-        final_amplitudes = initial_amplitudes_source * flux_correction_factors  # Shape: (n_bands, 3)
+        final_amplitudes = initial_amplitudes_source * flux_correction  # Shape: (n_bands, 3)
 
         # Create the real-space model via broadcasting: (ny,nx,n_bands,3) * (1,1,n_bands,3)
         model_real = beam_templates * final_amplitudes[None, None, :, :]
@@ -398,8 +454,6 @@ class PolarizedBeamFitter:
         # Apply the apodization mask and transform model to Fourier space
         model_apodized = model_real * self.apod_mask_jax[:, :, None, None]
         model_fft = jnp.fft.fft2(model_apodized, axes=(0, 1))
-
-        # --- Chi-squared Calculation in Fourier Space ---
 
         # Define polarization weights [T, Q, U]
         pol_weights = jnp.array([1.0, self.pol_focus, self.pol_focus], dtype=jnp.float32)
@@ -420,99 +474,6 @@ class PolarizedBeamFitter:
 
         return total_chi2 / n_dof
 
-#  Here's the proper version:
-    # def _create_pmapped_objective(self):
-    #     """
-    #     Creates and JIT-compiles the pmapped objective function.
-    #     """
-
-    #     def _pmapped_chi2_calculator(beam_params_phys, source_params_phys, initial_amplitudes, data_fft, noise_psd):
-    #         # We will vmap the core objective function directly.
-    #         vmapped_core_function = jax.vmap(
-    #             self._objective_function_single_source_core,
-    #             in_axes=(
-    #                 None,                                        # beam_params_phys
-    #                 {'yoff': 0, 'xoff': 0, 'flux_correction': 0}, # source_params_phys
-    #                 0,                                           # initial_amplitudes_source
-    #                 0,                                           # data_fft_source
-    #                 None,                                        # noise_psd_source
-    #             )
-    #         )
-
-    #         # Call the vmapped function with the full (per-device) arrays.
-    #         # This will now work because all mapped arrays have the same leading dimension.
-    #         chi2_values = vmapped_core_function(
-    #             beam_params_phys,
-    #             source_params_phys,
-    #             initial_amplitudes,
-    #             data_fft,
-    #             noise_psd
-    #         )
-
-    #         return jnp.sum(chi2_values)
-
-    #     pmapped_calculator = jax.pmap(
-    #         _pmapped_chi2_calculator,
-    #         in_axes=(
-    #             None,
-    #             {"yoff": 0, "xoff": 0, "flux_correction": 0},
-    #             0,
-    #             0,
-    #             None,
-    #         ),
-    #         axis_name="devices",
-    #     )
-    #     return pmapped_calculator
-
-# and this is the shitty fori_loop version for debugging
-    def _create_pmapped_objective(self):
-        """
-        Creates and JIT-compiles the pmapped objective function using a fori_loop for robust iteration.
-        """
-
-        def _pmapped_chi2_calculator(beam_params_phys, source_params_phys, initial_amplitudes, data_fft, noise_psd):
-            # This function operates on a slice of data for each device.
-            n_src_per_device = data_fft.shape[0]
-
-            # Define the body of the loop. It takes an index `i` and the loop state (the running sum `chi2_sum`).
-            def loop_body(i, chi2_sum):
-                # Manually slice the pytrees and arrays for the i-th source.
-                # jax.tree_util.tree_map is used to slice each leaf of the source_params_phys pytree.
-                source_p_slice = jax.tree_util.tree_map(lambda x: x[i], source_params_phys)
-                initial_a_slice = initial_amplitudes[i]
-                data_f_slice = data_fft[i]
-
-                # Call the core function on the single-source slices.
-                # Note that beam_params_phys and noise_psd are captured from the outer scope and are not sliced.
-                chi2_single = self._objective_function_single_source_core(
-                    beam_params_phys,
-                    source_p_slice,
-                    initial_a_slice,
-                    data_f_slice,
-                    noise_psd,
-                )
-                # Add the result to the running sum.
-                return chi2_sum + chi2_single
-
-            # Initialize the loop with a starting value of 0.0 and run it from i=0 to n_src_per_device-1.
-            total_chi2 = jax.lax.fori_loop(0, n_src_per_device, loop_body, 0.0)
-            return total_chi2
-
-        # The pmap call remains identical. It shards the data correctly, and the fori_loop
-        # will operate on the per-device shards.
-        pmapped_calculator = jax.pmap(
-            _pmapped_chi2_calculator,
-            in_axes=(
-                None,  # beam_params_phys - shared
-                {"yoff": 0, "xoff": 0, "flux_correction": 0},  # source_params_phys - sharded
-                0,     # initial_amplitudes - sharded
-                0,     # data_fft - sharded
-                None,  # noise_psd - shared
-            ),
-            axis_name="devices",
-        )
-        return pmapped_calculator
-
     def objective_function(self, params_logit, extra_args=None):
         """
         Total loss function
@@ -520,55 +481,57 @@ class PolarizedBeamFitter:
         Parameters:
         -----------
         params_logit : dict
-            Pytree of parameters in logit space with structure:
-            {"beams": {band: {...}}, "sources": {"yoff": ..., "xoff": ..., "flux_correction": ...}}
+            Parameters in logit space with structure:
+            {"beams": [beam_params_band0, ...], "sources": {"yoff": ..., "xoff": ..., "flux_correction": ...}}
         extra_args : optional
             Unused parameter needed for optimistix compatibility
         """
-        # Convert logit parameters to physical space
-        params_phys = self.param_manager.to_physical(params_logit)
+        params_phys = params_from_logit(params_logit, self.config)
 
-        # Execute the pre-compiled pmapped function. JAX handles sharding the data.
-        per_device_chi2_sums = self._pmapped_chi2_calculator(
+        n_devices = jax.local_device_count()
+        n_src_per_device = self.n_src_padded // n_devices
+
+        yoff = params_phys["sources"]["yoff"]
+        xoff = params_phys["sources"]["xoff"]
+        flux = params_phys["sources"]["flux_correction"]
+
+        total_chi2 = self._chi2_global(
             params_phys["beams"],
-            params_phys["sources"],
+            yoff,
+            xoff,
+            flux,
             self.gaussfit_initial_amp_jax_padded,
             self.maps_fft_jax_padded,
             self.noise_psd_jax,
         )
-
-        # Use psum to perform a collective sum of the results from all devices.
-        total_chi2 = jax.lax.psum(per_device_chi2_sums, axis_name="devices")
-
-        # In a multi-host environment, psum returns the global sum on each host.
-        # For single-host, multi-device, this gives the total sum.
-        return total_chi2[0] if isinstance(per_device_chi2_sums, jax.Array) else total_chi2
+        return total_chi2            # already replicated, no psum needed
 
     def _get_individual_chi2s(self, params_logit):
         """Get individual chi2 values for each source (not JIT compiled)."""
         # Convert to physical space
-        params_phys = self.param_manager.to_physical(params_logit)
+        params_phys = params_from_logit(params_logit, self.config)
 
         in_axes = (
-            None,  # beam_params_phys - not sharded (same for all sources)
-            {"yoff": 0, "xoff": 0, "flux_correction": 0},  # source_params_phys - sharded along axis 0
+            None,  # beam_params_list - not sharded (same for all sources)
+            0,  # yoff - sharded along axis 0
+            0,  # xoff - sharded along axis 0
+            0,  # flux_correction - sharded along axis 0
             0,  # initial_amplitudes - sharded along axis 0
             0,  # data_fft_src - sharded along axis 0
             None,  # noise_psd_src - let's assume it's shared (we'll need to fix this for noise PSDs that are more individual)
         )
 
-        def vmap_friendly_loss(beam_params_phys, source_params_phys, initial_amplitudes, data_fft_src, noise_psd_src):
-            # data_fft_src has shape (y, x, band, stokes)
-            # noise_psd_src has shape (y, x, band, stokes)
-            # initial_amplitudes has shape (band, stokes)
-            return self._objective_function_single_source_core(beam_params_phys, source_params_phys, initial_amplitudes, data_fft_src, noise_psd_src)
+        def vmap_friendly_loss(beam_params_list, yoff, xoff, flux_correction, initial_amplitudes, data_fft_src, noise_psd_src):
+            return self._objective_function_single_source(beam_params_list, yoff, xoff, flux_correction, initial_amplitudes, data_fft_src, noise_psd_src)
 
         # Use the core objective function
         vmap_loss = jax.vmap(vmap_friendly_loss, in_axes=in_axes)
 
         all_chi2s = vmap_loss(
             params_phys["beams"],
-            params_phys["sources"],
+            params_phys["sources"]["yoff"],
+            params_phys["sources"]["xoff"],
+            params_phys["sources"]["flux_correction"],
             self.gaussfit_initial_amp_jax_padded,
             self.maps_fft_jax_padded,
             self.noise_psd_jax,
@@ -580,31 +543,33 @@ class PolarizedBeamFitter:
         print(f"Starting optimization with max_steps={self.config.n_steps}...")
 
         solver = optx.BFGS(rtol=1e-12, atol=1e-12)
-        y0 = self.params
-        sol = optx.minimise(self.objective_function, solver, y0, max_steps=self.config.n_steps, throw=False)
+        y0 = self.params_logit
+        
+        with jax.sharding.use_mesh(self.mesh):
+            sol = optx.minimise(self.objective_function, solver, y0, max_steps=self.config.n_steps, throw=False)
 
         if sol.result != optx.RESULTS.successful:
             print(f"ERROR! BFGS did not converge successfully in {self.config.n_steps} steps.")
             print(f"Final physical params: {self.get_physical_params(sol.value)}")
             raise RuntimeError(optx.RESULTS[sol.result])
 
-        self.params = sol.value
+        self.params_logit = sol.value
 
         print(f"Optimization finished after {sol.stats['num_steps']} steps.")
         print(optx.RESULTS[sol.result])
 
         # Calculate final chi2
-        final_chi2s = self._get_individual_chi2s(self.params)
+        final_chi2s = self._get_individual_chi2s(self.params_logit)
         self.latest_chi2s = np.array(final_chi2s)
         print(f"Final chi2: {np.sum(self.latest_chi2s)}")
 
-        return self.get_physical_params(self.params)
+        return self.get_physical_params(self.params_logit)
 
     def get_physical_params(self, params_logit=None):
         """Convert parameters from logit space to physical space."""
         if params_logit is None:
-            params_logit = self.params
-        return self.param_manager.to_physical(params_logit)
+            params_logit = self.params_logit
+        return params_from_logit(params_logit, self.config)
 
     # NUTS sampling methods
     def sample_with_nuts_uniform(
@@ -670,34 +635,36 @@ class PolarizedBeamFitter:
         }
 
     def _unflatten_samples(self, flat_samples):
-        """Unflattens the output of mcmc.get_samples() back into a pytree."""
-        # Use the structure of the initial parameters as a template
-        template_tree = self.get_physical_params()
+        """Unflattens the output of mcmc.get_samples() back into our parameter structure."""
+        samples_phys = {"beams": [], "sources": {}}
 
-        # Get the paths and leaves of the template tree
-        leaves, treedef = jax.tree_util.tree_flatten_with_path(template_tree)
+        # Reconstruct beam parameters
+        for band_idx, band in enumerate(self.config.bands):
+            beam_samples = {}
+            for param_name in self.config.beam_coeff_bounds.keys():
+                key = f"beam_{band_idx}_{param_name}"
+                if key in flat_samples:
+                    beam_samples[param_name] = flat_samples[key]
+                else:
+                    raise KeyError(f"Sample key '{key}' not found in MCMC output.")
+            samples_phys["beams"].append(beam_samples)
 
-        # Reconstruct the list of leaves from the flat samples dict
-        new_leaves = []
-        for path, _ in leaves:
-            # Recreate the flattened key used by numpyro (e.g., 'beams__90GHz__beta_T')
-            key = "__".join(str(p.key) for p in path)
-            if key in flat_samples:
-                new_leaves.append(flat_samples[key])
+        # Reconstruct source parameters
+        for param_name in ["yoff", "xoff", "flux_correction"]:
+            if param_name in flat_samples:
+                samples_phys["sources"][param_name] = flat_samples[param_name]
             else:
-                # This should not happen if all params are sampled
-                raise KeyError(f"Sample key '{key}' not found in MCMC output.")
+                raise KeyError(f"Sample key '{param_name}' not found in MCMC output.")
 
-        # Use the treedef to reconstruct the pytree
-        return jax.tree_util.tree_unflatten(treedef, new_leaves)
+        return samples_phys
 
     def _nuts_model(self, *args, **kwargs):
         """Numpyro model with uniform priors in physical space."""
-        # Sample all parameters in physical space based on the manager's spec tree
+        # Sample all parameters in physical space
         params_phys = self._sample_params_phys_uniform()
 
         # Convert to logit space for the objective function
-        params_logit = self.param_manager.to_logit(params_phys)
+        params_logit = params_to_logit(params_phys, self.config)
 
         # Calculate chi2 and add to likelihood
         chi2_total = self.objective_function(params_logit, None)
@@ -705,35 +672,59 @@ class PolarizedBeamFitter:
         numpyro.factor("likelihood", -0.5 * norm * chi2_total)
 
     def _sample_params_phys_uniform(self):
-        """Sample all physical parameters using uniform priors from the ParameterManager spec."""
-        # Get the pytree structure with initial physical values (for shapes)
-        initial_params_phys = self.param_manager.get_initial_params(in_logit_space=False)
-        spec_tree = self.param_manager._spec_tree
+        """Sample all physical parameters using uniform priors from config bounds."""
+        params_phys = {"beams": [], "sources": {}}
 
-        def sample_leaf(path, leaf_value):
-            # Retrieve bounds for the current parameter from the spec tree
-            bounds = self.param_manager._get_bounds_from_path(path)
-            low, high = jnp.asarray(bounds[0], dtype=jnp.float32), jnp.asarray(bounds[1], dtype=jnp.float32)
+        # Sample beam parameters for each band
+        for band_idx, band in enumerate(self.config.bands):
+            beam_params = {}
+            for param_name, bounds in self.config.beam_coeff_bounds.items():
+                low, high = jnp.asarray(bounds[0], dtype=jnp.float32), jnp.asarray(bounds[1], dtype=jnp.float32)
+                # Create unique name for numpyro
+                name = f"beam_{band_idx}_{param_name}"
+                # Get shape from initial params
+                initial_shape = self.params_physical["beams"][band_idx][param_name].shape
+                if initial_shape == ():
+                    # Scalar parameter
+                    beam_params[param_name] = numpyro.sample(name, dist.Uniform(low, high))
+                else:
+                    # Array parameter
+                    uniform_dist = dist.Uniform(low=jnp.full(initial_shape, low), high=jnp.full(initial_shape, high))
+                    beam_params[param_name] = numpyro.sample(name, uniform_dist.to_event(len(initial_shape)))
+            params_phys["beams"].append(beam_params)
 
-            # Create a distribution with the same shape as the parameter
-            uniform_dist = dist.Uniform(low=jnp.full_like(leaf_value, low), high=jnp.full_like(leaf_value, high))
+        # Sample source parameters
+        yoff_bounds, xoff_bounds, flux_bounds = self.config.source_bounds
 
-            # Create a unique name for numpyro sampling (e.g., "beams__90GHz__beta_T")
-            name = "__".join(str(p.key) for p in path)
+        params_phys["sources"] = {
+            "yoff": numpyro.sample("yoff", dist.Uniform(low=jnp.full((self.n_src_padded,), yoff_bounds[0]), high=jnp.full((self.n_src_padded,), yoff_bounds[1])).to_event(1)),
+            "xoff": numpyro.sample("xoff", dist.Uniform(low=jnp.full((self.n_src_padded,), xoff_bounds[0]), high=jnp.full((self.n_src_padded,), xoff_bounds[1])).to_event(1)),
+            "flux_correction": numpyro.sample(
+                "flux_correction",
+                dist.Uniform(low=jnp.full((self.n_src_padded, self.n_bands, 3), flux_bounds[0]), high=jnp.full((self.n_src_padded, self.n_bands, 3), flux_bounds[1])).to_event(3),
+            ),
+        }
 
-            return numpyro.sample(name, uniform_dist.to_event(leaf_value.ndim))
-
-        # Use tree_map_with_path to apply the sampling function to each leaf
-        return jax.tree_util.tree_map_with_path(sample_leaf, initial_params_phys)
+        return params_phys
 
     def _nuts_init(self):
         """Initialize NUTS at current physical parameter values."""
         # Get the current best-fit parameters in physical space
-        phys = self.get_physical_params(self.params)
+        phys = self.get_physical_params(self.params_logit)
 
-        # Flatten the pytree into a dictionary with numpyro-compatible keys
-        flat_phys_params, _ = jax.tree_util.tree_flatten_with_path(phys)
-        init_vals = {"__".join(str(p.key) for p in path): jnp.asarray(val, dtype=jnp.float32) for path, val in flat_phys_params}
+        # Create numpyro-compatible initialization dictionary
+        init_vals = {}
+
+        # Add beam parameters
+        for band_idx, beam_params in enumerate(phys["beams"]):
+            for param_name, param_value in beam_params.items():
+                key = f"beam_{band_idx}_{param_name}"
+                init_vals[key] = jnp.asarray(param_value, dtype=jnp.float32)
+
+        # Add source parameters
+        init_vals["yoff"] = jnp.asarray(phys["sources"]["yoff"], dtype=jnp.float32)
+        init_vals["xoff"] = jnp.asarray(phys["sources"]["xoff"], dtype=jnp.float32)
+        init_vals["flux_correction"] = jnp.asarray(phys["sources"]["flux_correction"], dtype=jnp.float32)
 
         return init_to_value(values=init_vals)
 
@@ -741,8 +732,8 @@ class PolarizedBeamFitter:
         """Create centered beam maps for radial profile plotting."""
         beam_T_maps = {}
         beam_P_maps = {}
-        for band in self.bands:
-            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(best_fit_params["beams"][band], 0.0, 0.0)
+        for band_idx, band in enumerate(self.bands):
+            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(best_fit_params["beams"][band_idx], 0.0, 0.0)
             beam_T_maps[band] = beam_T_map
             beam_P_maps[band] = beam_P_map
         return beam_T_maps, beam_P_maps

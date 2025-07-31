@@ -531,7 +531,10 @@ def to_logit(value, bounds):
         Parameter in logit space
     """
     lower, upper = bounds
-    return jnp.log((value - lower) / (upper - value))
+    value_scaled = (value - lower) / (upper - lower)
+    # Clamp to avoid numerical issues
+    value_scaled = jnp.clip(value_scaled, 1e-8, 1.0 - 1e-8)
+    return jnp.log(value_scaled / (1.0 - value_scaled))
 
 
 def from_logit(logit_value, bounds):
@@ -552,3 +555,85 @@ def from_logit(logit_value, bounds):
     """
     lower, upper = bounds
     return lower + (upper - lower) * jax.nn.sigmoid(logit_value)
+
+
+def params_to_logit(physical_params, config):
+    """
+    Convert entire physical parameter dictionary to logit space for optimization.
+
+    Parameters:
+    -----------
+    physical_params : dict
+        Physical parameters with structure:
+        {
+            "beams": [beam_params_band0, beam_params_band1, ...],
+            "sources": {
+                "yoff": array (n_src,),
+                "xoff": array (n_src,),
+                "flux_correction": array (n_src, n_bands, 3)
+            }
+        }
+    config : BeamFittingConfig
+        Configuration object with bounds
+
+    Returns:
+    --------
+    dict
+        Parameters in logit space with same structure
+    """
+    logit_params = {"beams": [], "sources": {}}
+
+    # Convert beam parameters for each band
+    for band_idx, beam_params in enumerate(physical_params["beams"]):
+        beam_logit = {}
+        for param_name, param_value in beam_params.items():
+            bounds = config.beam_coeff_bounds[param_name]
+            beam_logit[param_name] = to_logit(param_value, bounds)
+        logit_params["beams"].append(beam_logit)
+
+    # Convert source parameters
+    yoff_bounds, xoff_bounds, flux_bounds = config.source_bounds
+    logit_params["sources"] = {
+        "yoff": to_logit(physical_params["sources"]["yoff"], yoff_bounds),
+        "xoff": to_logit(physical_params["sources"]["xoff"], xoff_bounds),
+        "flux_correction": to_logit(physical_params["sources"]["flux_correction"], flux_bounds),
+    }
+
+    return logit_params
+
+
+def params_from_logit(logit_params, config):
+    """
+    Convert logit parameter dictionary back to physical space.
+
+    Parameters:
+    -----------
+    logit_params : dict
+        Parameters in logit space
+    config : BeamFittingConfig
+        Configuration object with bounds
+
+    Returns:
+    --------
+    dict
+        Physical parameters
+    """
+    physical_params = {"beams": [], "sources": {}}
+
+    # Convert beam parameters for each band
+    for band_idx, beam_logit in enumerate(logit_params["beams"]):
+        beam_physical = {}
+        for param_name, logit_value in beam_logit.items():
+            bounds = config.beam_coeff_bounds[param_name]
+            beam_physical[param_name] = from_logit(logit_value, bounds)
+        physical_params["beams"].append(beam_physical)
+
+    # Convert source parameters
+    yoff_bounds, xoff_bounds, flux_bounds = config.source_bounds
+    physical_params["sources"] = {
+        "yoff": from_logit(logit_params["sources"]["yoff"], yoff_bounds),
+        "xoff": from_logit(logit_params["sources"]["xoff"], xoff_bounds),
+        "flux_correction": from_logit(logit_params["sources"]["flux_correction"], flux_bounds),
+    }
+
+    return physical_params

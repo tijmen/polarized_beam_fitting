@@ -31,7 +31,7 @@ class BeamModelBase(ABC):
         Evaluates the T and P beam maps.
 
         Args:
-            params (dict): Dictionary for which params["beam"] contains the beam parameters.
+            params (dict): Dictionary containing the beam parameters.
             dx (float): Source x-offset.
             dy (float): Source y-offset.
 
@@ -41,12 +41,12 @@ class BeamModelBase(ABC):
         pass
 
     @abstractmethod
-    def get_human_readable_params(self, physical_params):
+    def get_human_readable_params(self, params):
         """Returns a human-readable dictionary of parameters."""
         pass
 
     @abstractmethod
-    def get_profiles_for_plotting(self, fit_params):
+    def get_profiles_for_plotting(self, params):
         """
         Returns (r_fine, profile_T, profile_P, info_dict) for plotting.
         info_dict should include model-specific label strings and normalization info.
@@ -66,7 +66,7 @@ class BeamModelBspline(BeamModelBase):
     boundary conditions for the beam profile.
     """
 
-    def __init__(self, config, x_grid, y_grid, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5, fwhm_arcmin=1.0):
+    def __init__(self, config, x_grid, y_grid, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
         """
         Initialize the beam model.
 
@@ -78,21 +78,22 @@ class BeamModelBspline(BeamModelBase):
             Maximum radius in arcminutes
         knot_spacing_arcmin : float
             Spacing between knots in arcminutes
-        fwhm_arcmin : float
-            Expected FWHM for the Gaussian-based particular solution
         """
         super().__init__(config, x_grid, y_grid)
         self.spline_k = spline_k
         self.spline_rmax_arcmin = spline_rmax_arcmin
         self.knot_spacing_arcmin = knot_spacing_arcmin
-        self.fwhm_arcmin = fwhm_arcmin
+
+        # Get FWHM from config
+        bands = self.config.bands
+        self.fwhm_arcmin = self.config.band_fwhm_arcmin[bands[0]]
 
         # Setup the orthonormal basis
         (r_fine_jax, self.ortho_basis_funcs_jax, self.n_fittable_coeffs, self.r_knots) = self._setup_spline_lut()
         self.r_fine_jax = r_fine_jax
 
         # Define parameter names for the base class methods
-        self.param_names = ["beam_T_coeffs", "beam_P_coeffs"]
+        self.param_names = ["T_coeffs", "P_coeffs"]
 
     def _setup_spline_lut(self):
         """
@@ -307,11 +308,11 @@ class BeamModelBspline(BeamModelBase):
         return r_fine_jax, ortho_basis_funcs_jax, self.n_fittable_coeffs, self.r_knots
 
     def get_initial_physical_params(self):
-        """Returns initial parameters in physical space."""
+        """Returns initial parameters."""
         bands = self.config.bands
         fwhm_arcmin = self.config.band_fwhm_arcmin[bands[0]]
         initial_coeffs = self.fit_gaussian_coefficients(fwhm_arcmin)
-        return {"beam_T_coeffs": initial_coeffs.copy(), "beam_P_coeffs": initial_coeffs.copy()}
+        return {"T_coeffs": initial_coeffs.copy(), "P_coeffs": initial_coeffs.copy()}
 
     def evaluate_beam_profile(self, coeffs, r_values):
         """
@@ -399,19 +400,19 @@ class BeamModelBspline(BeamModelBase):
 
     def evaluate_beam_maps(self, params, dx, dy):
         r_map_arcmin = self._calculate_r_map(dx, dy)
-        beam_T_map = self.evaluate_beam_profile(params["beam"]["beam_T_coeffs"], r_map_arcmin)
-        beam_P_map = self.evaluate_beam_profile(params["beam"]["beam_P_coeffs"], r_map_arcmin)
+        beam_T_map = self.evaluate_beam_profile(params["T_coeffs"], r_map_arcmin)
+        beam_P_map = self.evaluate_beam_profile(params["P_coeffs"], r_map_arcmin)
         return beam_T_map, beam_P_map
 
-    def get_human_readable_params(self, physical_params):
+    def get_human_readable_params(self, params):
         return {
-            "beam_T_coeffs": np.array(physical_params["beam"]["beam_T_coeffs"]),
-            "beam_P_coeffs": np.array(physical_params["beam"]["beam_P_coeffs"]),
+            "beam_T_coeffs": np.array(params["T_coeffs"]),
+            "beam_P_coeffs": np.array(params["P_coeffs"]),
         }
 
-    def get_profiles_for_plotting(self, fit_params):
-        fitted_coeffs_T = fit_params["beam"]["beam_T_coeffs"]
-        fitted_coeffs_P = fit_params["beam"]["beam_P_coeffs"]
+    def get_profiles_for_plotting(self, params):
+        fitted_coeffs_T = params["T_coeffs"]
+        fitted_coeffs_P = params["P_coeffs"]
         r_fine = np.array(self.r_fine_jax)
         particular = np.array(self.particular_func_jax)
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
@@ -452,7 +453,7 @@ class BeamModelGaussian(BeamModelBase):
         self.n_fittable_coeffs = 2
 
     def get_initial_physical_params(self):
-        """Returns the initial guess for T and P widths in physical space."""
+        """Returns the initial guess for T and P widths."""
         # Use band FWHM as initial guess for both T and P
         bands = self.config.bands
         band_fwhm = self.config.band_fwhm_arcmin.get(bands[0], 1.1)  # Default fallback
@@ -462,8 +463,8 @@ class BeamModelGaussian(BeamModelBase):
         """
         Evaluates the T and P beam maps for the Gaussian model.
         """
-        T_width_arcmin = params["beam"]["T_width_arcmin"]
-        P_width_arcmin = params["beam"]["P_width_arcmin"]
+        T_width_arcmin = params["T_width_arcmin"]
+        P_width_arcmin = params["P_width_arcmin"]
 
         sigma_T_arcmin = T_width_arcmin / (2 * jnp.sqrt(2 * jnp.log(2)))
         sigma_P_arcmin = P_width_arcmin / (2 * jnp.sqrt(2 * jnp.log(2)))
@@ -478,15 +479,15 @@ class BeamModelGaussian(BeamModelBase):
     def get_human_readable_params(self, params, prefix=""):
         """Returns a human-readable dictionary of the parameters."""
         return {
-            f"{prefix}T_width_arcmin": float(params["beam"]["T_width_arcmin"]),
-            f"{prefix}P_width_arcmin": float(params["beam"]["P_width_arcmin"]),
+            f"{prefix}T_width_arcmin": float(params["T_width_arcmin"]),
+            f"{prefix}P_width_arcmin": float(params["P_width_arcmin"]),
         }
 
-    def get_profiles_for_plotting(self, fit_params):
+    def get_profiles_for_plotting(self, params):
         r_max = 10.0
         r_fine = np.linspace(0, r_max, 1000)
-        T_width_arcmin = fit_params["beam"]["T_width_arcmin"]
-        P_width_arcmin = fit_params["beam"]["P_width_arcmin"]
+        T_width_arcmin = params["T_width_arcmin"]
+        P_width_arcmin = params["P_width_arcmin"]
         T_sigma = T_width_arcmin / (2 * np.sqrt(2 * np.log(2)))
         P_sigma = P_width_arcmin / (2 * np.sqrt(2 * np.log(2)))
         profile_T_fine = np.exp(-0.5 * (r_fine / T_sigma) ** 2)
@@ -546,7 +547,7 @@ class BeamModelBetaPol(BeamModelBase):
         self.Bmain_r_norm_np = beam_data[bmain_key]
 
     def get_initial_physical_params(self):
-        """Returns the initial guess for beta_pol in physical space."""
+        """Returns the initial guess for beta_pol."""
         return {"beta_pol": 0.5}  # Start in the middle
 
     def evaluate_beam_profile_P(self, params, r_values):
@@ -558,7 +559,7 @@ class BeamModelBetaPol(BeamModelBase):
             params (dict): Dictionary containing beam parameters.
             r_values (jnp.ndarray): The radial points at which to evaluate the profile.
         """
-        beta_pol = params["beam"]["beta_pol"]
+        beta_pol = params["beta_pol"]
 
         # P beam: interpolate between Bmain and BT
         profile_fine = self.Bmain_r_norm_jax + beta_pol * (self.BT_r_norm_jax - self.Bmain_r_norm_jax)
@@ -574,10 +575,10 @@ class BeamModelBetaPol(BeamModelBase):
 
     def get_human_readable_params(self, params, prefix=""):
         """Returns a human-readable dictionary of the parameters."""
-        return {f"{prefix}beta_pol": float(params["beam"]["beta_pol"])}
+        return {f"{prefix}beta_pol": float(params["beta_pol"])}
 
-    def get_profiles_for_plotting(self, fit_params):
-        beta_pol = fit_params["beam"]["beta_pol"]
+    def get_profiles_for_plotting(self, params):
+        beta_pol = params["beta_pol"]
         r_fine = self.r_fine_np
         profile_T_fine = self.BT_r_norm_np
         profile_P_fine = self.Bmain_r_norm_np + beta_pol * (self.BT_r_norm_np - self.Bmain_r_norm_np)
@@ -637,7 +638,7 @@ class BeamModelBetaTest(BeamModelBase):
         self.Bmain_r_norm_np = beam_data[bmain_key]
 
     def get_initial_physical_params(self):
-        """Returns the initial guess for beta_T in physical space."""
+        """Returns the initial guess for beta_T."""
         return {"beta_T": 0.5}  # Start in the middle
 
     def evaluate_beam_profile_T(self, params, r_values):
@@ -649,7 +650,7 @@ class BeamModelBetaTest(BeamModelBase):
             params (dict): Dictionary containing beam parameters.
             r_values (jnp.ndarray): The radial points at which to evaluate the profile.
         """
-        beta_T = params["beam"]["beta_T"]
+        beta_T = params["beta_T"]
 
         # T beam: interpolate between Bmain and BT
         profile_fine = self.Bmain_r_norm_jax + beta_T * (self.BT_r_norm_jax - self.Bmain_r_norm_jax)
@@ -665,10 +666,10 @@ class BeamModelBetaTest(BeamModelBase):
 
     def get_human_readable_params(self, params, prefix=""):
         """Returns a human-readable dictionary of the parameters."""
-        return {f"{prefix}beta_T": float(params["beam"]["beta_T"])}
+        return {f"{prefix}beta_T": float(params["beta_T"])}
 
-    def get_profiles_for_plotting(self, fit_params):
-        beta_T = fit_params["beam"]["beta_T"]
+    def get_profiles_for_plotting(self, params):
+        beta_T = params["beta_T"]
         r_fine = self.r_fine_np
         profile_T_fine = self.Bmain_r_norm_np + beta_T * (self.BT_r_norm_np - self.Bmain_r_norm_np)
         profile_P_fine = self.Bmain_r_norm_np
@@ -875,7 +876,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
 
     def get_initial_physical_params(self):
-        """Returns initial guess for all parameters in physical space."""
+        """Returns initial guess for all parameters."""
         # Use band FWHM for initial Gaussian sigma (shared between T and P)
         bands = self.config.bands
         band_fwhm = self.config.band_fwhm_arcmin.get(bands[0], 1.1)
@@ -929,23 +930,23 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
     def evaluate_beam_maps(self, params, dx, dy):
         r_map_arcmin = self._calculate_r_map(dx, dy)
-        beam_T_map = self.evaluate_beam_profile(params["beam"]["gaussian_sigma_arcmin"], params["beam"]["bspline_coeffs_T"], r_map_arcmin)
-        beam_P_map = self.evaluate_beam_profile(params["beam"]["gaussian_sigma_arcmin"], params["beam"]["bspline_coeffs_P"], r_map_arcmin)
+        beam_T_map = self.evaluate_beam_profile(params["gaussian_sigma_arcmin"], params["bspline_coeffs_T"], r_map_arcmin)
+        beam_P_map = self.evaluate_beam_profile(params["gaussian_sigma_arcmin"], params["bspline_coeffs_P"], r_map_arcmin)
         return beam_T_map, beam_P_map
 
     def get_human_readable_params(self, params, prefix=""):
         """Returns a human-readable dictionary of the parameters."""
-        result = {f"{prefix}gaussian_sigma_arcmin": float(params["beam"]["gaussian_sigma_arcmin"])}
-        for i, c in enumerate(params["beam"]["bspline_coeffs_T"]):
+        result = {f"{prefix}gaussian_sigma_arcmin": float(params["gaussian_sigma_arcmin"])}
+        for i, c in enumerate(params["bspline_coeffs_T"]):
             result[f"{prefix}bspline_coeff_T_{i}"] = float(c)
-        for i, c in enumerate(params["beam"]["bspline_coeffs_P"]):
+        for i, c in enumerate(params["bspline_coeffs_P"]):
             result[f"{prefix}bspline_coeff_P_{i}"] = float(c)
         return result
 
-    def get_profiles_for_plotting(self, fit_params):
-        gaussian_sigma = fit_params["beam"]["gaussian_sigma_arcmin"]
-        bspline_coeffs_T = fit_params["beam"]["bspline_coeffs_T"]
-        bspline_coeffs_P = fit_params["beam"]["bspline_coeffs_P"]
+    def get_profiles_for_plotting(self, params):
+        gaussian_sigma = params["gaussian_sigma_arcmin"]
+        bspline_coeffs_T = params["bspline_coeffs_T"]
+        bspline_coeffs_P = params["bspline_coeffs_P"]
         r_fine = np.array(self.r_fine_jax)
         gaussian_component = np.exp(-0.5 * (r_fine / gaussian_sigma) ** 2)
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
