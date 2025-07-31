@@ -568,25 +568,28 @@ class BeamPlotter:
             if rank <= len(p_amp_sources):
                 p_amp, source_id, idx = p_amp_sources[rank - 1]
                 print(f"\nCreating model/data/residual plot for rank #{rank} source: {source_id} (p_amp = {p_amp:.1f} mK)")
-                filename = self._create_source_diagnostic_plot(source_id, rank, maps_numpy, model_maps, central_crop, save)
+                filename = self._create_source_diagnostic_plot(source_id, idx, rank, maps_numpy, model_maps, central_crop, save)
                 if filename:
                     filenames.append(filename)
                     print(f"Saved model/data/residual plot to: {filename}")
 
         return filenames
 
-    def _create_source_diagnostic_plot(self, source_id, rank, data_maps, model_maps, central_crop=None, save=True):
+    def _create_source_diagnostic_plot(self, source_id, source_idx, rank, data_maps, model_maps, central_crop=None, save=True):
         """Create a diagnostic plot for a single source."""
-        if self.is_multiband:
-            # For multi-band, use primary band for plotting
-            band = self.primary_band
-            data = data_maps[source_id][band]
-            model = model_maps[source_id][band]
-            band_suffix = self._get_band_suffix(band)
-        else:
-            data = data_maps[source_id]
-            model = model_maps[source_id]
-            band_suffix = self._get_band_suffix()
+        # For multi-band, use primary band for plotting, but this code works for single-band too
+        band = self.primary_band
+        band_idx = self.bands.index(band)
+        band_suffix = self._get_band_suffix(band)
+
+        # Extract data from the numpy array using the source index
+        data = {
+            "T": data_maps[source_idx, :, :, band_idx, 0],
+            "Q": data_maps[source_idx, :, :, band_idx, 1],
+            "U": data_maps[source_idx, :, :, band_idx, 2],
+        }
+        # Extract model from the dictionary using source_id and band
+        model = model_maps[source_id][band]
 
         residual = {k: data[k] - model[k] for k in data}
 

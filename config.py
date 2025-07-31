@@ -99,7 +99,7 @@ class BeamFittingConfig:
 
     # Default bounds for each beam model type
     beam_model_bounds = {
-        "b_spline": {"beam_T_coeffs": (-0.5, 1.5), "beam_P_coeffs": (-0.5, 1.5)},
+        "b_spline": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
         "betapol": {"beta_pol": (-0.5, 2.0)},
         "betatest": {"beta_T": (-0.5, 2.0)},

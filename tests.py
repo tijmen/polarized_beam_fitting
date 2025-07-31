@@ -35,7 +35,7 @@ def get_test_config(beam_model_type="gaussian"):
     config.reso_arcmin = 0.1
     config.apodization_width_pix = 5
     config.n_steps = 5000
-    config.noise_psd_method = "white_noise"
+    config.noise_psd_method = "white_noise_scaled"
     config.bands = ["150GHz"]
 
     # Use temporary directories

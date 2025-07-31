@@ -104,6 +104,7 @@ class BootstrapBeamFitter:
             print("Using warm-start strategy: each iteration starts from previous optimum")
         else:
             # Cold-start: use the same initial parameters that the global fit started from
+            print("Warning: cold-start is not implemented. Switching to warm-start approach...")
             initial_params_logit = jax.tree_util.tree_map(lambda x: x, self.base_fitter.params_logit)
             print("Using cold-start strategy: each iteration starts from same initial params as global fit")
 

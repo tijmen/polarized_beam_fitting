@@ -656,16 +656,28 @@ class PolarizedBeamFitter:
 
         return samples_phys
 
+    def _nuts_likelihood(self, params_phys):
+        """Likelihood function for NUTS that works directly with physical parameters."""
+        yoff = params_phys["sources"]["yoff"]
+        xoff = params_phys["sources"]["xoff"]
+        flux = params_phys["sources"]["flux_correction"]
+
+        # This call assumes _chi2_global can be JITted with these inputs
+        total_chi2 = self._chi2_global(
+            params_phys["beams"],
+            yoff,
+            xoff,
+            flux,
+        )
+        return total_chi2
+
     def _nuts_model(self, *args, **kwargs):
         """Numpyro model with uniform priors in physical space."""
         # Sample all parameters in physical space
         params_phys = self._sample_params_phys_uniform()
 
-        # Convert to logit space for the objective function
-        params_logit = params_to_logit(params_phys, self.config)
-
-        # Calculate chi2 and add to likelihood
-        chi2_total = self.objective_function(params_logit, None)
+        chi2_total = self._nuts_likelihood(params_phys)
+        
         norm = jnp.asarray(self.config.chi2_normalization, dtype=jnp.float32)
         numpyro.factor("likelihood", -0.5 * norm * chi2_total)
 
@@ -725,6 +737,52 @@ class PolarizedBeamFitter:
         init_vals["flux_correction"] = jnp.asarray(phys["sources"]["flux_correction"], dtype=jnp.float32)
 
         return init_to_value(values=init_vals)
+
+    def create_final_model_maps(self, best_fit_params):
+        """
+        Create final model maps for all sources given the best-fit parameters.
+        This is a convenience function for plotting and diagnostics.
+        It returns real-space maps, not apodized or FFT'd.
+        """
+        # Get physical parameters. Assume best_fit_params are physical
+        params_phys = best_fit_params
+
+        # Get source and beam parameters for all sources (up to n_src)
+        yoffs = np.array(params_phys["sources"]["yoff"][: self.n_src])
+        xoffs = np.array(params_phys["sources"]["xoff"][: self.n_src])
+        flux_corrections = np.array(params_phys["sources"]["flux_correction"][: self.n_src, :, :])
+        beam_params_list = params_phys["beams"]
+        initial_amplitudes = self.gaussfit_initial_amp_numpy
+
+        model_maps = {}
+
+        for src_idx in range(self.n_src):
+            source_id = self.source_ids[src_idx]
+            model_maps[source_id] = {}
+
+            for band_idx, band in enumerate(self.bands):
+                # Get source-specific parameters
+                yoff = yoffs[src_idx]
+                xoff = xoffs[src_idx]
+
+                # Evaluate beam maps using JAX function and convert to numpy
+                beam_params = beam_params_list[band_idx]
+                beam_T_map_jax, beam_P_map_jax = self.beam_models[band].evaluate_beam_maps(beam_params, yoff, xoff)
+                beam_T_map = np.array(beam_T_map_jax)
+                beam_P_map = np.array(beam_P_map_jax)
+
+                # Calculate final amplitudes
+                final_amplitudes = initial_amplitudes[src_idx, band_idx, :] * flux_corrections[src_idx, band_idx, :]
+
+                # Create real-space model maps for T, Q, U
+                model_maps_stokes = {
+                    "T": beam_T_map * final_amplitudes[0],
+                    "Q": beam_P_map * final_amplitudes[1],
+                    "U": beam_P_map * final_amplitudes[2],
+                }
+                model_maps[source_id][band] = model_maps_stokes
+
+        return model_maps
 
     def create_beam_profile_maps(self, best_fit_params):
         """Create centered beam maps for radial profile plotting."""
