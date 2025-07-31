@@ -88,7 +88,7 @@ class PolarizedBeamFitter:
         # Create separate beam models for each band
         self.beam_models = {}
         for band in self.config.bands:
-            self.beam_models[band] = create_beam_model(self.config, self.x_grid, self.y_grid)
+            self.beam_models[band] = create_beam_model(self.config, self.x_grid, self.y_grid, band)
 
         self.apod_mask = make_apodization_mask(self.map_shape, config.apodization_width_pix)
         self.apod_mask_jax = jax.device_put(self.apod_mask.astype(jnp.float32))
@@ -108,7 +108,7 @@ class PolarizedBeamFitter:
         ) = cache_manager.load_or_create(self._load_and_prepare_data)
 
         # Pad data for even distribution across devices
-        self.n_src_padded, self.source_ids_padded, self.maps_fft_numpy_padded, self.gaussfit_initial_amp_numpy_padded = self._pad_data_for_devices()
+        self.n_src_padded, self.source_ids_padded, self.maps_fft_numpy_padded, self.gaussfit_initial_amp_numpy_padded, self.gaussfit_yoff_numpy_padded, self.gaussfit_xoff_numpy_padded = self._pad_data_for_devices()
 
         # Initialize noise PSD calculator
         self.noise_psd_calculator = create_noise_psd_calculator(self.config, self.map_shape)
@@ -119,6 +119,8 @@ class PolarizedBeamFitter:
         # Convert to JAX format
         self.psd_dtype = jnp.complex64 if self.config.noise_psd_method == "multiband_covariance" else jnp.float32
         self.noise_psd_jax = jax.device_put(self.noise_psd_numpy.astype(self.psd_dtype))
+        self.gaussfit_yoff_jax_padded = jax.device_put(self.gaussfit_yoff_numpy_padded.astype(jnp.float32))
+        self.gaussfit_xoff_jax_padded = jax.device_put(self.gaussfit_xoff_numpy_padded.astype(jnp.float32))
         self.gaussfit_initial_amp_jax_padded = jax.device_put(self.gaussfit_initial_amp_numpy_padded.astype(jnp.float32))
         self.maps_fft_jax_padded = jax.device_put(self.maps_fft_numpy_padded.astype(jnp.complex64))
 
@@ -139,10 +141,14 @@ class PolarizedBeamFitter:
             in_axes=(None, 0, 0, 0, 0, 0, None),
         )
 
-        def _chi2_global(beams, yoff, xoff, flux):
-            return vmap_chi2(beams, yoff, xoff, flux, self.gaussfit_initial_amp_jax_padded, self.maps_fft_jax_padded, self.noise_psd_jax).sum()
+        def _chi2_global(beams, yoff_padded, xoff_padded, flux_padded):
+            return vmap_chi2(
+                beams, yoff_padded, xoff_padded, flux_padded,
+                self.gaussfit_initial_amp_jax_padded,
+                self.maps_fft_jax_padded,
+                self.noise_psd_jax
+            ).sum()
 
-        #self._chi2_global = jax.jit(_chi2_global, in_shardings=(Rep, Sh, Sh, Sh), out_shardings=None)
         self._chi2_global = jax.jit(_chi2_global)
 
     def _pad_data_for_devices(self):
@@ -155,6 +161,8 @@ class PolarizedBeamFitter:
         source_ids_padded = self.source_ids
         maps_fft_numpy_padded = self.maps_fft_numpy
         gaussfit_initial_amp_numpy_padded = self.gaussfit_initial_amp_numpy
+        gaussfit_yoff_numpy_padded = self.gaussfit_yoff_numpy
+        gaussfit_xoff_numpy_padded = self.gaussfit_xoff_numpy
 
         if n_pad > 0:
             print(f"Adding {n_pad} sources to make the new total ({n_src_padded}) divisible by {n_devices} devices.")
@@ -169,7 +177,13 @@ class PolarizedBeamFitter:
             dummy_amps = np.zeros((n_pad, self.n_bands, 3), dtype=self.gaussfit_initial_amp_numpy.dtype)
             gaussfit_initial_amp_numpy_padded = np.concatenate([self.gaussfit_initial_amp_numpy, dummy_amps], axis=0)
 
-        return n_src_padded, source_ids_padded, maps_fft_numpy_padded, gaussfit_initial_amp_numpy_padded
+            dummy_yoff = np.zeros((n_pad, self.n_bands), dtype=self.gaussfit_yoff_numpy.dtype)
+            gaussfit_yoff_numpy_padded = np.concatenate([self.gaussfit_yoff_numpy, dummy_yoff], axis=0)
+
+            dummy_xoff = np.zeros((n_pad, self.n_bands), dtype=self.gaussfit_xoff_numpy.dtype)
+            gaussfit_xoff_numpy_padded = np.concatenate([self.gaussfit_xoff_numpy, dummy_xoff], axis=0)
+
+        return n_src_padded, source_ids_padded, maps_fft_numpy_padded, gaussfit_initial_amp_numpy_padded, gaussfit_yoff_numpy_padded, gaussfit_xoff_numpy_padded
 
     def _get_initial_physical_params(self):
         """
@@ -196,13 +210,16 @@ class PolarizedBeamFitter:
             beam_params_jax = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), beam_params)
             params_physical["beams"].append(beam_params_jax)
 
-        # Initialize source parameters using defaults from config
-        yoff_init, xoff_init, flux_init = self.config.source_inits
+        band_for_positions = "150GHz" if "150GHz" in self.bands else self.bands[0]
+        band_index = self.bands.index(band_for_positions)
+        yoff_init = self.gaussfit_yoff_numpy[:, band_index]
+        xoff_init = self.gaussfit_xoff_numpy[:, band_index]
+        flux_init = 0.99 # 1.0 would be fine, but just to be on the safe side, let's pick a less precise number
 
         params_physical["sources"] = {
-            "yoff": jnp.full((self.n_src_padded,), yoff_init, dtype=jnp.float32), # TODO: set this to the gaussian fit value, and remove yoff_init and xoff_init from the config
-            "xoff": jnp.full((self.n_src_padded,), xoff_init, dtype=jnp.float32),
-            "flux_correction": jnp.full((self.n_src_padded, self.n_bands, 3), flux_init, dtype=jnp.float32),
+            "yoff": jnp.asarray(yoff_init, dtype=jnp.float32),
+            "xoff": jnp.asarray(xoff_init, dtype=jnp.float32),
+            "flux_correction": jnp.full((self.n_src, self.n_bands, 3), flux_init, dtype=jnp.float32),
         }
 
         return params_physical
@@ -494,15 +511,16 @@ class PolarizedBeamFitter:
         """
         params_phys = params_from_logit(params_logit, self.config)
 
-        yoff = params_phys["sources"]["yoff"]
-        xoff = params_phys["sources"]["xoff"]
-        flux = params_phys["sources"]["flux_correction"]
+        n_pad = self.n_src_padded - self.n_src
+        yoff_padded = jnp.pad(params_phys["sources"]["yoff"], (0, n_pad))
+        xoff_padded = jnp.pad(params_phys["sources"]["xoff"], (0, n_pad))
+        flux_padded = jnp.pad(params_phys["sources"]["flux_correction"], ((0, n_pad), (0, 0), (0, 0)))
 
         total_chi2 = self._chi2_global(
             params_phys["beams"],
-            yoff,
-            xoff,
-            flux,
+            yoff_padded,
+            xoff_padded,
+            flux_padded,
         )
         return total_chi2  # already replicated, no psum needed
 
@@ -526,14 +544,15 @@ class PolarizedBeamFitter:
 
         # Use the core objective function
         vmap_loss = jax.vmap(vmap_friendly_loss, in_axes=in_axes)
-
+        gaussfit_initial_amp_jax = jax.device_put(self.gaussfit_initial_amp_numpy.astype(jnp.float32))
+        maps_fft_jax = jax.device_put(self.maps_fft_numpy.astype(jnp.complex64))
         all_chi2s = vmap_loss(
             params_phys["beams"],
             params_phys["sources"]["yoff"],
             params_phys["sources"]["xoff"],
             params_phys["sources"]["flux_correction"],
-            self.gaussfit_initial_amp_jax_padded,
-            self.maps_fft_jax_padded,
+            gaussfit_initial_amp_jax,
+            maps_fft_jax,
             self.noise_psd_jax,
         )
         return all_chi2s
@@ -663,16 +682,16 @@ class PolarizedBeamFitter:
         """Likelihood function for NUTS that works directly with physical parameters."""
         # Explicitly shard the arrays to match the jit specification
         Sh = jax.sharding.PartitionSpec("devices")
-        yoff = jax.device_put(params_phys["sources"]["yoff"], jax.sharding.NamedSharding(self.mesh, Sh))
-        xoff = jax.device_put(params_phys["sources"]["xoff"], jax.sharding.NamedSharding(self.mesh, Sh))
-        flux = jax.device_put(params_phys["sources"]["flux_correction"], jax.sharding.NamedSharding(self.mesh, Sh))
+        yoff_padded = jax.device_put(jnp.pad(params_phys["sources"]["yoff"], (0, self.n_src_padded - self.n_src)), jax.sharding.NamedSharding(self.mesh, Sh))
+        xoff_padded = jax.device_put(jnp.pad(params_phys["sources"]["xoff"], (0, self.n_src_padded - self.n_src)), jax.sharding.NamedSharding(self.mesh, Sh))
+        flux_padded = jax.device_put(jnp.pad(params_phys["sources"]["flux_correction"], ((0, self.n_src_padded - self.n_src), (0, 0), (0, 0))), jax.sharding.NamedSharding(self.mesh, Sh))
 
         # This call assumes _chi2_global can be JITted with these inputs
         total_chi2 = self._chi2_global(
             params_phys["beams"],
-            yoff,
-            xoff,
-            flux,
+            yoff_padded,
+            xoff_padded,
+            flux_padded,
         )
         return total_chi2
 
@@ -682,7 +701,7 @@ class PolarizedBeamFitter:
         params_phys = self._sample_params_phys_uniform()
 
         chi2_total = self._nuts_likelihood(params_phys)
-        
+
         norm = jnp.asarray(self.config.chi2_normalization, dtype=jnp.float32)
         numpyro.factor("likelihood", -0.5 * norm * chi2_total)
 
@@ -712,11 +731,11 @@ class PolarizedBeamFitter:
         yoff_bounds, xoff_bounds, flux_bounds = self.config.source_bounds
 
         params_phys["sources"] = {
-            "yoff": numpyro.sample("yoff", dist.Uniform(low=jnp.full((self.n_src_padded,), yoff_bounds[0]), high=jnp.full((self.n_src_padded,), yoff_bounds[1])).to_event(1)),
-            "xoff": numpyro.sample("xoff", dist.Uniform(low=jnp.full((self.n_src_padded,), xoff_bounds[0]), high=jnp.full((self.n_src_padded,), xoff_bounds[1])).to_event(1)),
+            "yoff": numpyro.sample("yoff", dist.Uniform(low=jnp.full((self.n_src,), yoff_bounds[0]), high=jnp.full((self.n_src,), yoff_bounds[1])).to_event(1)),
+            "xoff": numpyro.sample("xoff", dist.Uniform(low=jnp.full((self.n_src,), xoff_bounds[0]), high=jnp.full((self.n_src,), xoff_bounds[1])).to_event(1)),
             "flux_correction": numpyro.sample(
                 "flux_correction",
-                dist.Uniform(low=jnp.full((self.n_src_padded, self.n_bands, 3), flux_bounds[0]), high=jnp.full((self.n_src_padded, self.n_bands, 3), flux_bounds[1])).to_event(3),
+                dist.Uniform(low=jnp.full((self.n_src, self.n_bands, 3), flux_bounds[0]), high=jnp.full((self.n_src, self.n_bands, 3), flux_bounds[1])).to_event(3),
             ),
         }
 

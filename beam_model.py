@@ -17,10 +17,12 @@ from .utils import linear_interp_differentiable
 class BeamModelBase(ABC):
     """Abstract base class for all beam models."""
 
-    def __init__(self, config, x_grid, y_grid):
+    def __init__(self, config, x_grid, y_grid, band):
         self.config = config
         self.x_grid = x_grid
         self.y_grid = y_grid
+        self.band = band
+        self.band_GHz = self.band.replace("GHz", "")
 
     @abstractmethod
     def get_initial_physical_params(self):
@@ -68,7 +70,7 @@ class BeamModelBspline(BeamModelBase):
     boundary conditions for the beam profile.
     """
 
-    def __init__(self, config, x_grid, y_grid, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
+    def __init__(self, config, x_grid, y_grid, band, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
         """
         Initialize the beam model.
 
@@ -81,14 +83,13 @@ class BeamModelBspline(BeamModelBase):
         knot_spacing_arcmin : float
             Spacing between knots in arcminutes
         """
-        super().__init__(config, x_grid, y_grid)
+        super().__init__(config, x_grid, y_grid, band)
         self.spline_k = spline_k
         self.spline_rmax_arcmin = spline_rmax_arcmin
         self.knot_spacing_arcmin = knot_spacing_arcmin
 
         # Get FWHM from config
-        bands = self.config.bands
-        self.fwhm_arcmin = self.config.band_fwhm_arcmin[bands[0]]
+        self.fwhm_arcmin = self.config.band_fwhm_arcmin[self.band]
 
         # Setup the orthonormal basis
         (r_fine_jax, self.ortho_basis_funcs_jax, self.n_fittable_coeffs, self.r_knots) = self._setup_spline_lut()
@@ -311,8 +312,7 @@ class BeamModelBspline(BeamModelBase):
 
     def get_initial_physical_params(self):
         """Returns initial parameters."""
-        bands = self.config.bands
-        fwhm_arcmin = self.config.band_fwhm_arcmin[bands[0]]
+        fwhm_arcmin = self.config.band_fwhm_arcmin[self.band]
         initial_coeffs = self.fit_gaussian_coefficients(fwhm_arcmin)
         return {"T_coeffs": initial_coeffs.copy(), "P_coeffs": initial_coeffs.copy()}
 
@@ -421,8 +421,7 @@ class BeamModelBspline(BeamModelBase):
         profile_T_fine = particular + ortho_funcs @ fitted_coeffs_T
         profile_P_fine = particular + ortho_funcs @ fitted_coeffs_P
         # Area normalization (as in plotting.py)
-        bands = self.config.bands
-        band_fwhm_arcmin = self.config.band_fwhm_arcmin[bands[0]]
+        band_fwhm_arcmin = self.config.band_fwhm_arcmin[self.band]
         sigma_arcmin = band_fwhm_arcmin / (2 * np.sqrt(2 * np.log(2)))
         r_max_integration = 2.0 * sigma_arcmin
         mask = r_fine <= r_max_integration
@@ -449,16 +448,15 @@ class BeamModelGaussian(BeamModelBase):
     A simple Gaussian beam model with separate T and P widths.
     """
 
-    def __init__(self, config, x_grid, y_grid):
-        super().__init__(config, x_grid, y_grid)
+    def __init__(self, config, x_grid, y_grid, band):
+        super().__init__(config, x_grid, y_grid, band)
         self.param_names = ["T_width_arcmin", "P_width_arcmin"]
         self.n_fittable_coeffs = 2
 
     def get_initial_physical_params(self):
         """Returns the initial guess for T and P widths."""
         # Use band FWHM as initial guess for both T and P
-        bands = self.config.bands
-        band_fwhm = self.config.band_fwhm_arcmin.get(bands[0], 1.1)  # Default fallback
+        band_fwhm = self.config.band_fwhm_arcmin[self.band]
         return {"T_width_arcmin": band_fwhm, "P_width_arcmin": band_fwhm}
 
     def evaluate_beam_maps(self, params, dx, dy):
@@ -505,19 +503,18 @@ class BeamModelGaussian(BeamModelBase):
 
 class BeamModelBetaPol(BeamModelBase):
     """
-    A beam model that interpolates between two physically-motivated radial profiles.
-    Uses a single parameter, beta_pol, for interpolation.
-    Profile(r) = Bmain_r(r) + beta_pol * (BT_r(r) - Bmain_r(r))
+    A beam model that interpolates between
+     - BT_r(r), the AGN+Saturn stitched beam
+     - Bmain_r(r), the physical model fit to the multiband inner 0.75 arcmin of the stitched beam
+    Uses a single free parameter, beta_pol.
+    Temperature beam(r) = BT_r(t)
+    Polarization beam(r) = Bmain_r(r) + beta_pol * (BT_r(r) - Bmain_r(r))
     """
 
-    def __init__(self, config, x_grid, y_grid):
-        super().__init__(config, x_grid, y_grid)
+    def __init__(self, config, x_grid, y_grid, band):
+        super().__init__(config, x_grid, y_grid, band)
         self.param_names = ["beta_pol"]
         self.n_fittable_coeffs = 1
-
-        # Determine which band to use - extract from sorted bands
-        bands = self.config.bands
-        self.band_number = bands[0].replace("GHz", "")
 
         # Load the pre-calculated beam profiles
         import os
@@ -529,14 +526,14 @@ class BeamModelBetaPol(BeamModelBase):
             raise FileNotFoundError(f"Could not find the betapol data file at {data_path}. Run create_betapol_data.py to generate it.")
 
         # Check if the requested band is available
-        bt_key = f"BT_r_norm_{self.band_number}"
-        bmain_key = f"Bmain_r_norm_{self.band_number}"
+        bt_key = f"BT_r_norm_{self.band_GHz}"
+        bmain_key = f"Bmain_r_norm_{self.band_GHz}"
 
         if bt_key not in beam_data:
             available_bands = [key.split("_")[-1] for key in beam_data.keys() if key.startswith("BT_r_norm_")]
-            raise KeyError(f"Band {self.band_number} GHz not found in betapol data. Available bands: {available_bands} GHz")
+            raise KeyError(f"Band {self.band_GHz} GHz not found in betapol data. Available bands: {available_bands} GHz")
 
-        print(f"Loading betapol beam model for {self.band_number} GHz")
+        print(f"Loading betapol beam model for {self.band_GHz} GHz")
 
         # Store JAX arrays for fast computation
         self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"])
@@ -604,11 +601,10 @@ class BeamModelBetaTest(BeamModelBase):
     B_P_model = Bmain_r(r)
     """
 
-    def __init__(self, config, x_grid, y_grid):
-        super().__init__(config, x_grid, y_grid)
+    def __init__(self, config, x_grid, y_grid, band):
+        super().__init__(config, x_grid, y_grid, band)
         self.param_names = ["beta_T"]
         self.n_fittable_coeffs = 1
-        self.band_number = self.config.bands[0].replace("GHz", "")
 
         # Load the pre-calculated beam profiles
         import os
@@ -620,14 +616,14 @@ class BeamModelBetaTest(BeamModelBase):
             raise FileNotFoundError(f"Could not find the betapol data file at {data_path}. Run create_betapol_data.py to generate it.")
 
         # Check if the requested band is available
-        bt_key = f"BT_r_norm_{self.band_number}"
-        bmain_key = f"Bmain_r_norm_{self.band_number}"
+        bt_key = f"BT_r_norm_{self.band_GHz}"
+        bmain_key = f"Bmain_r_norm_{self.band_GHz}"
 
         if bt_key not in beam_data:
             available_bands = [key.split("_")[-1] for key in beam_data.keys() if key.startswith("BT_r_norm_")]
-            raise KeyError(f"Band {self.band_number} GHz not found in betapol data. Available bands: {available_bands} GHz")
+            raise KeyError(f"Band {self.band_GHz} GHz not found in betapol data. Available bands: {available_bands} GHz")
 
-        print(f"Loading betatest beam model for {self.band_number} GHz")
+        print(f"Loading betatest beam model for {self.band_GHz} GHz")
 
         # Store JAX arrays for fast computation
         self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"])
@@ -697,8 +693,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
     - No boundary conditions on B-splines
     """
 
-    def __init__(self, config, x_grid, y_grid):
-        super().__init__(config, x_grid, y_grid)
+    def __init__(self, config, x_grid, y_grid, band):
+        super().__init__(config, x_grid, y_grid, band)
         self.param_names = ["gaussian_sigma_arcmin", "bspline_coeffs_T", "bspline_coeffs_P"]
         self.spline_k = config.spline_k
         self.spline_rmax_arcmin = config.spline_rmax_arcmin
@@ -880,8 +876,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
     def get_initial_physical_params(self):
         """Returns initial guess for all parameters."""
         # Use band FWHM for initial Gaussian sigma (shared between T and P)
-        bands = self.config.bands
-        band_fwhm = self.config.band_fwhm_arcmin.get(bands[0], 1.1)
+        band_fwhm = self.config.band_fwhm_arcmin[self.band]
         initial_sigma = band_fwhm / (2 * np.sqrt(2 * np.log(2)))  # Convert FWHM to sigma
 
         # Initialize B-spline coefficients to small random values (separate for T and P)
@@ -965,7 +960,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         return r_fine, profile_T_fine, profile_P_fine, info
 
 
-def create_beam_model(config, x_grid, y_grid):
+def create_beam_model(config, x_grid, y_grid, band):
     """Factory function to create a beam model instance."""
     if config.beam_model_type == "b_spline":
         return BeamModelBspline(
@@ -977,12 +972,12 @@ def create_beam_model(config, x_grid, y_grid):
             config.knot_spacing_arcmin,
         )
     elif config.beam_model_type == "gaussian":
-        return BeamModelGaussian(config, x_grid, y_grid)
+        return BeamModelGaussian(config, x_grid, y_grid, band)
     elif config.beam_model_type == "betapol":
-        return BeamModelBetaPol(config, x_grid, y_grid)
+        return BeamModelBetaPol(config, x_grid, y_grid, band)  # needs band because it relies on measured beam models
     elif config.beam_model_type == "betatest":
-        return BeamModelBetaTest(config, x_grid, y_grid)
+        return BeamModelBetaTest(config, x_grid, y_grid, band)
     elif config.beam_model_type == "bsplines_plus_gaussian":
-        return BeamModelBSplinesGaussian(config, x_grid, y_grid)
+        return BeamModelBSplinesGaussian(config, x_grid, y_grid, band)
     else:
         raise ValueError(f"Unknown beam model type: {config.beam_model_type}")

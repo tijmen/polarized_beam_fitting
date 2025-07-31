@@ -83,9 +83,6 @@ class BeamFittingConfig:
         (0.1, 10.0),  # flux_correction (applies to all T, Q, U)
     )
 
-    # Initial parameter values
-    source_inits = (-0.49, -0.49, 0.99)  # yoff, xoff, flux_correction
-
     # Debug options
     debug = False
 
