@@ -41,8 +41,7 @@ class NoisePSDCalculator(ABC):
             Shape of the maps (ny, nx)
         """
         self.config = config
-        self.bands = config.bands
-        self.n_bands = len(self.bands)
+        self.n_bands = len(self.config.bands)
         self.map_shape = map_shape
 
     @abstractmethod
@@ -90,7 +89,7 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         """
         print("Loading and resampling instrument noise model (PSD) via mean-pooling...")
         # Use the first band for single-band analysis
-        band = self.bands[0]
+        band = self.config.bands[0]
         psd_filename = self.config.noise_psd_path.format(band=band.replace("GHz", ""))
 
         with fits.open(psd_filename) as hdul:
@@ -225,7 +224,7 @@ class KxAveragedCalculator(NoisePSDCalculator):
             source_noise_psd = np.zeros((ny, nx, self.n_bands, 3), dtype=np.float32)
 
             # Process each band and Stokes parameter
-            for band_idx, band in enumerate(self.bands):
+            for band_idx, band in enumerate(self.config.bands):
                 for stokes_idx, stokes in enumerate(["T", "Q", "U"]):
                     # Extract data for this band and Stokes parameter
                     real_map = np.fft.ifft2(data_fft[band][stokes]).real
@@ -296,7 +295,6 @@ class KxAveragedCalculator(NoisePSDCalculator):
         return psd
 
 
-
 class EnsembleAsdMeanCalculator(NoisePSDCalculator):
     """
     Calculate PSDs by averaging amplitude spectral densities across sources.
@@ -332,7 +330,7 @@ class EnsembleAsdMeanCalculator(NoisePSDCalculator):
         for i, data_fft in enumerate(prepared_data_py):
             print(f"  Processing source {i + 1}/{len(prepared_data_py)}")
 
-            for band_idx, band in enumerate(self.bands):
+            for band_idx, band in enumerate(self.config.bands):
                 for stokes_idx, stokes in enumerate(["T", "Q", "U"]):
                     real_map = np.fft.ifft2(data_fft[band][stokes]).real
 
@@ -378,69 +376,39 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         # Use the bands from config instead of hard-coding
         # They are already sorted by the parent class
 
-    def calculate_noise_psd(self, prepared_data_py):
+    def calculate_noise_psd(self, maps_numpy):
         """
         Calculate multi-band covariance PSD.
 
         Parameters:
         -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source.
-            Each dict has structure: {band: {stokes: fft_data}}
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ky, kx, n_bands, n_stokes)
+            Contains the source maps.
 
         Returns:
         --------
         np.ndarray
-            Shape (ky,kx,band,band,stokes,stokes) covariance matrix
+            Shape (ky, kx, band, band, stokes, stokes) covariance matrix
         """
         print("Calculating multi-band covariance PSD...")
 
-        # Create noise mask with hole in center to avoid the source signal
-        noise_mask = make_apod_mask_center_excised(self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin)
+        noise_mask = make_apod_mask_center_excised(
+            self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin
+        )  # shape (ky, kx)
+        # apply mask over spatial dims
+        masked_maps = maps_numpy * noise_mask[None, :, :, None, None]
+        # FFT in spatial dimensions
+        masked_maps_fft = np.fft.fft2(masked_maps, axes=(1, 2))  # (n_src, ky, kx, band, stokes)
 
-        ny, nx = self.map_shape
-        stokes_params = ["T", "Q", "U"]
-        n_bands = self.n_bands
-        n_stokes = len(stokes_params)
+        # Source-averaged cross-PSD over band and stokes
+        n_src = masked_maps_fft.shape[0]
+        covariance_sum = np.einsum("nyxbs,nyxct->yx b c s t", masked_maps_fft, np.conj(masked_maps_fft))  # (ky, kx, band, band, stokes, stokes)
 
-        # Initialize covariance accumulator
-        # Shape: (ky, kx, band, band, stokes, stokes)
-        covariance_sum = np.zeros((ny, nx, n_bands, n_bands, n_stokes, n_stokes), dtype=np.complex64)
-        n_sources = 0
-
-        for i, data_dict in enumerate(prepared_data_py):
-            print(f"  Processing source {i + 1}/{len(prepared_data_py)}")
-
-            # Convert FFT data back to real space and apply noise mask
-            masked_data = {}
-            for band in self.bands:
-                masked_data[band] = {}
-                for stokes in stokes_params:
-                    # Access the FFT data directly (it's already in Fourier space)
-                    real_map = np.fft.ifft2(data_dict[band][stokes]).real
-                    masked_map = real_map * noise_mask
-                    # Go to Fourier space
-                    masked_data[band][stokes] = np.fft.fft2(masked_map)
-
-            # Calculate cross-covariances for this source
-            for b1_idx, band1 in enumerate(self.bands):
-                for s1_idx, stokes1 in enumerate(stokes_params):
-                    for b2_idx, band2 in enumerate(self.bands):
-                        for s2_idx, stokes2 in enumerate(stokes_params):
-                            # Cross-PSD between (band1,stokes1) and (band2,stokes2)
-                            cross_psd = masked_data[band1][stokes1] * np.conj(masked_data[band2][stokes2])
-                            covariance_sum[:, :, b1_idx, b2_idx, s1_idx, s2_idx] += cross_psd
-
-            n_sources += 1
-
-        if n_sources == 0:
-            raise RuntimeError("No valid sources found for multi-band covariance calculation")
-
-        # Average across sources and normalize by effective area
         effective_area = np.sum(noise_mask**2)
-        covariance_psd = covariance_sum / (n_sources * effective_area)
+        covariance_psd = covariance_sum / (n_src * effective_area)
 
-        print(f"Multi-band covariance calculation complete using {n_sources} sources.")
+        print(f"Multi-band covariance calculation complete using {n_src} sources.")
         return covariance_psd
 
 

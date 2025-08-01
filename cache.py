@@ -25,7 +25,6 @@ class CacheManager:
             "max_zero_fraction": self.config.max_zero_fraction,  # different sources
             "skip_sources": sorted(self.config.skip_sources) if self.config.skip_sources else [],  # different sources
             "leakage_weighting": self.config.leakage_weighting,  # different approach to leakage
-            "max_sources": self.config.max_sources,  # different sources
         }
         # Create a stable string representation
         param_string = str(sorted(relevant_params.items()))

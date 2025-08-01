@@ -59,7 +59,9 @@ class BeamModelBase(ABC):
 
     def _calculate_r_map(self, dy, dx):
         """Calculate radial distance map from source position."""
-        return jnp.sqrt((self.x_grid - dx) ** 2 + (self.y_grid - dy) ** 2) * self.config.reso_arcmin
+        dx_diff = self.x_grid - dx
+        dy_diff = self.y_grid - dy
+        return jnp.sqrt(dx_diff * dx_diff + dy_diff * dy_diff) * self.config.reso_arcmin
 
 
 class BeamModelBspline(BeamModelBase):

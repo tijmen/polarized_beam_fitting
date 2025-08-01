@@ -135,7 +135,7 @@ class BootstrapBeamFitter:
             physical_params = params_from_logit(sol.value, self.config)
 
             # Compute the final weighted chi2 for this bootstrap sample
-            bootstrap_chi2 = float(jnp.sum(self.base_fitter._get_individual_chi2s(sol.value) * weight_array))
+            bootstrap_chi2 = float(jnp.sum(self.base_fitter._get_individual_chi2s(physical_params) * weight_array))
             physical_params["bootstrap_chi2"] = bootstrap_chi2
 
             bootstrap_params.append(physical_params)
@@ -221,8 +221,8 @@ class BootstrapBeamFitter:
 
     # Delegate methods to base fitter
 
-    def create_final_model_maps(self, best_fit_params):
-        return self.base_fitter.create_final_model_maps(best_fit_params)
+    def create_model_maps(self, best_fit_params):
+        return self.base_fitter.create_model_maps(best_fit_params)
 
     def create_beam_profile_maps(self, best_fit_params):
         return self.base_fitter.create_beam_profile_maps(best_fit_params)
@@ -230,7 +230,7 @@ class BootstrapBeamFitter:
     # Delegate properties that plotting system expects
     @property
     def bands(self):
-        return self.base_fitter.bands
+        return self.base_fitter.config.bands
 
     @property
     def source_ids(self):

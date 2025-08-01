@@ -17,7 +17,6 @@ from .noise_psd import (
     EnsembleAsdMeanCalculator,
     KxAveragedCalculator,
     NoisePSDCalculator,
-    WhiteNoiseScaledCalculator,
     create_noise_psd_calculator,
 )
 from .plotting import BeamPlotter, create_diagnostic_plots
@@ -62,7 +61,6 @@ __all__ = [
     "NoisePSDCalculator",
     "ClusterfinderPSDCalculator",
     "KxAveragedCalculator",
-    "WhiteNoiseScaledCalculator",
     "EnsembleAsdMeanCalculator",
     "create_noise_psd_calculator",
 ]

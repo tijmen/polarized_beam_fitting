@@ -192,29 +192,17 @@ def linear_interp_differentiable(x, xp, fp):
     array_like
         Interpolated values at x
     """
-    # Ensure inputs are JAX arrays
     x = jnp.asarray(x, dtype=jnp.float32)
     xp = jnp.asarray(xp, dtype=jnp.float32)
     fp = jnp.asarray(fp, dtype=jnp.float32)
 
-    # Find the indices for interpolation
-    # Use continuous indexing and clamp to valid range
-    dx = xp[1] - xp[0]  # Assume uniform spacing for simplicity
-    idx_float = (x - xp[0]) / dx
-    idx = jnp.clip(jnp.floor(idx_float).astype(jnp.int32), 0, xp.size - 2)
+    dx = xp[1] - xp[0]  # assumes uniform grid
+    dx_inv = 1.0 / dx
+    idx = jnp.clip(jnp.floor((x - xp[0]) * dx_inv).astype(jnp.int32), 0, xp.size - 2)
 
-    # Get the surrounding points
-    x0 = xp[idx]
-    x1 = xp[idx + 1]
-    y0 = fp[idx]
-    y1 = fp[idx + 1]
+    y0, y1 = fp[idx], fp[idx + 1]
+    t = jnp.clip((x - (xp[0] + idx * dx)) * dx_inv, 0.0, 1.0)
 
-    # Linear interpolation parameter
-    # Add small epsilon to prevent division by zero
-    dx_segment = x1 - x0 + 1e-12
-    t = jnp.clip((x - x0) / dx_segment, 0.0, 1.0)
-
-    # Linear interpolation
     return y0 + t * (y1 - y0)
 
 

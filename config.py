@@ -62,8 +62,6 @@ class BeamFittingConfig:
 
     # Optimization parameters
     n_steps = 5000
-    max_sources = None  # set to a finite number to only calculate the likelihood over a few sources e.g. for testing
-    pol_focus = 1.0  # Factor to upweight the importance of polarization likelihood
 
     # Bootstrap resampling parameters
     enable_bootstrap = False  # Enable/disable bootstrap uncertainty estimation
@@ -78,8 +76,8 @@ class BeamFittingConfig:
     # or 0 to disable diagnostic plots entirely
 
     source_bounds = (
-        (-5.0, 5.0),  # yoff (y_offset)
-        (-5.0, 5.0),  # xoff (x_offset)
+        (-5.0, 5.0),  # yoff (source center y offset in pixels)
+        (-5.0, 5.0),  # xoff (source center x offset in pixels)
         (0.1, 10.0),  # flux_correction (applies to all T, Q, U)
     )
 
