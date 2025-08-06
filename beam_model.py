@@ -72,7 +72,16 @@ class BeamModelBspline(BeamModelBase):
     boundary conditions for the beam profile.
     """
 
-    def __init__(self, config, y_grid, x_grid, band, spline_k=4, spline_rmax_arcmin=10.0, knot_spacing_arcmin=0.5):
+    def __init__(
+        self,
+        config,
+        y_grid,
+        x_grid,
+        band,
+        spline_k=4,
+        spline_rmax_arcmin=10.0,
+        knot_spacing_arcmin=0.5,
+    ):
         """
         Initialize the beam model.
 
@@ -94,7 +103,12 @@ class BeamModelBspline(BeamModelBase):
         self.fwhm_arcmin = self.config.band_fwhm_arcmin[self.band]
 
         # Setup the orthonormal basis
-        (r_fine_jax, self.ortho_basis_funcs_jax, self.n_fittable_coeffs, self.r_knots) = self._setup_spline_lut()
+        (
+            r_fine_jax,
+            self.ortho_basis_funcs_jax,
+            self.n_fittable_coeffs,
+            self.r_knots,
+        ) = self._setup_spline_lut()
         self.r_fine_jax = r_fine_jax
 
         # Define parameter names for the base class methods
@@ -299,9 +313,9 @@ class BeamModelBspline(BeamModelBase):
         print(f"  B'(r_max) ≈ {B_prime_rmax_estimate:.6f} (target: 0.0)")
 
         # Convert to JAX arrays
-        r_fine_jax = jax.device_put(r_fine)
-        particular_func_jax = jax.device_put(particular_func)
-        ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs)
+        r_fine_jax = jax.device_put(r_fine.astype(self.config.dtype_jax_real))
+        particular_func_jax = jax.device_put(particular_func.astype(self.config.dtype_jax_real))
+        ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs.astype(self.config.dtype_jax_real))
 
         # Store for later use
         self.particular_func_jax = particular_func_jax
@@ -339,10 +353,10 @@ class BeamModelBspline(BeamModelBase):
         profile_fine = self.particular_func_jax + jnp.dot(self.ortho_basis_funcs_jax, coeffs)
 
         # Ensure r_values is a JAX array
-        r_values = jnp.asarray(r_values, dtype=jnp.float32)
+        r_values = jnp.asarray(r_values, dtype=self.config.dtype_jax_real)
 
         # Interpolate to desired radial values
-        beam_profile = linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine)
+        beam_profile = linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine, self.config)
 
         return beam_profile
 
@@ -378,17 +392,15 @@ class BeamModelBspline(BeamModelBase):
         ortho_basis_np = np.array(self.ortho_basis_funcs_jax)
         residual_np = np.array(residual)
 
-        # Weight function for cylindrical coordinates
+        # Solve weighted least squares using 2D polar coordinates
         r_fine_np = np.array(self.r_fine_jax)
+        dr = r_fine_np[1] - r_fine_np[0]
         weight = r_fine_np.copy()
-        weight[0] = weight[1] * 0.5  # Avoid zero weight at origin
-
-        # Apply weights to both sides of the equation
-        weighted_basis = ortho_basis_np * weight[:, np.newaxis]
-        weighted_residual = residual_np * weight
-
-        # Solve weighted least squares
-        coeffs, residual_norm, rank, _ = np.linalg.lstsq(weighted_basis, weighted_residual, rcond=None)
+        weight[0] = weight[1] * 0.5
+        w_sqrt = np.sqrt(weight * dr)
+        A = ortho_basis_np * w_sqrt[:, np.newaxis]
+        b = residual_np * w_sqrt
+        coeffs, residual_norm, rank, _ = np.linalg.lstsq(A, b, rcond=None)
 
         print(f"Gaussian fitting for FWHM={fwhm_arcmin:.2f}' (σ={sigma_arcmin:.2f}):")
         print(f"  Residual norm: {residual_norm[0] if len(residual_norm) > 0 else 'exact'}")
@@ -538,9 +550,9 @@ class BeamModelBetaPol(BeamModelBase):
         print(f"Loading betapol beam model for {self.band_GHz} GHz")
 
         # Store JAX arrays for fast computation
-        self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"])
-        self.BT_r_norm_jax = jax.device_put(beam_data[bt_key])
-        self.Bmain_r_norm_jax = jax.device_put(beam_data[bmain_key])
+        self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"].astype(self.config.dtype_jax_real))
+        self.BT_r_norm_jax = jax.device_put(beam_data[bt_key].astype(self.config.dtype_jax_real))
+        self.Bmain_r_norm_jax = jax.device_put(beam_data[bmain_key].astype(self.config.dtype_jax_real))
 
         # Store numpy copies to avoid importing JAX in plotting
         self.r_fine_np = beam_data["r_fine_arcmin"]
@@ -566,11 +578,11 @@ class BeamModelBetaPol(BeamModelBase):
         profile_fine = self.Bmain_r_norm_jax + beta_pol * (self.BT_r_norm_jax - self.Bmain_r_norm_jax)
 
         # Interpolate the final profile onto the requested r_values
-        return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine)
+        return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine, self.config)
 
     def evaluate_beam_maps(self, params, dy, dx):
         r_map_arcmin = self._calculate_r_map(dy, dx)
-        beam_T_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.BT_r_norm_jax)
+        beam_T_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.BT_r_norm_jax, self.config)
         beam_P_map = self.evaluate_beam_profile_P(params, r_map_arcmin)
         return beam_T_map, beam_P_map
 
@@ -628,9 +640,9 @@ class BeamModelBetaTest(BeamModelBase):
         print(f"Loading betatest beam model for {self.band_GHz} GHz")
 
         # Store JAX arrays for fast computation
-        self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"])
-        self.BT_r_norm_jax = jax.device_put(beam_data[bt_key])
-        self.Bmain_r_norm_jax = jax.device_put(beam_data[bmain_key])
+        self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"].astype(self.config.dtype_jax_real))
+        self.BT_r_norm_jax = jax.device_put(beam_data[bt_key].astype(self.config.dtype_jax_real))
+        self.Bmain_r_norm_jax = jax.device_put(beam_data[bmain_key].astype(self.config.dtype_jax_real))
 
         # Store numpy copies to avoid importing JAX in plotting
         self.r_fine_np = beam_data["r_fine_arcmin"]
@@ -656,12 +668,12 @@ class BeamModelBetaTest(BeamModelBase):
         profile_fine = self.Bmain_r_norm_jax + beta_T * (self.BT_r_norm_jax - self.Bmain_r_norm_jax)
 
         # Interpolate the final profile onto the requested r_values
-        return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine)
+        return linear_interp_differentiable(r_values, self.r_fine_jax, profile_fine, self.config)
 
     def evaluate_beam_maps(self, params, dy, dx):
         r_map_arcmin = self._calculate_r_map(dy, dx)
         beam_T_map = self.evaluate_beam_profile_T(params, r_map_arcmin)
-        beam_P_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.Bmain_r_norm_jax)
+        beam_P_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_jax, self.Bmain_r_norm_jax, self.config)
         return beam_T_map, beam_P_map
 
     def get_human_readable_params(self, params, prefix=""):
@@ -697,14 +709,23 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
     def __init__(self, config, y_grid, x_grid, band):
         super().__init__(config, y_grid, x_grid, band)
-        self.param_names = ["gaussian_sigma_arcmin", "bspline_coeffs_T", "bspline_coeffs_P"]
+        self.param_names = [
+            "gaussian_sigma_arcmin",
+            "bspline_coeffs_T",
+            "bspline_coeffs_P",
+        ]
         self.spline_k = config.spline_k
         self.spline_rmax_arcmin = config.spline_rmax_arcmin
         self.knot_spacing_arcmin = config.knot_spacing_arcmin
         self.spline_rmin_arcmin = config.bsplines_gaussian_rmin_arcmin
 
         # Setup the B-spline basis (area-normalized, no boundary conditions)
-        (r_fine_jax, self.ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots) = self._setup_bspline_lut()
+        (
+            r_fine_jax,
+            self.ortho_basis_funcs_jax,
+            self.n_bspline_coeffs,
+            self.r_knots,
+        ) = self._setup_bspline_lut()
 
         # Total number of fittable coefficients: 1 (Gaussian sigma) + N (B-spline coeffs)
         self.n_fittable_coeffs = 1 + self.n_bspline_coeffs
@@ -865,8 +886,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
                 ortho_basis_funcs[mask_spline_region, j] = ortho_func_spline
 
         # Convert to JAX arrays
-        r_fine_jax = jax.device_put(r_fine)
-        ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs)
+        r_fine_jax = jax.device_put(r_fine.astype(self.config.dtype_jax_real))
+        ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs.astype(self.config.dtype_jax_real))
 
         print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
@@ -884,8 +905,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         # Initialize B-spline coefficients to small random values (separate for T and P)
         key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
         key1, key2 = jax.random.split(key)
-        bspline_coeffs_T = jax.random.normal(key1, (self.n_bspline_coeffs,), dtype=jnp.float32) * 0.01
-        bspline_coeffs_P = jax.random.normal(key2, (self.n_bspline_coeffs,), dtype=jnp.float32) * 0.01
+        bspline_coeffs_T = jax.random.normal(key1, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
+        bspline_coeffs_P = jax.random.normal(key2, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
 
         return {
             "gaussian_sigma_arcmin": initial_sigma,  # Shared between T and P
@@ -912,15 +933,15 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             Combined beam profile values
         """
         # Ensure inputs are JAX arrays to avoid device transfers
-        r_values = jnp.asarray(r_values, dtype=jnp.float32)
-        bspline_coeffs = jnp.asarray(bspline_coeffs, dtype=jnp.float32)
+        r_values = jnp.asarray(r_values, dtype=self.config.dtype_jax_real)
+        bspline_coeffs = jnp.asarray(bspline_coeffs, dtype=self.config.dtype_jax_real)
 
         # Gaussian component (shared)
         gaussian_component = jnp.exp(-0.5 * (r_values / gaussian_sigma) ** 2)
 
         # B-spline component (beam-specific)
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
-        bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine)
+        bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
 
         # Combined beam
         total_beam = gaussian_component + bspline_component

@@ -9,8 +9,8 @@ differences is whether the noise PSD is fully diagonal (each ky,kx,band,stokes
 is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
-Currently, [clusterfinder_psd, kx_averaged, white_noise_scaled, ensemble_asd_mean]
-are fully diagonal, and [multiband_covariance] is only diagonal in Fourier space.
+Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean] are fully diagonal,
+and [multiband_covariance] is only diagonal in Fourier space.
 """
 
 from abc import ABC, abstractmethod
@@ -45,20 +45,19 @@ class NoisePSDCalculator(ABC):
         self.map_shape = map_shape
 
     @abstractmethod
-    def calculate_noise_psd(self, prepared_data_py):
+    def calculate_noise_psd(self, maps_numpy):
         """
         Calculate noise PSD(s) for the given data.
 
         Parameters:
         -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, 3) containing the source maps
 
         Returns:
         --------
-        np.ndarray or list
-            For single-band: (ky,kx,band,stokes) array for global PSD,
-            or list of such arrays for individual PSDs per source.
+        np.ndarray
+            For single-band: (ky,kx,band,stokes) array for global PSD.
             For multi-band: (ky,kx,band,band,stokes,stokes) array for covariance.
         """
         pass
@@ -73,14 +72,14 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
     the analysis map resolution using mean-pooling.
     """
 
-    def calculate_noise_psd(self, prepared_data_py):
+    def calculate_noise_psd(self, maps_numpy):
         """
         Load and resample instrument noise PSD from file.
 
         Parameters:
         -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source (unused for file-based PSD)
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, 3) containing the source maps (unused for file-based PSD)
 
         Returns:
         --------
@@ -100,7 +99,7 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
 
         # Create noise PSD array with shape (ky, kx, band, stokes)
         ny, nx = self.map_shape
-        noise_psd_array = np.zeros((ny, nx, self.n_bands, 3), dtype=np.float32)
+        noise_psd_array = np.zeros((ny, nx, self.n_bands, 3), dtype=self.config.dtype_np_real)
 
         # Fill the array for the single band (index 0)
         noise_psd_array[:, :, 0, 0] = psd_resampled  # T
@@ -127,7 +126,7 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         target_reso_arcmin = self.config.reso_arcmin
         target_shape = self.map_shape
 
-        kmax_ratio = target_reso_arcmin / orig_reso_arcmin
+        kmax_ratio = orig_reso_arcmin / target_reso_arcmin
         n_covered = int(target_shape[0] * kmax_ratio)
         n_inf = target_shape[0] - n_covered
 
@@ -137,13 +136,10 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         # Resample the low-k portion using mean-pooling
         lowk_psd = self._rebin_psd_with_averaging(psd_orig, (n_covered, n_covered))
 
-        # Place resampled data in center
+        # Place rebinned data in the center of the high-k array
         start_idx = n_inf // 2
         end_idx = start_idx + n_covered
         psd_resampled[start_idx:end_idx, start_idx:end_idx] = np.fft.fftshift(lowk_psd)
-
-        # Apply fftshift to get standard FFT layout
-        psd_resampled = np.fft.fftshift(psd_resampled)
 
         # Set high values for k_x=0 modes to avoid division by zero
         psd_resampled[:, 0] = 1e12
@@ -195,39 +191,45 @@ class KxAveragedCalculator(NoisePSDCalculator):
     takes the element-wise maximum with the original PSD to avoid scattered low values.
     """
 
-    def calculate_noise_psd(self, prepared_data_py):
+    def calculate_noise_psd(self, maps_numpy):
         """
         Calculate individual noise PSDs for each source from the data.
 
         Parameters:
         -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, 3) containing the source maps
 
         Returns:
         --------
-        list
-            List of arrays with shape (ky,kx,band,stokes) containing noise PSDs for each source
+        np.ndarray
+            Array with shape (ny,kx,band,stokes) containing global noise PSD
         """
         print("Calculating individual data-driven noise PSDs for each source...")
 
         # Create noise mask with hole in center to avoid the source signal
-        noise_mask = make_apod_mask_center_excised(self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin)
+        noise_mask = make_apod_mask_center_excised(
+            self.map_shape,
+            self.config.apodization_width_pix,
+            self.config.noise_hole_radius_arcmin,
+            self.config.reso_arcmin,
+        )
 
         noise_psds_list = []
         ny, nx = self.map_shape
+        n_src = maps_numpy.shape[0]
 
-        for i, data_fft in enumerate(prepared_data_py):
-            print(f"  Processing source {i + 1}/{len(prepared_data_py)}")
+        for i in range(n_src):
+            print(f"  Processing source {i + 1}/{n_src}")
 
             # Create array for this source: (ky, kx, band, stokes)
-            source_noise_psd = np.zeros((ny, nx, self.n_bands, 3), dtype=np.float32)
+            source_noise_psd = np.zeros((ny, nx, self.n_bands, 3), dtype=self.config.dtype_np_real)
 
             # Process each band and Stokes parameter
             for band_idx, band in enumerate(self.config.bands):
                 for stokes_idx, stokes in enumerate(["T", "Q", "U"]):
                     # Extract data for this band and Stokes parameter
-                    real_map = np.fft.ifft2(data_fft[band][stokes]).real
+                    real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
 
                     # Calculate individual noise PSD for this map
                     psd_2d = self._calculate_individual_noise_psd(real_map, noise_mask)
@@ -304,14 +306,14 @@ class EnsembleAsdMeanCalculator(NoisePSDCalculator):
     then converts back to PSD.
     """
 
-    def calculate_noise_psd(self, prepared_data_py):
+    def calculate_noise_psd(self, maps_numpy):
         """
         Calculate ensemble-averaged ASD-derived PSDs.
 
         Parameters:
         -----------
-        prepared_data_py : list
-            List of dictionaries containing FFT data for each source
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, 3) containing the source maps
 
         Returns:
         --------
@@ -321,18 +323,24 @@ class EnsembleAsdMeanCalculator(NoisePSDCalculator):
         print("Calculating ensemble-averaged ASD-derived PSDs...")
 
         # Create noise mask with hole in center to avoid the source signal
-        noise_mask = make_apod_mask_center_excised(self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin)
+        noise_mask = make_apod_mask_center_excised(
+            self.map_shape,
+            self.config.apodization_width_pix,
+            self.config.noise_hole_radius_arcmin,
+            self.config.reso_arcmin,
+        )
 
         # Collect ASDs from all sources
         ny, nx = self.map_shape
-        all_asds = np.zeros((len(prepared_data_py), ny, nx, self.n_bands, 3), dtype=np.float32)
+        n_src = maps_numpy.shape[0]
+        all_asds = np.zeros((n_src, ny, nx, self.n_bands, 3), dtype=self.config.dtype_np_real)
 
-        for i, data_fft in enumerate(prepared_data_py):
-            print(f"  Processing source {i + 1}/{len(prepared_data_py)}")
+        for i in range(n_src):
+            print(f"  Processing source {i + 1}/{n_src}")
 
             for band_idx, band in enumerate(self.config.bands):
                 for stokes_idx, stokes in enumerate(["T", "Q", "U"]):
-                    real_map = np.fft.ifft2(data_fft[band][stokes]).real
+                    real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
 
                     # Apply center-excised mask
                     masked_map = real_map * noise_mask
@@ -394,7 +402,10 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         print("Calculating multi-band covariance PSD...")
 
         noise_mask = make_apod_mask_center_excised(
-            self.map_shape, self.config.apodization_width_pix, self.config.noise_hole_radius_arcmin, self.config.reso_arcmin
+            self.map_shape,
+            self.config.apodization_width_pix,
+            self.config.noise_hole_radius_arcmin,
+            self.config.reso_arcmin,
         )  # shape (ky, kx)
         # apply mask over spatial dims
         masked_maps = maps_numpy * noise_mask[None, :, :, None, None]
@@ -410,6 +421,43 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
 
         print(f"Multi-band covariance calculation complete using {n_src} sources.")
         return covariance_psd
+
+
+class WhiteNoiseCalculator(NoisePSDCalculator):
+    """
+    Calculate simple white noise PSD with constant values.
+
+    This implementation assumes white noise with constant PSD values
+    across all k-space for testing and baseline comparisons.
+    """
+
+    def calculate_noise_psd(self, maps_numpy):
+        """
+        Calculate simple white noise PSD with constant values.
+
+        Parameters:
+        -----------
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, 3) containing the source maps
+
+        Returns:
+        --------
+        np.ndarray
+            Array with shape (ky,kx,band,stokes) containing white noise PSD
+        """
+        print("Generating simple white noise PSD...")
+
+        ny, nx = self.map_shape
+
+        # Create white noise PSD array with all ones
+        noise_psd_array = np.ones((ny, nx, self.n_bands, 3), dtype=self.config.dtype_np_real)
+
+        # Apply scaling for polarization
+        noise_psd_array[:, :, :, 1] *= 2.0  # Q polarization has 2x the noise
+        noise_psd_array[:, :, :, 2] *= 2.0  # U polarization has 2x the noise
+
+        print("White noise PSD complete.")
+        return noise_psd_array
 
 
 # Factory function to create appropriate noise PSD calculator
@@ -437,5 +485,7 @@ def create_noise_psd_calculator(config, map_shape):
         return EnsembleAsdMeanCalculator(config, map_shape)
     elif config.noise_psd_method == "multiband_covariance":
         return MultiBandCovarianceCalculator(config, map_shape)
+    elif config.noise_psd_method == "white_noise":
+        return WhiteNoiseCalculator(config, map_shape)
     else:
         raise ValueError(f"Unknown noise_psd_method: {config.noise_psd_method}")

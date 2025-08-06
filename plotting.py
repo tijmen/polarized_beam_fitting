@@ -6,6 +6,8 @@ Contains functions for creating diagnostic plots, beam profiles, and analysis vi
 
 import os
 
+import arviz as az
+import corner
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -22,7 +24,7 @@ class BeamPlotter:
         Initialize the plotter.
 
         Parameters:
-        -----------
+        ----------
         fitter : PolarizedBeamFitter, or BootstrapBeamFitter
             The fitted beam fitter object
         output_dir : str, optional
@@ -75,13 +77,13 @@ class BeamPlotter:
 
     def plot_template_projection_analysis(self, best_fit_params, skip_sources=None, save=True):
         """
-        Plot template projection analysis using the brightest source as template.
+        Plot template projection analysis using the brightest source as template for each band.
 
-        This method uses the brightest source as a template to project out of
+        This method uses the brightest source in each band as a template to project out of
         extended/problematic sources to analyze their residual structure.
 
         Parameters:
-        -----------
+        ----------
         best_fit_params : dict
             Best-fit parameters from optimization
         skip_sources : list, optional
@@ -91,144 +93,100 @@ class BeamPlotter:
 
         Returns:
         --------
-        str or None
-            Filename if saved, None otherwise
+        list
+            List of filenames if saved, empty list otherwise
         """
-        # Use primary band for template analysis
-        band = self.primary_band
-        band_suffix = self._get_band_suffix(band)
-        print(f"\n--- Template Projection Analysis for {band_suffix} ---")
-
         if skip_sources is None:
             skip_sources = self.base_fitter.config.skip_sources
 
         if not skip_sources:
             print("No skip_sources specified for template projection analysis")
-            return None
+            return []
 
-        # Get data maps and source information
         maps_numpy = self.base_fitter.maps_numpy
         source_ids = self.base_fitter.source_ids
+        flux = best_fit_params["sources"]["flux"]
 
-        # Calculate T amplitudes from the primary band
-        t_amps = []
-        # Get band index for primary band
-        band_idx = self.fitter.config.bands.index(band) if band in self.fitter.config.bands else 0
-        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
-        flux_corrections = best_fit_params["sources"]["flux_correction"]
+        filenames = []
+        for band_idx, band in enumerate(self.fitter.config.bands):
+            band_suffix = self._get_band_suffix(band)
+            print(f"\n--- Template Projection Analysis for {band} ---")
 
-        for i, source_id in enumerate(source_ids):
-            # Get T amplitude for this source in the primary band using array format
-            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
-            t_amp_factor = flux_corrections[i, band_idx, 0]  # flux correction for T
-            t_amps.append(t_amp_initial * t_amp_factor)
-        t_amps = np.array(t_amps)
+            # Calculate T amplitudes for the current band
+            t_amps = np.array(flux[:, band_idx, 0])
 
-        # Find brightest source as template
-        brightest_idx = np.argmax(t_amps)
-        brightest_source_id = source_ids[brightest_idx]
+            # Find brightest source as template *in this band*
+            brightest_idx = np.argmax(t_amps)
+            brightest_source_id = source_ids[brightest_idx]
+            template_map = maps_numpy[brightest_idx, :, :, band_idx, 0]
 
-        # Get template map from array format
-        # maps_numpy shape: (n_src, ny, nx, n_bands, 3)
-        template_map = maps_numpy[brightest_idx, :, :, band_idx, 0]  # T is index 0
+            print(f"Using brightest source as template for {band}: {brightest_source_id}")
+            print(f"Template amplitude: {t_amps[brightest_idx]:.1f} μK")
 
-        print(f"Using brightest source as template: {brightest_source_id}")
-        print(f"Template amplitude: {t_amps[brightest_idx]:.1f} μK")
+            # Find skip_sources in the data
+            skip_sources_data = []
+            for source_short_name in skip_sources:
+                found = False
+                for idx, full_source_id in enumerate(source_ids):
+                    if source_short_name in full_source_id:
+                        skip_sources_data.append((full_source_id, idx, source_short_name))
+                        print(f"Found skip source for template analysis: {full_source_id}")
+                        found = True
+                        break
+                if not found:
+                    print(f"Warning: Could not find skip source '{source_short_name}' in data.")
 
-        # Find skip_sources in the data
-        skip_sources_data = []
-        for source in skip_sources:
-            # Construct source ID with primary band
-            source_id = f"CoaddSPT-S {source}-{band}"
+            if not skip_sources_data:
+                print(f"No specified skip sources found in the data for band {band}.")
+                continue
 
-            # Convert to list for searching
-            source_ids_list = source_ids.tolist() if isinstance(source_ids, np.ndarray) else list(source_ids)
+            n_skip_sources = len(skip_sources_data)
+            fig, axes = plt.subplots(n_skip_sources, 2, figsize=(12, 4 * n_skip_sources), squeeze=False)
+            fig.suptitle(
+                f"Template Projection Analysis ({band_suffix})\nTemplate: {brightest_source_id}",
+                fontsize=14,
+            )
 
-            if source_id in source_ids_list:
-                idx = source_ids_list.index(source_id)
-                skip_sources_data.append((source_id, idx, source))
-                print(f"Found skip source: {source_id}")
+            for i, (source_id, source_idx, short_name) in enumerate(skip_sources_data):
+                data_map = maps_numpy[source_idx, :, :, band_idx, 0]
+                template_flat = template_map.flatten()
+                data_flat = data_map.flatten()
+                alpha = np.dot(template_flat, data_flat) / np.dot(template_flat, template_flat)
+                residual_map = data_map - alpha * template_map
 
-        if not skip_sources_data:
-            print("No skip sources found in the data")
-            return None
+                # Plot data
+                ax = axes[i, 0]
+                data_max = np.max(np.abs(data_map))
+                im1 = ax.imshow(data_map, cmap="RdBu_r", origin="lower", vmin=-data_max, vmax=data_max)
+                ax.set_title(f"{short_name}\nData T Map", fontsize=10)
+                plt.colorbar(im1, ax=ax, label="T (μK)", fraction=0.046, pad=0.04)
 
-        print(f"\nFound {len(skip_sources_data)} skip sources in the data")
+                # Plot residual
+                ax = axes[i, 1]
+                residual_max = np.max(np.abs(residual_map))
+                im2 = ax.imshow(residual_map, cmap="RdBu_r", origin="lower", vmin=-residual_max, vmax=residual_max)
+                ax.set_title(f"Residual (α = {alpha:.3f})", fontsize=10)
+                plt.colorbar(im2, ax=ax, label="Residual (μK)", fraction=0.046, pad=0.04)
 
-        # Create plot: rows are skip sources, columns are data and residual after template projection
-        n_sources = len(skip_sources_data)
-        fig, axes = plt.subplots(n_sources, 2, figsize=(12, 4 * n_sources))
-        if n_sources == 1:
-            axes = axes.reshape(1, -1)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        fig.suptitle(f"Template Projection Analysis ({band_suffix})\nTemplate: {brightest_source_id}", fontsize=14)
+            if save:
+                plot_filename = os.path.join(self.output_dir, f"template_projection_analysis_{band_suffix}.png")
+                plt.savefig(plot_filename, dpi=300)
+                plt.close(fig)
+                print(f"Saved template projection analysis for {band} to: {plot_filename}")
+                filenames.append(plot_filename)
+            else:
+                plt.show()
 
-        for i, (source_id, source_idx, short_name) in enumerate(skip_sources_data):
-            # Get data map for this skip source from array format
-            data_map = maps_numpy[source_idx, :, :, band_idx, 0]  # T is index 0
-
-            # Project out template: residual = data - α * template
-            # Find optimal scaling factor α using least squares
-            template_flat = template_map.flatten()
-            data_flat = data_map.flatten()
-
-            # α = (template · data) / (template · template)
-            alpha = np.dot(template_flat, data_flat) / np.dot(template_flat, template_flat)
-
-            # Create residual map
-            residual_map = data_map - alpha * template_map
-
-            # Plot data (left column)
-            ax = axes[i, 0]
-            data_max = np.max(np.abs(data_map))
-            im1 = ax.imshow(data_map, cmap="RdBu_r", origin="lower", vmin=-data_max, vmax=data_max)
-            ax.set_title(f"{short_name}\nData T Map", fontsize=10)
-            ax.set_ylabel("Y pixel")
-            if i == n_sources - 1:  # bottom row
-                ax.set_xlabel("X pixel")
-            plt.colorbar(im1, ax=ax, label="T (mK)", fraction=0.046, pad=0.04)
-
-            # Plot residual (right column)
-            ax = axes[i, 1]
-            residual_max = 0.5  # Fixed scale for comparison
-            im2 = ax.imshow(residual_map, cmap="RdBu_r", origin="lower", vmin=-residual_max, vmax=residual_max)
-            ax.set_title(f"{short_name}\nResidual after Template Projection\n(α = {alpha:.3f})", fontsize=10)
-            if i == n_sources - 1:  # bottom row
-                ax.set_xlabel("X pixel")
-            plt.colorbar(im2, ax=ax, label="Residual (mK)", fraction=0.046, pad=0.04)
-
-            # Print statistics
-            data_peak = np.max(np.abs(data_map))
-            residual_rms = np.std(residual_map)
-            residual_peak = np.max(np.abs(residual_map))
-            reduction_factor = data_peak / residual_peak if residual_peak > 0 else np.inf
-
-            print(f"\n{short_name}:")
-            print(f"  Data peak: {data_peak:.1f} μK")
-            print(f"  Template scaling: α = {alpha:.3f}")
-            print(f"  Residual RMS: {residual_rms:.1f} μK")
-            print(f"  Residual peak: {residual_peak:.1f} μK")
-            print(f"  Peak reduction factor: {reduction_factor:.1f}x")
-
-        plt.tight_layout()
-
-        if save:
-            plot_filename = os.path.join(self.output_dir, f"template_projection_analysis_{band_suffix}.png")
-            plt.savefig(plot_filename, dpi=300)
-            plt.close(fig)
-            print(f"\nSaved template projection analysis plot to: {plot_filename}")
-            print(f"=== Template projection analysis complete for {band_suffix} ===")
-            return plot_filename
-
-        plt.show()
-        return None
+        return filenames if save else None
 
     def plot_beam_profiles(self, best_fit_params, save=True, band=None):
         """
         Plot radial beam profiles and T-P beam difference with optional bootstrap uncertainties.
 
         Parameters:
-        -----------
+        ----------
         best_fit_params : dict
             Best-fit parameters from optimization (or bootstrap results if available)
         save : bool
@@ -287,7 +245,15 @@ class BeamPlotter:
         ylabel = info.get("ylabel", "Beam Amplitude")
 
         ax1.plot(r_fine, profile_T_fine, label=t_label, lw=3, color="C0", zorder=10)
-        ax1.plot(r_fine, profile_P_fine, label=p_label, lw=3, linestyle="--", color="C1", zorder=10)
+        ax1.plot(
+            r_fine,
+            profile_P_fine,
+            label=p_label,
+            lw=3,
+            linestyle="--",
+            color="C1",
+            zorder=10,
+        )
         ax1.axhline(0, color="black", lw=0.5, zorder=1)
 
         y_min = min(np.min(profile_T_fine), np.min(profile_P_fine))
@@ -325,7 +291,12 @@ class BeamPlotter:
 
     def _plot_multiband_beam_profiles(self, best_fit_params, save=True):
         """Plot beam profiles for all bands in a single figure."""
-        fig, axes = plt.subplots(len(self.fitter.config.bands), 2, figsize=(14, 4 * len(self.fitter.config.bands)), sharex=True)
+        fig, axes = plt.subplots(
+            len(self.fitter.config.bands),
+            2,
+            figsize=(14, 4 * len(self.fitter.config.bands)),
+            sharex=True,
+        )
         if len(self.fitter.config.bands) == 1:
             axes = axes.reshape(1, -1)
 
@@ -345,8 +316,24 @@ class BeamPlotter:
 
             # Top panel: Beam profiles
             ax = axes[i, 0]
-            ax.plot(r_fine, profile_T_fine, label=f"T-Beam ({band_suffix})", lw=2, color=colors[i])
-            ax.plot(r_fine, profile_P_fine, label=f"P-Beam ({band_suffix})", lw=2, linestyle="--", color=colors[i], alpha=0.7)
+            t_label = info.get("t_label", f"T-Beam ({band_suffix})")
+            p_label = info.get("p_label", f"P-Beam ({band_suffix})")
+            ax.plot(
+                r_fine,
+                profile_T_fine,
+                label=t_label,
+                lw=2,
+                color=colors[i],
+            )
+            ax.plot(
+                r_fine,
+                profile_P_fine,
+                label=p_label,
+                lw=2,
+                linestyle="--",
+                color=colors[i],
+                alpha=0.7,
+            )
             ax.axhline(0, color="black", lw=0.5)
             ax.set_ylabel("Beam Amplitude", fontsize=12)
             ax.set_title(f"{band_suffix} Beam Profiles", fontsize=14)
@@ -356,7 +343,13 @@ class BeamPlotter:
             # Bottom panel: T-P difference
             ax = axes[i, 1]
             beam_difference = profile_T_fine - profile_P_fine
-            ax.plot(r_fine, beam_difference, lw=2, color=colors[i], label=f"T-P ({band_suffix})")
+            ax.plot(
+                r_fine,
+                beam_difference,
+                lw=2,
+                color=colors[i],
+                label=f"T-P ({band_suffix})",
+            )
             ax.axhline(0, color="black", lw=0.5)
             ax.set_ylabel("Amplitude Difference", fontsize=12)
             ax.set_title(f"{band_suffix} T-Beam minus P-Beam", fontsize=14)
@@ -385,7 +378,7 @@ class BeamPlotter:
         Only works for B-spline beam models.
 
         Parameters:
-        -----------
+        ----------
         save : bool
             Whether to save the plot
         band : str, optional
@@ -400,17 +393,15 @@ class BeamPlotter:
             print(f"Skipping basis diagnostics for {self.base_fitter.config.beam_model_type} beam model")
             return None
 
-        if self.is_multiband:
-            if band is None:
-                # For multi-band, plot primary band
-                band = self.primary_band
-            beam_model = self._get_beam_model(band)
-            band_suffix = self._get_band_suffix(band)
-        else:
-            beam_model = self._get_beam_model()
-            band_suffix = self._get_band_suffix()
+        if band is None:
+            band = self.primary_band
+
+        beam_model = self._get_beam_model(band)
+        band_suffix = self._get_band_suffix(band)
+        print(f"\n--- Generating Basis Diagnostics for {band} ---")
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(f"Orthonormal Basis Diagnostics ({band_suffix})", fontsize=16)
 
         # Plot particular solution
         ax = axes[0, 0]
@@ -442,7 +433,11 @@ class BeamPlotter:
         ax.plot(r, particular, "k-", linewidth=2, label="Particular only")
 
         # Add some basis functions
-        example_coeffs = [([1, 0, 0, 0, 0], "Mode 0 only"), ([0, 1, 0, 0, 0], "Mode 1 only"), ([0.5, 0.3, 0.1, 0, 0], "Mixed modes")]
+        example_coeffs = [
+            ([1, 0, 0, 0, 0], "Mode 0 only"),
+            ([0, 1, 0, 0, 0], "Mode 1 only"),
+            ([0.5, 0.3, 0.1, 0, 0], "Mixed modes"),
+        ]
 
         for coeffs, label in example_coeffs:
             coeffs_array = np.zeros(ortho_funcs.shape[1])
@@ -476,13 +471,13 @@ class BeamPlotter:
         ax.set_ylabel("Basis function index")
         plt.colorbar(im, ax=ax)
 
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
         if save:
             plot_filename = os.path.join(self.output_dir, f"orthonormal_basis_{band_suffix}.png")
             plt.savefig(plot_filename, dpi=150)
             plt.close(fig)
-            print(f"Saved basis diagnostics plot to: {plot_filename}")
+            print(f"Saved basis diagnostics plot for {band} to: {plot_filename}")
             return plot_filename
         else:
             plt.show()
@@ -490,10 +485,10 @@ class BeamPlotter:
 
     def plot_source_diagnostics(self, best_fit_params, n_sources=None, central_crop=None, save=True):
         """
-        Plot data/model/residual maps for the sources with highest chi-squared values.
+        Plot data/model/residual maps for the sources with highest polarization amplitude.
 
         Parameters:
-        -----------
+        ----------
         best_fit_params : dict
             Best-fit parameters from optimization
         n_sources : int, str, or None
@@ -512,75 +507,68 @@ class BeamPlotter:
         list
             List of filenames if saved, empty list otherwise
         """
-        # Use config value if not specified
         if n_sources is None:
             n_sources = self.base_fitter.config.n_diagnostic_plots
 
-        # Handle special cases
         if n_sources == 0:
             print("Skipping source diagnostic plots (n_diagnostic_plots = 0)")
             return []
 
-        # Determine actual number of sources to plot
         total_sources = len(self.base_fitter.source_ids)
         if isinstance(n_sources, str) and n_sources.lower() == "all":
             n_to_plot = total_sources
             print(f"\n--- Generating Data/Model/Residual Maps for All {n_to_plot} Sources ---")
         else:
             n_to_plot = min(int(n_sources), total_sources)
-            print(f"\n--- Generating Data/Model/Residual Maps for Top {n_to_plot} Highest Chi2 Sources ---")
+            print(f"\n--- Generating Data/Model/Residual Maps for Top {n_to_plot} Highest P-amp Sources ---")
 
         if central_crop is not None:
             print(f"Using central {central_crop}x{central_crop} pixel crop")
 
         maps_numpy = self.base_fitter.maps_numpy
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
-
-        # Sort sources by polarization amplitude
-        p_amp_sources = []
         source_ids = self.base_fitter.source_ids
-        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
-        flux_corrections = best_fit_params["sources"]["flux_correction"]
+        flux = best_fit_params["sources"]["flux"]
 
-        # Use primary band for ranking
-        band_idx = 0  # Use first band
-
+        # Rank sources by polarization amplitude in the primary band
+        primary_band_idx = self.fitter.config.bands.index(self.primary_band)
+        p_amp_sources = []
         for i, source_id in enumerate(source_ids):
-            q_amp_initial = initial_amps[i, band_idx, 1]  # Q is index 1, T is index 0
-            u_amp_initial = initial_amps[i, band_idx, 2]  # U is index 2
-
-            q_amp = q_amp_initial * flux_corrections[i, band_idx, 1]
-            u_amp = u_amp_initial * flux_corrections[i, band_idx, 2]
-
-            p_amp = float(np.sqrt(q_amp**2 + u_amp**2))
+            p_amp = float(np.sqrt(flux[i, primary_band_idx, 1] ** 2 + flux[i, primary_band_idx, 2] ** 2))
             p_amp_sources.append((p_amp, source_id, i))
-
         p_amp_sources.sort(key=lambda x: x[0], reverse=True)
 
-        print("Top 10 sources by polarization amplitude:")
-        for rank, (p_amp, source_id, idx) in enumerate(p_amp_sources[:10]):
-            print(f"  {rank + 1:2d}. {source_id}: p_amp = {p_amp:.1f} mK")
+        print(f"Ranking sources by P-amplitude in primary band ({self.primary_band})")
 
         filenames = []
-        for rank in range(1, n_to_plot + 1):
-            if rank <= len(p_amp_sources):
-                p_amp, source_id, idx = p_amp_sources[rank - 1]
-                print(f"\nCreating model/data/residual plot for rank #{rank} source: {source_id} (p_amp = {p_amp:.1f} mK)")
-                filename = self._create_source_diagnostic_plot(source_id, idx, rank, maps_numpy, model_maps, central_crop, save)
-                if filename:
-                    filenames.append(filename)
-                    print(f"Saved model/data/residual plot to: {filename}")
+        for rank in range(n_to_plot):
+            if rank < len(p_amp_sources):
+                p_amp, source_id, idx = p_amp_sources[rank]
+                print(f"\nCreating diagnostic plots for rank #{rank + 1} source: {source_id} (P-amp={p_amp:.1f} μK)")
 
+                for band_idx, band in enumerate(self.fitter.config.bands):
+                    filename = self._create_source_diagnostic_plot(source_id, idx, rank + 1, maps_numpy, model_maps, band, band_idx, central_crop, save)
+                    if filename:
+                        filenames.append(filename)
+                        print(f"  Saved plot for band {band} to: {filename}")
         return filenames
 
-    def _create_source_diagnostic_plot(self, source_id, source_idx, rank, data_maps, model_maps, central_crop=None, save=True):
-        """Create a diagnostic plot for a single source."""
-        # For multi-band, use primary band for plotting, but this code works for single-band too
-        band = self.primary_band
-        band_idx = self.fitter.config.bands.index(band)
+    def _create_source_diagnostic_plot(
+        self,
+        source_id,
+        source_idx,
+        rank,
+        data_maps,
+        model_maps,
+        band,
+        band_idx,
+        central_crop=None,
+        save=True,
+    ):
+        """Create a diagnostic plot for a single source and band."""
         band_suffix = self._get_band_suffix(band)
 
-        # Extract maps directly from arrays: (n_src, ny, nx, n_bands, 3)
+        # Extract maps for the specified band
         data_T = data_maps[source_idx, :, :, band_idx, 0]
         data_Q = data_maps[source_idx, :, :, band_idx, 1]
         data_U = data_maps[source_idx, :, :, band_idx, 2]
@@ -593,64 +581,48 @@ class BeamPlotter:
         residual_Q = data_Q - model_Q
         residual_U = data_U - model_U
 
-        # Apply central crop if requested
-        if central_crop is not None:
-            crop_size = central_crop
-            center_y, center_x = data_T.shape[0] // 2, data_T.shape[1] // 2
-            half_crop = crop_size // 2
-            y_start = max(0, center_y - half_crop)
-            y_end = min(data_T.shape[0], center_y + half_crop)
-            x_start = max(0, center_x - half_crop)
-            x_end = min(data_T.shape[1], center_x + half_crop)
-
-            data_T = data_T[y_start:y_end, x_start:x_end]
-            data_Q = data_Q[y_start:y_end, x_start:x_end]
-            data_U = data_U[y_start:y_end, x_start:x_end]
-            model_T = model_T[y_start:y_end, x_start:x_end]
-            model_Q = model_Q[y_start:y_end, x_start:x_end]
-            model_U = model_U[y_start:y_end, x_start:x_end]
-            residual_T = residual_T[y_start:y_end, x_start:x_end]
-            residual_Q = residual_Q[y_start:y_end, x_start:x_end]
-            residual_U = residual_U[y_start:y_end, x_start:x_end]
+        if central_crop:
+            ny, nx = data_T.shape
+            y_start = (ny - central_crop) // 2
+            y_end = y_start + central_crop
+            x_start = (nx - central_crop) // 2
+            x_end = x_start + central_crop
+            data_T, data_Q, data_U = data_T[y_start:y_end, x_start:x_end], data_Q[y_start:y_end, x_start:x_end], data_U[y_start:y_end, x_start:x_end]
+            model_T, model_Q, model_U = model_T[y_start:y_end, x_start:x_end], model_Q[y_start:y_end, x_start:x_end], model_U[y_start:y_end, x_start:x_end]
+            residual_T, residual_Q, residual_U = residual_T[y_start:y_end, x_start:x_end], residual_Q[y_start:y_end, x_start:x_end], residual_U[y_start:y_end, x_start:x_end]
 
         fig, axes = plt.subplots(3, 3, figsize=(12, 12), sharex=True, sharey=True)
         crop_suffix = f" (Central {central_crop}x{central_crop})" if central_crop else ""
         fig.suptitle(f"Data/Model/Residual Maps for Source #{rank}: {source_id}{crop_suffix} ({band_suffix})", fontsize=16)
 
-        # Organize data for plotting
-        data_maps_plot = [data_T, data_Q, data_U]
-        model_maps_plot = [model_T, model_Q, model_U]
-        residual_maps_plot = [residual_T, residual_Q, residual_U]
-        row_labels = ["T", "Q", "U"]
-        col_labels = ["Data", "Model", "Residual"]
+        maps_to_plot = {
+            "T": (data_T, model_T, residual_T),
+            "Q": (data_Q, model_Q, residual_Q),
+            "U": (data_U, model_U, residual_U),
+        }
 
-        for i, (map_type, data_map, model_map, residual_map) in enumerate(zip(row_labels, data_maps_plot, model_maps_plot, residual_maps_plot)):
-            # Determine color limits for Data and Model from the Data map
-            vmax = np.max(np.abs(data_map))
-            vmin = -vmax
+        for i, stokes in enumerate(["T", "Q", "U"]):
+            d_map, m_map, r_map = maps_to_plot[stokes]
+            vmax = np.max(np.abs(d_map))
+            res_vmax = np.max(np.abs(r_map))
 
-            # Determine color limits for Residual
-            res_vmax = np.max(np.abs(residual_map))
+            # Data, Model, Residual
+            im_d = axes[i, 0].imshow(d_map, cmap="viridis", vmin=-vmax, vmax=vmax)
+            im_m = axes[i, 1].imshow(m_map, cmap="viridis", vmin=-vmax, vmax=vmax)
+            im_r = axes[i, 2].imshow(r_map, cmap="RdBu_r", vmin=-res_vmax, vmax=res_vmax)
 
-            for j, (plot_type, plot_map) in enumerate(zip(col_labels, [data_map, model_map, residual_map])):
-                ax = axes[i, j]
+            fig.colorbar(im_d, ax=axes[i, 0], label="μK")
+            fig.colorbar(im_m, ax=axes[i, 1], label="μK")
+            fig.colorbar(im_r, ax=axes[i, 2], label="μK")
 
-                if plot_type == "Residual":
-                    im = ax.imshow(plot_map, cmap="RdBu_r", vmin=-res_vmax, vmax=res_vmax)
-                else:
-                    im = ax.imshow(plot_map, cmap="viridis", vmin=vmin, vmax=vmax)
+            if i == 0:
+                axes[i, 0].set_title("Data")
+                axes[i, 1].set_title("Model")
+                axes[i, 2].set_title("Residual")
 
-                fig.colorbar(im, ax=ax, orientation="vertical", fraction=0.046, pad=0.04, label="mK")
+            axes[i, 0].set_ylabel(stokes, fontsize=14, rotation=0, labelpad=20)
 
-                if i == 0:
-                    ax.set_title(plot_type, fontsize=14)
-                if j == 0:
-                    ax.set_ylabel(map_type, fontsize=14, rotation=0, labelpad=20)
-
-                ax.set_xticks([])
-                ax.set_yticks([])
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
         if save:
             safe_source_id = safe_filename(source_id)
@@ -664,10 +636,10 @@ class BeamPlotter:
 
     def plot_asd_analysis(self, best_fit_params, save=True):
         """
-        Plot 2D amplitude spectral density analysis for the top source.
+        Plot 2D amplitude spectral density analysis for the top source in each band.
 
         Parameters:
-        -----------
+        ----------
         best_fit_params : dict
             Best-fit parameters from optimization
         save : bool
@@ -675,200 +647,208 @@ class BeamPlotter:
 
         Returns:
         --------
-        str or None
-            Filename if saved, None otherwise
+        list
+            List of filenames if saved, empty list otherwise
         """
-        print("\n--- Generating ASD Analysis for Top Source ---")
-
-        # Get data and model maps
+        print("\n--- Generating ASD Analysis ---")
         maps_numpy = self.base_fitter.maps_numpy
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
-
-        # Get the top source by T amplitude
-        t_amps = []
+        flux = best_fit_params["sources"]["flux"]
         source_ids = self.base_fitter.source_ids
-        initial_amps = self.base_fitter.gaussfit_initial_amp_numpy
-        flux_corrections = best_fit_params["sources"]["flux_correction"]
 
-        # Use primary band for ranking
-        band_idx = 0  # Use first band
+        filenames = []
+        for band_idx, band in enumerate(self.fitter.config.bands):
+            band_suffix = self._get_band_suffix(band)
+            print(f"\n--- ASD Analysis for {band_suffix} ---")
 
-        for i, source_id in enumerate(source_ids):
-            t_amp_initial = initial_amps[i, band_idx, 0]  # T is index 0
-            t_amp_factor = flux_corrections[i, band_idx, 0]  # flux correction for T
-            t_amp = float(t_amp_initial * t_amp_factor)
-            t_amps.append((t_amp, source_id, i))
-        t_amps.sort(key=lambda x: x[0], reverse=True)
+            t_amps_band = np.array(flux[:, band_idx, 0])
+            top_source_idx = np.argmax(t_amps_band)
+            top_source_id = source_ids[top_source_idx]
+            t_amp = t_amps_band[top_source_idx]
 
-        t_amp, top_source_id, idx = t_amps[0]
-        print(f"Analyzing top source: {top_source_id} (t_amp = {t_amp:.1f} mK)")
+            print(f"Analyzing top T-amp source for {band}: {top_source_id} (T-amp = {t_amp:.1f} μK)")
 
-        # Get data, model, and residual for top source
-        band = self.primary_band
-        band_idx = 0  # Use first band
+            filename = self._create_asd_plot_for_source(top_source_id, top_source_idx, band, band_idx, maps_numpy, model_maps, save)
+            if filename:
+                filenames.append(filename)
+
+        return filenames if save else None
+
+    def _create_asd_plot_for_source(self, source_id, source_idx, band, band_idx, data_maps, model_maps, save):
+        """Helper to create a single ASD plot for a given source and band."""
         band_suffix = self._get_band_suffix(band)
 
-        # Extract from arrays
-        data_T = maps_numpy[idx, :, :, band_idx, 0]
-        data_Q = maps_numpy[idx, :, :, band_idx, 1]
-        data_U = maps_numpy[idx, :, :, band_idx, 2]
+        data_T, data_Q, data_U = [data_maps[source_idx, :, :, band_idx, i] for i in range(3)]
+        model_T, model_Q, model_U = [model_maps[source_idx, :, :, band_idx, i] for i in range(3)]
+        residual_T, residual_Q, residual_U = data_T - model_T, data_Q - model_Q, data_U - model_U
 
-        model_T = model_maps[idx, :, :, band_idx, 0]
-        model_Q = model_maps[idx, :, :, band_idx, 1]
-        model_U = model_maps[idx, :, :, band_idx, 2]
-
-        residual_T = data_T - model_T
-        residual_Q = data_Q - model_Q
-        residual_U = data_U - model_U
-
-        # Create ASD analysis plot: 3 rows (T, Q, U) x 4 columns (Data, Model, Residual, Residual/Noise)
         fig, axes = plt.subplots(3, 4, figsize=(20, 12))
-        fig.suptitle(f"2D Amplitude Spectral Density for Top Source: {top_source_id} ({band_suffix})", fontsize=16)
+        fig.suptitle(f"2D Amplitude Spectral Density for {source_id} ({band_suffix})", fontsize=16)
 
-        stokes_maps = [(data_T, model_T, residual_T), (data_Q, model_Q, residual_Q), (data_U, model_U, residual_U)]
-        stokes_names = ["T", "Q", "U"]
+        stokes_data = {
+            "T": (data_T, model_T, residual_T),
+            "Q": (data_Q, model_Q, residual_Q),
+            "U": (data_U, model_U, residual_U),
+        }
 
-        for i, ((data_map, model_map, residual_map), stokes) in enumerate(zip(stokes_maps, stokes_names)):
-            # Compute ASDs for data, model, and residual
-            asd_data = compute_2d_asd(data_map)
-            asd_model = compute_2d_asd(model_map)
-            asd_residual = compute_2d_asd(residual_map)
+        for i, stokes in enumerate(["T", "Q", "U"]):
+            d_map, m_map, r_map = stokes_data[stokes]
+            asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
 
-            # Access noise PSD from numpy array
-            noise_psd_numpy = self.base_fitter.noise_psd_numpy
-            if len(noise_psd_numpy.shape) == 4:  # (ny, nx, n_bands, 3)
-                stokes_idx = {"T": 0, "Q": 1, "U": 2}[stokes]
-                noise_psd = noise_psd_numpy[:, :, band_idx, stokes_idx]
-            else:  # More complex noise models
-                # Use a simple white noise fallback for now
-                noise_psd = np.ones_like(data_map) * 1.0
-
-            # Compute residual/noise ratio (convert PSD to ASD by taking sqrt)
+            noise_psd = self.base_fitter.noise_psd_numpy[:, :, band_idx, i]
             noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
-            asd_residual_over_noise = asd_residual / noise_asd
+            asd_ratio = asd_residual / noise_asd
 
-            # Convert to log scale for better visualization
-            asd_data_log = np.log10(asd_data + 1e-20)
-            asd_model_log = np.log10(asd_model + 1e-20)
-            asd_residual_log = np.log10(asd_residual + 1e-20)
-            asd_residual_over_noise_log = np.log10(asd_residual_over_noise + 1e-20)
+            # Plotting ASDs
+            vmax = np.max(np.log10(asd_data + 1e-20))
+            vmin = np.min(np.log10(asd_data + 1e-20))
 
-            # Determine common color scale for data and model
-            vmin_common = min(np.min(asd_data_log), np.min(asd_model_log))
-            vmax_common = max(np.max(asd_data_log), np.max(asd_model_log))
+            im_d = axes[i, 0].imshow(np.log10(asd_data + 1e-20), cmap="viridis", vmin=vmin, vmax=vmax)
+            im_m = axes[i, 1].imshow(np.log10(asd_model + 1e-20), cmap="viridis", vmin=vmin, vmax=vmax)
+            im_r = axes[i, 2].imshow(np.log10(asd_residual + 1e-20), cmap="viridis")
+            im_ratio = axes[i, 3].imshow(np.log10(asd_ratio + 1e-20), cmap="RdBu_r")
 
-            # Determine color scale for residual
-            vmin_resid = np.min(asd_residual_log)
-            vmax_resid = np.max(asd_residual_log)
+            fig.colorbar(im_d, ax=axes[i, 0], label="log10(ASD)")
+            fig.colorbar(im_m, ax=axes[i, 1], label="log10(ASD)")
+            fig.colorbar(im_r, ax=axes[i, 2], label="log10(ASD)")
+            fig.colorbar(im_ratio, ax=axes[i, 3], label="log10(Res/Noise)")
 
-            # Determine color scale for residual/noise
-            vmin_resid_noise = np.min(asd_residual_over_noise_log)
-            vmax_resid_noise = np.max(asd_residual_over_noise_log)
-
-            # Plot data
-            ax = axes[i, 0]
-            im = ax.imshow(asd_data_log, cmap="viridis", origin="lower", vmin=vmin_common, vmax=vmax_common)
             if i == 0:
-                ax.set_title("Data", fontsize=14)
-            ax.set_ylabel(f"{stokes}", fontsize=14, rotation=0, labelpad=20)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                axes[i, 0].set_title("Data")
+                axes[i, 1].set_title("Model")
+                axes[i, 2].set_title("Residual")
+                axes[i, 3].set_title("Residual / Noise")
 
-            # Plot model
-            ax = axes[i, 1]
-            im = ax.imshow(asd_model_log, cmap="viridis", origin="lower", vmin=vmin_common, vmax=vmax_common)
-            if i == 0:
-                ax.set_title("Model", fontsize=14)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            axes[i, 0].set_ylabel(stokes, fontsize=14, rotation=0, labelpad=20)
 
-            # Plot residual
-            ax = axes[i, 2]
-            im = ax.imshow(asd_residual_log, cmap="viridis", origin="lower", vmin=vmin_resid, vmax=vmax_resid)
-            if i == 0:
-                ax.set_title("Residual", fontsize=14)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-            # Plot residual/noise
-            ax = axes[i, 3]
-            im = ax.imshow(asd_residual_over_noise_log, cmap="RdBu_r", origin="lower", vmin=vmin_resid_noise, vmax=vmax_resid_noise)
-            if i == 0:
-                ax.set_title("Residual/Noise", fontsize=14)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
         if save:
-            safe_source_id = safe_filename(top_source_id)
-            asd_plot_filename = os.path.join(self.output_dir, f"asd_2d_{band_suffix}_{safe_source_id}.png")
-            plt.savefig(asd_plot_filename, dpi=150)
+            safe_source_id = safe_filename(source_id)
+            plot_filename = os.path.join(self.output_dir, f"asd_2d_{band_suffix}_{safe_source_id}.png")
+            plt.savefig(plot_filename, dpi=150)
             plt.close(fig)
-            print(f"Saved 2D ASD analysis plot to: {asd_plot_filename}")
-
-            # Print some statistics
-            self._print_asd_statistics(top_source_id, data_T, data_Q, data_U, model_T, model_Q, model_U, residual_T, residual_Q, residual_U, idx)
-
-            return asd_plot_filename
+            print(f"Saved 2D ASD analysis plot to: {plot_filename}")
+            return plot_filename
         else:
             plt.show()
             return None
 
-    def _print_asd_statistics(self, source_id, data_T, data_Q, data_U, model_T, model_Q, model_U, residual_T, residual_Q, residual_U, idx):
-        """Print ASD statistics for a source."""
-        print(f"\n2D ASD Statistics for {source_id}:")
-        band_idx = 0  # Use first band
-        stokes_maps = [(data_T, model_T, residual_T, "T"), (data_Q, model_Q, residual_Q, "Q"), (data_U, model_U, residual_U, "U")]
+    def plot_nuts_trace(self, nuts_output, save=True):
+        """
+        Plot trace plots for NUTS samples.
+        """
+        print("\n--- Generating NUTS Trace Plots ---")
+        samples = nuts_output["samples_phys"]
+        az_data = az.from_dict(samples)
 
-        for data_map, model_map, residual_map, stokes in stokes_maps:
-            asd_data = compute_2d_asd(data_map)
-            asd_model = compute_2d_asd(model_map)
-            asd_residual = compute_2d_asd(residual_map)
+        # Plot beam parameters
+        for band_idx, band in enumerate(self.fitter.config.bands):
+            band_suffix = self._get_band_suffix(band)
+            beam_params = [f"beam_{band_idx}_{p}" for p in self.fitter.config.beam_coeff_bounds.keys()]
+            az.plot_trace(az_data, var_names=beam_params)
+            plt.suptitle(f"NUTS Trace for Beam Parameters ({band_suffix})", y=1.02)
+            if save:
+                filename = os.path.join(self.output_dir, f"nuts_trace_beam_{band_suffix}.png")
+                plt.savefig(filename, dpi=150)
+                plt.close()
+                print(f"Saved beam trace plot to: {filename}")
 
-            # Access noise PSD from numpy array
-            noise_psd_numpy = self.base_fitter.noise_psd_numpy
-            if len(noise_psd_numpy.shape) == 4:  # (ny, nx, n_bands, 3)
-                stokes_idx = {"T": 0, "Q": 1, "U": 2}[stokes]
-                noise_psd = noise_psd_numpy[:, :, band_idx, stokes_idx]
-            else:  # More complex noise models
-                # Use a simple white noise fallback for now
-                noise_psd = np.ones_like(data_map) * 1.0
+        # Plot source parameters
+        stokes_names = ["T", "Q", "U"]
+        for band_idx, band in enumerate(self.fitter.config.bands):
+            band_suffix = self._get_band_suffix(band)
+            for stokes_idx, stokes in enumerate(stokes_names):
+                var_name = "flux"
+                coords = {"flux_dim_1": band_idx, "flux_dim_2": stokes_idx}
+                az.plot_trace(az_data, var_names=[var_name], coords=coords)
+                plt.suptitle(f"NUTS Trace for Flux ({stokes}, {band_suffix})", y=1.02)
+                if save:
+                    filename = os.path.join(self.output_dir, f"nuts_trace_flux_{stokes}_{band_suffix}.png")
+                    plt.savefig(filename, dpi=150)
+                    plt.close()
+                    print(f"Saved flux trace plot to: {filename}")
 
-            # Compute noise ASD for comparison
-            noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
+        # Plot offsets
+        az.plot_trace(az_data, var_names=["yoff", "xoff"])
+        plt.suptitle("NUTS Trace for Source Offsets", y=1.02)
+        if save:
+            filename = os.path.join(self.output_dir, "nuts_trace_offsets.png")
+            plt.savefig(filename, dpi=150)
+            plt.close()
+            print(f"Saved offset trace plot to: {filename}")
 
-            # Total power (sum of squared amplitudes)
-            total_power_data = np.sum(asd_data**2)
-            total_power_model = np.sum(asd_model**2)
-            total_power_resid = np.sum(asd_residual**2)
-            total_power_noise = np.sum(noise_asd**2)
+    def plot_nuts_corner(self, nuts_output, save=True):
+        """
+        Plot corner plot for NUTS samples with improved labels.
+        """
+        print("\n--- Generating NUTS Corner Plot ---")
+        samples = nuts_output["samples_phys"]
 
-            # Peak amplitude
-            peak_data = np.max(asd_data)
-            peak_model = np.max(asd_model)
-            peak_resid = np.max(asd_residual)
-            peak_noise = np.max(noise_asd)
+        # Create derived parameters
+        flux_samples = samples["sources"]["flux"]
+        t_flux = np.mean(flux_samples[:, :, :, 0], axis=1)
+        p_flux = np.mean(
+            np.sqrt(flux_samples[:, :, :, 1] ** 2 + flux_samples[:, :, :, 2] ** 2),
+            axis=1,
+        )
+        yoff_mean = np.mean(samples["sources"]["yoff"], axis=1)
+        xoff_mean = np.mean(samples["sources"]["xoff"], axis=1)
 
-            print(f"  {stokes}: Total power (data/model/resid/noise): {total_power_data:.2e}/{total_power_model:.2e}/{total_power_resid:.2e}/{total_power_noise:.2e}")
-            print(f"       Peak amplitude (data/model/resid/noise): {peak_data:.2e}/{peak_model:.2e}/{peak_resid:.2e}/{peak_noise:.2e}")
+        # Define a mapping from internal names to prettier labels
+        label_map = {
+            "t_flux": r"$\langle T \rangle$",
+            "p_flux": r"$\langle P \rangle$",
+            "yoff_mean": r"$\langle y_{\rm off} \rangle$",
+            "xoff_mean": r"$\langle x_{\rm off} \rangle$",
+        }
 
-            # Signal-to-noise ratios
-            snr_data = total_power_data / total_power_noise if total_power_noise > 0 else 0
-            snr_resid = total_power_resid / total_power_noise if total_power_noise > 0 else 0
-            print(f"       SNR (data/residual): {snr_data:.2f}/{snr_resid:.2f}")
+        corner_data = {
+            "t_flux": t_flux,
+            "p_flux": p_flux,
+            "yoff_mean": yoff_mean,
+            "xoff_mean": xoff_mean,
+        }
+        for band_idx, band in enumerate(self.fitter.config.bands):
+            band_suffix = self._get_band_suffix(band)
+            for param_name in self.fitter.config.beam_coeff_bounds.keys():
+                internal_name = f"beam_{band_suffix}_{param_name}"
+                corner_data[internal_name] = samples["beams"][band_idx][param_name]
+                # Add pretty labels for beam parameters
+                if "beta" in param_name:
+                    stokes = "T" if "T" in param_name else "P"
+                    label_map[internal_name] = f"$\beta_{{{stokes}, {band_suffix}}}$"
+                else:
+                    label_map[internal_name] = f"{param_name} ({band_suffix})"
+
+        # Convert to array for corner plot
+        corner_array = np.array(list(corner_data.values())).T
+        labels = [label_map.get(key, key) for key in corner_data.keys()]
+
+        fig = corner.corner(corner_array, labels=labels, quantiles=[0.16, 0.5, 0.84], show_titles=True)
+        fig.suptitle("NUTS Corner Plot", y=1.02)
+
+        if save:
+            filename = os.path.join(self.output_dir, "nuts_corner.png")
+            plt.savefig(filename, dpi=150)
+            plt.close()
+            print(f"Saved corner plot to: {filename}")
+        else:
+            plt.show()
 
 
-def create_diagnostic_plots(fitter, best_fit_params, output_dir=None, include_template_analysis=False, central_crop=None):
+def create_diagnostic_plots(
+    fitter,
+    best_fit_params,
+    output_dir=None,
+    include_template_analysis=False,
+    central_crop=None,
+):
     """
     Convenience function to create all diagnostic plots.
 
     Parameters:
-    -----------
+    ----------
     fitter : PolarizedBeamFitter or BootstrapBeamFitter
         The fitted beam fitter object
     best_fit_params : dict
@@ -884,38 +864,40 @@ def create_diagnostic_plots(fitter, best_fit_params, output_dir=None, include_te
     --------
     dict
         Dictionary of plot filenames
-
-    Note:
-    -----
-    The number of diagnostic plots created is controlled by the
-    fitter.config.n_diagnostic_plots parameter, which can be:
-    - An integer (default 3): plot that many highest chi2 sources
-    - "all": plot all sources
-    - 0: skip diagnostic plots entirely
-
-    For multi-band fitters, plots are created using the primary band (150GHz) for analysis.
     """
     plotter = BeamPlotter(fitter, output_dir)
-
     filenames = {}
 
-    # Beam profiles
+    # Beam profiles (already handles multi-band correctly)
     filenames["beam_profiles"] = plotter.plot_beam_profiles(best_fit_params)
 
-    # Basis diagnostics
-    filenames["basis_diagnostics"] = plotter.plot_basis_diagnostics()
+    # Basis diagnostics (per band)
+    if plotter.base_fitter.config.beam_model_type == "b_spline":
+        filenames["basis_diagnostics"] = []
+        for band in plotter.fitter.config.bands:
+            filename = plotter.plot_basis_diagnostics(save=True, band=band)
+            if filename:
+                filenames["basis_diagnostics"].append(filename)
 
-    # Source diagnostics (uses config.n_diagnostic_plots)
+    # Source diagnostics (now creates plots for all bands for top sources)
     filenames["source_diagnostics"] = plotter.plot_source_diagnostics(best_fit_params, central_crop=central_crop)
 
-    # ASD analysis
-    if not plotter.is_multiband:
-        filenames["asd_analysis"] = plotter.plot_asd_analysis(best_fit_params)
+    # ASD analysis (now creates plots for all bands)
+    filenames["asd_analysis"] = plotter.plot_asd_analysis(best_fit_params)
 
-    # Template projection analysis (optional)
+    # Template projection analysis (optional, now for all bands)
     if include_template_analysis:
         filenames["template_projection"] = plotter.plot_template_projection_analysis(best_fit_params)
 
     print("\n--- All plotting complete. ---")
-
     return filenames
+
+
+def create_nuts_plots(fitter, nuts_output, output_dir=None):
+    """
+    Convenience function to create all NUTS diagnostic plots.
+    """
+    plotter = BeamPlotter(fitter, output_dir)
+    plotter.plot_nuts_trace(nuts_output)
+    plotter.plot_nuts_corner(nuts_output)
+    print("\n--- All NUTS plotting complete. ---")

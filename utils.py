@@ -166,7 +166,7 @@ def safe_filename(source_id):
     return safe_name
 
 
-def linear_interp_differentiable(x, xp, fp):
+def linear_interp_differentiable(x, xp, fp, config):
     """
     1-D linear interpolation that is differentiable w.r.t. x.
 
@@ -186,15 +186,17 @@ def linear_interp_differentiable(x, xp, fp):
         1-D array of x-coordinates, must be increasing
     fp : array_like
         1-D array of function values at xp
+    config : BeamFittingConfig
+        Configuration object
 
     Returns:
     --------
     array_like
         Interpolated values at x
     """
-    x = jnp.asarray(x, dtype=jnp.float32)
-    xp = jnp.asarray(xp, dtype=jnp.float32)
-    fp = jnp.asarray(fp, dtype=jnp.float32)
+    x = jnp.asarray(x, dtype=config.dtype_jax_real)
+    xp = jnp.asarray(xp, dtype=config.dtype_jax_real)
+    fp = jnp.asarray(fp, dtype=config.dtype_jax_real)
 
     dx = xp[1] - xp[0]  # assumes uniform grid
     dx_inv = 1.0 / dx
@@ -514,9 +516,11 @@ def to_logit(value, bounds):
         Parameter in logit space
     """
     lower, upper = bounds
+    lower = jnp.broadcast_to(lower, value.shape)  # check if this makes a difference, maybe for jax.grad?
+    upper = jnp.broadcast_to(upper, value.shape)
     value_scaled = (value - lower) / (upper - lower)
     # Clamp to avoid numerical issues
-    value_scaled = jnp.clip(value_scaled, 1e-8, 1.0 - 1e-8)
+    value_scaled = jnp.clip(value_scaled, 1e-18, 1.0 - 1e-18)
     return jnp.log(value_scaled / (1.0 - value_scaled))
 
 
@@ -537,6 +541,8 @@ def from_logit(logit_value, bounds):
         Physical parameter value
     """
     lower, upper = bounds
+    lower = jnp.broadcast_to(lower, logit_value.shape)
+    upper = jnp.broadcast_to(upper, logit_value.shape)
     return lower + (upper - lower) * jax.nn.sigmoid(logit_value)
 
 
@@ -553,7 +559,7 @@ def params_to_logit(physical_params, config):
             "sources": {
                 "yoff": array (n_src,),
                 "xoff": array (n_src,),
-                "flux_correction": array (n_src, n_bands, 3)
+                "flux": array (n_src, n_bands, 3)
             }
         }
     config : BeamFittingConfig
@@ -575,11 +581,12 @@ def params_to_logit(physical_params, config):
         logit_params["beams"].append(beam_logit)
 
     # Convert source parameters
-    yoff_bounds, xoff_bounds, flux_bounds = config.source_bounds
+    yoff_bounds, xoff_bounds = config.source_position_bounds
+    flux_bounds = config.source_flux_bounds
     logit_params["sources"] = {
         "yoff": to_logit(physical_params["sources"]["yoff"], yoff_bounds),
         "xoff": to_logit(physical_params["sources"]["xoff"], xoff_bounds),
-        "flux_correction": to_logit(physical_params["sources"]["flux_correction"], flux_bounds),
+        "flux": to_logit(physical_params["sources"]["flux"], flux_bounds),
     }
 
     return logit_params
@@ -612,11 +619,12 @@ def params_from_logit(logit_params, config):
         physical_params["beams"].append(beam_physical)
 
     # Convert source parameters
-    yoff_bounds, xoff_bounds, flux_bounds = config.source_bounds
+    yoff_bounds, xoff_bounds = config.source_position_bounds
+    flux_bounds = config.source_flux_bounds
     physical_params["sources"] = {
         "yoff": from_logit(logit_params["sources"]["yoff"], yoff_bounds),
         "xoff": from_logit(logit_params["sources"]["xoff"], xoff_bounds),
-        "flux_correction": from_logit(logit_params["sources"]["flux_correction"], flux_bounds),
+        "flux": from_logit(logit_params["sources"]["flux"], flux_bounds),
     }
 
     return physical_params

@@ -7,6 +7,8 @@ Contains all the constants and parameters used in the analysis.
 import os
 from dataclasses import dataclass
 
+import jax.numpy as jnp
+import numpy as np
 from spt3g import core
 
 
@@ -27,6 +29,13 @@ class BeamFittingConfig:
 
     # Analysis parameters
     bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
+    double_precision = True  # Use 64-bit precision for all calculations
+    solver = "optimistix_bfgs"  # "optimistix_bfgs", "optax_adam"
+    bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
+    adam_kwargs = {"learning_rate": 0.02}
+    # after warmup, we arrive at peak_value, then decay by a factor of decay_rate every transition_steps steps
+
+    debug = False
 
     # Map parameters
     map_size_pix = 300
@@ -46,13 +55,17 @@ class BeamFittingConfig:
     # Processing options
     leakage_weighting = "linear"  # "flat", "linear", "squared", or "median"
 
+    # Chi-squared calculation method
+    chi2_method = "fourier"  # "fourier" or "real_space"
+
     # Noise PSD options
-    # Choose noise PSD method from available options:
-    # 'clusterfinder_psd': Load pre-computed clusterfinder instrument noise PSD from FITS file
-    # 'kx_averaged': Calculate individual noise PSDs using k_x averaging with max heuristic
-    # 'white_noise_scaled': White noise assumption rescaled to center-excised standard deviation
-    # 'ensemble_asd_mean': Average amplitude spectral densities across sources then convert to PSD
-    noise_psd_method = "clusterfinder_psd"
+    # Available options:
+    #  'clusterfinder_psd': Load pre-computed clusterfinder instrument noise PSD from FITS file
+    #  'kx_averaged': Calculate individual noise PSDs using k_x averaging with max heuristic
+    #  'white_noise': Simple white noise assumption with constant PSD values
+    #  'ensemble_asd_mean': Average amplitude spectral densities across sources then convert to PSD
+    # This is ignored if chi2_method = "real_space"
+    noise_psd_method = "white_noise"
 
     # Data-driven Noise PSD parameters (used when noise_psd_method = 'data_driven')
     # Calculates PSD directly from regions of the map away from the source
@@ -61,7 +74,7 @@ class BeamFittingConfig:
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
 
     # Optimization parameters
-    n_steps = 5000
+    n_steps = 100000
 
     # Bootstrap resampling parameters
     enable_bootstrap = False  # Enable/disable bootstrap uncertainty estimation
@@ -75,14 +88,12 @@ class BeamFittingConfig:
     # Can be an integer (default 3), "all" to plot all sources,
     # or 0 to disable diagnostic plots entirely
 
-    source_bounds = (
+    source_position_bounds = (
         (-5.0, 5.0),  # yoff (source center y offset in pixels)
         (-5.0, 5.0),  # xoff (source center x offset in pixels)
-        (0.1, 10.0),  # flux_correction (applies to all T, Q, U)
     )
 
-    # Debug options
-    debug = False
+    source_flux_bounds = (-5.0, 100.0)  # T, Q, U flux in uK
 
     # Select which can of parameterized model you want to fit.
     # The betapol model just has one free parameter
@@ -134,9 +145,9 @@ class BeamFittingConfig:
         "J061030-6058.6",  # noisy, no appreciable amount of signal
     ]
 
-    source_param_names = ["yoff", "xoff", "flux_correction"]
+    source_param_names = ["yoff", "xoff", "flux"]
 
-    # Band-specific FWHM values, measured in arcminutes
+    # Band-specific FWHM values, in arcminutes
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
 
     # Chi-squared normalization for sampling
@@ -145,18 +156,24 @@ class BeamFittingConfig:
     # NUTS / MCMC controls
     nuts_num_warmup = 1000
     nuts_num_samples = 1000
-    nuts_num_chains = 1  # set to 2–4 if memory/GPU allows
-    nuts_chain_method = "parallel"  # or "sequential" on single-core
     nuts_target_accept = 0.8
     nuts_max_tree_depth = 10  # increase to 12–14 if many divergences
-    nuts_dense_mass = False  # can be list of blocks if you later want structure
-    nuts_adapt_step_size = True
-    nuts_adapt_mass_matrix = True
-    nuts_find_heuristic_step_size = False
-    nuts_forward_mode = False
-    nuts_progress_bar = True
-    nuts_thin = 1
-    nuts_seed = 0
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
+
+    @property
+    def dtype_np_real(self):
+        return np.float64 if self.double_precision else np.float32
+
+    @property
+    def dtype_np_complex(self):
+        return np.complex128 if self.double_precision else np.complex64
+
+    @property
+    def dtype_jax_real(self):
+        return jnp.float64 if self.double_precision else jnp.float32
+
+    @property
+    def dtype_jax_complex(self):
+        return jnp.complex128 if self.double_precision else jnp.complex64

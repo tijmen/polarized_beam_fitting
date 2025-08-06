@@ -25,6 +25,7 @@ class CacheManager:
             "max_zero_fraction": self.config.max_zero_fraction,  # different sources
             "skip_sources": sorted(self.config.skip_sources) if self.config.skip_sources else [],  # different sources
             "leakage_weighting": self.config.leakage_weighting,  # different approach to leakage
+            "chi2_method": self.config.chi2_method,  # different chi2 calculation. if this is real_space, we don't need to take FFTs
         }
         # Create a stable string representation
         param_string = str(sorted(relevant_params.items()))

@@ -80,11 +80,16 @@ class BootstrapBeamFitter:
 
         # Generate all bootstrap indices at once
         self.rng_key, subkey = jax.random.split(self.rng_key)
-        bootstrap_indices = jax.random.choice(subkey, n_sources, shape=(self.config.n_bootstrap_samples, n_sources), replace=True)
+        bootstrap_indices = jax.random.choice(
+            subkey,
+            n_sources,
+            shape=(self.config.n_bootstrap_samples, n_sources),
+            replace=True,
+        )
 
         # Create weight arrays using vmap for efficiency
         def create_weight_array(indices):
-            return jnp.bincount(indices, length=n_sources)
+            return jnp.bincount(indices, length=n_sources).astype(self.config.dtype_jax_real)
 
         return jax.vmap(create_weight_array)(bootstrap_indices)
 
@@ -118,7 +123,7 @@ class BootstrapBeamFitter:
             # Build a dedicated objective function for this bootstrap sample.
             objective_func = make_bootstrap_objective(self.base_fitter._get_individual_chi2s, weight_array)
 
-            solver = optx.BFGS(rtol=1e-12, atol=1e-12)
+            solver = optx.BFGS(rtol=1e-24, atol=1e-24)
 
             sol = optx.minimise(
                 objective_func,
@@ -197,7 +202,7 @@ class BootstrapBeamFitter:
         # Handle source parameters
         organized["sources_yoff"] = np.array([p["sources"]["yoff"] for p in bootstrap_params])
         organized["sources_xoff"] = np.array([p["sources"]["xoff"] for p in bootstrap_params])
-        organized["sources_flux_correction"] = np.array([p["sources"]["flux_correction"] for p in bootstrap_params])
+        organized["sources_flux"] = np.array([p["sources"]["flux"] for p in bootstrap_params])
 
         return organized
 

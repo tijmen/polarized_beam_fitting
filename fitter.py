@@ -6,613 +6,445 @@ and NUTS sampling, supports single and multi-band configurations, and provides
 efficient parallelization across devices.
 """
 
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
-import jax.sharding
 import numpy as np
-import numpyro
-import numpyro.distributions as dist
+import optax
 import optimistix as optx
 from numpyro.infer import MCMC, NUTS
-from numpyro.infer.initialization import init_to_value
-from spt3g import core, maps
 
 from .beam_model import create_beam_model
 from .cache import CacheManager
+from .data_loader import DataLoader
 from .noise_psd import create_noise_psd_calculator
-from .source_fitting import gaussfit_source
-from .utils import check_zero_fraction, make_apodization_mask, params_from_logit, params_to_logit
+from .utils import (
+    make_apodization_mask,
+    params_from_logit,
+    params_to_logit,
+)
 
 
-def _q16_50_84(x):
-    return jnp.quantile(x, jnp.array([0.16, 0.50, 0.84], dtype=jnp.float32), axis=0)
+@dataclass
+class FitterState:
+    """Container for fitter state and precomputed data."""
+
+    # Coordinate grids
+    y_grid: jnp.ndarray
+    x_grid: jnp.ndarray
+
+    # Masks
+    apod_mask: jnp.ndarray
+    apod_mask_broadcast: jnp.ndarray
+
+    # Data arrays
+    maps_jax: jnp.ndarray
+    weights_jax: Optional[jnp.ndarray] = None
+    maps_fft_jax: Optional[jnp.ndarray] = None
+    noise_psd_jax: Optional[jnp.ndarray] = None
+
+    # Source information
+    source_ids: np.ndarray = None
+    n_src: int = 0
+    n_bands: int = 0
+
+    # Initial guesses
+    gaussfit_yoff_numpy: np.ndarray = None
+    gaussfit_xoff_numpy: np.ndarray = None
+    gaussfit_initial_amp_numpy: np.ndarray = None
+    gaussfit_initial_amp_jax: jnp.ndarray = None
+
+
+class ObjectiveFunctions:
+    """Encapsulates objective function logic."""
+
+    def __init__(self, config, state: FitterState, beam_models: Dict):
+        self.config = config
+        self.state = state
+        self.beam_models = beam_models
+
+    def build_objective(self):
+        """Build the appropriate objective function."""
+        if self.config.chi2_method == "fourier":
+            return self._build_fourier_objective()
+        elif self.config.chi2_method == "real_space":
+            return self._build_real_space_objective()
+        else:
+            raise ValueError(f"Unknown chi2_method: {self.config.chi2_method}")
+
+    def _build_fourier_objective(self):
+        """Build Fourier-space objective."""
+        vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, None))
+
+        def objective(params_logit, data, extra_args=None):
+            maps_fft, noise_psd = data
+            params_phys = params_from_logit(params_logit, self.config)
+
+            chi2_total = vmap_chi2(
+                params_phys["beams"],
+                params_phys["sources"]["yoff"],
+                params_phys["sources"]["xoff"],
+                params_phys["sources"]["flux"],
+                maps_fft,
+                noise_psd,
+            ).sum()
+            return chi2_total
+
+        return objective
+
+    def _build_real_space_objective(self):
+        """Build real-space objective."""
+        vmap_chi2 = jax.vmap(self._chi2_real_single, in_axes=(None, 0, 0, 0, 0, 0))
+
+        def objective(params_logit, data, extra_args=None):
+            maps, weights = data
+            params_phys = params_from_logit(params_logit, self.config)
+
+            chi2_total = vmap_chi2(
+                params_phys["beams"],
+                params_phys["sources"]["yoff"],
+                params_phys["sources"]["xoff"],
+                params_phys["sources"]["flux"],
+                maps,
+                weights,
+            ).sum()
+            return chi2_total
+
+        return objective
+
+    def _chi2_real_single(self, beam_params_list, yoff, xoff, flux, data, weight):
+        """Chi2 for single source in real space."""
+        model = self._build_model(beam_params_list, yoff, xoff, flux)
+        residual = data - model
+        chi2 = jnp.einsum("...i,...ij,...j->...", residual, weight, residual)
+        return jnp.sum(chi2)
+
+    def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, noise_psd):
+        """Chi2 for single source in Fourier space."""
+        model = self._build_model(beam_params_list, yoff, xoff, flux)
+        model_apod = model * self.state.apod_mask_broadcast
+        model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
+        residual_fft = data_fft - model_fft
+
+        # Full covariance not yet supported in this refactored version
+        # Add 1e-30 to avoid division by zero
+        chi2 = (jnp.abs(residual_fft) ** 2) / (noise_psd + 1e-30)
+        return jnp.sum(jnp.mean(chi2, axis=(0, 1)))
+
+    def _build_model(self, beam_params_list, yoff, xoff, flux):
+        """Build beam model for all bands."""
+        maps_per_band = []
+        for i, band in enumerate(self.config.bands):
+            beam_model = self.beam_models[band]
+            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff, xoff)
+            maps_per_band.append((T_map, P_map))
+
+        # Stack T and P maps for all bands
+        T_stack = jnp.stack([m[0] for m in maps_per_band], axis=-1)
+        P_stack = jnp.stack([m[1] for m in maps_per_band], axis=-1)
+
+        # Create templates for T, Q, U
+        # Shape: (ny, nx, n_bands, 3)
+        templates = jnp.stack([T_stack, P_stack, P_stack], axis=-1)
+
+        # Multiply by flux: (n_bands, 3) -> (1, 1, n_bands, 3)
+        flux_reshaped = flux[None, None, :, :]  # This line has been corrected from flux[:, None, None, :] to flux[None, None, :, :]
+
+        # Final model shape: (ny, nx, n_bands, 3)
+        model = templates * flux_reshaped
+        return model
 
 
 class PolarizedBeamFitter:
     """
-    Polarized beam fitting code
-    - supports both single and multi-band configurations
-    - ML optimization with optimistix or NUTS sampling with numpyro
-    - Efficient JAX parallelization across devices and vmap within devices giving CPU, single GPU, and multi-GPU support
+    Refactored polarized beam fitting class.
 
-    Usage example:
-
-    ```python
-    from polarized_beam_fitting import PolarizedBeamFitter, BeamFittingConfig
-    config = BeamFittingConfig()
-    fitter = PolarizedBeamFitter(config=config)
-    best_fit_params = fitter.run_fit()
-    ```
-
-    Author: Tijmen de Haan <tijmen.dehaan@gmail.com>
-    Initial Version: 2025-06-03
+    Cleaner interface and more modular design while maintaining
+    compatibility with existing beam_model and noise_psd modules.
     """
 
-    def __init__(self, config=None):
-        """
-        Initialize the unified polarized beam fitter.
-
-        Parameters:
-        -----------
-        config : BeamFittingConfig
-            Configuration object.
-        """
-        if config is None:
-            raise ValueError("config must be provided")
-
-        # Welcome message
-        print(" ")
-        print("=================================================================")
-        print("==        Welcome to the SPT-3G polarized beam fitter!         ==")
-        print("== Questions? Contact Tijmen de Haan <tijmen.dehaan@gmail.com> ==")
-        print("=================================================================")
-        print(" ")
-
+    def __init__(self, config):
+        """Initialize the fitter with configuration."""
         self.config = config
-        self.map_shape = (config.map_size_pix, config.map_size_pix)
-        self.n_bands = len(self.config.bands)
-        self.is_multiband = self.n_bands > 1  # only important for plotting
-        print(f"Analysis for {self.config.bands}")
+        self._setup_jax()
+        self._print_welcome()
 
-        # Pre-compute coordinate grids (shared across sources, bands, and stokes parameters)
-        print("Pre-computing coordinate grids...")
-        ny, nx = self.map_shape
-        y_coords = jnp.arange(-ny // 2, ny // 2)
-        x_coords = jnp.arange(-nx // 2, nx // 2)
-        self.y_grid = jax.device_put(y_coords[:, None] + jnp.zeros(nx, dtype=jnp.float32))  # check if this is correct
-        self.x_grid = jax.device_put(x_coords[None, :] + jnp.zeros((ny, 1), dtype=jnp.float32))  # check if this is correct
+        # Initialize components
+        self.state = self._initialize_state()
+        self.beam_models = self._create_beam_models()
 
-        # Create separate beam models for each band
-        self.beam_models = {}
-        for band in self.config.bands:
-            self.beam_models[band] = create_beam_model(self.config, self.y_grid, self.x_grid, band)
+        # Load data
+        self._load_data()
 
-        self.apod_mask = make_apodization_mask(self.map_shape, config.apodization_width_pix)
-        self.apod_mask_jax = jax.device_put(self.apod_mask.astype(jnp.float32))
+        # Build objective functions
+        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
+        self.objective_function = obj_builder.build_objective()
 
-        # Pre-broadcast apodization mask for better memory access patterns
-        self.apod_mask_broadcast = self.apod_mask_jax[:, :, None, None]
+        # Compile optimization functions
+        self._loss_and_grad = jax.jit(jax.value_and_grad(lambda p, d: self.objective_function(p, d, None)))
 
-        # Load and prepare data
-        cache_manager = CacheManager(config)
-        (
-            self.gaussfit_yoff_numpy,
-            self.gaussfit_xoff_numpy,
-            self.gaussfit_initial_amp_numpy,
-            self.raw_maps_numpy,
-            self.qu_templates_numpy,
-            self.maps_numpy,
-            self.maps_fft_numpy,
-            self.source_ids,
-            self.n_src,
-        ) = cache_manager.load_or_create(self._load_and_prepare_data)
-
-        # Pad data for even distribution across devices
-        (
-            self.n_src_padded,
-            self.source_ids_padded,
-            self.maps_fft_numpy_padded,
-            self.gaussfit_initial_amp_numpy_padded,
-            self.gaussfit_yoff_numpy_padded,
-            self.gaussfit_xoff_numpy_padded,
-        ) = self._pad_data_for_devices()
-
-        # Initialize noise PSD calculator
-        self.noise_psd_calculator = create_noise_psd_calculator(self.config, self.map_shape)
-
-        # For noise calculation, pass the raw maps data
-        self.noise_psd_numpy = self.noise_psd_calculator.calculate_noise_psd(self.maps_numpy)
-
-        # Also create unpadded JAX arrays for bootstrap/NUTS
-        self.gaussfit_initial_amp_jax = jax.device_put(self.gaussfit_initial_amp_numpy.astype(jnp.float32))
-        self.maps_fft_jax = jax.device_put(self.maps_fft_numpy.astype(jnp.complex64))
-
-        # Initialize parameters using new simple structure
-        self.params_physical = self._get_initial_physical_params()
+        # Initialize parameters
+        self.params_physical = self._initialize_parameters()
         self.params_logit = params_to_logit(self.params_physical, self.config)
 
-        # Set up JAX Mesh for sharding
-        devices = np.array(jax.devices())
-        self.mesh = jax.sharding.Mesh(devices, ("devices",))
+    def _setup_jax(self):
+        """Configure JAX settings."""
+        if self.config.double_precision:
+            jax.config.update("jax_enable_x64", True)
+            print("64-bit precision enabled.")
 
-        # Convert to JAX and load to devices
-        with jax.sharding.use_mesh(self.mesh):
-            self.psd_dtype = jnp.complex64 if self.config.noise_psd_method == "multiband_covariance" else jnp.float32
-            self.noise_psd_jax = jax.device_put(self.noise_psd_numpy.astype(self.psd_dtype), device=jax.P(None))
-            self.yoff_jax_padded = jax.device_put(self.gaussfit_yoff_numpy_padded.astype(jnp.float32), device=jax.P("devices"))
-            self.xoff_jax_padded = jax.device_put(self.gaussfit_xoff_numpy_padded.astype(jnp.float32), device=jax.P("devices"))
-            self.flux_correction_jax_padded = jax.device_put(jnp.full((self.n_src_padded, self.n_bands, 3), 0.9991, dtype=jnp.float32), device=jax.P("devices", None, None))
-            self.gaussfit_initial_amp_jax_padded = jax.device_put(self.gaussfit_initial_amp_numpy_padded.astype(jnp.float32), device=jax.P("devices", None, None))
-            self.maps_fft_jax_padded = jax.device_put(self.maps_fft_numpy_padded.astype(jnp.complex64), device=jax.P("devices", None, None, None, None))
+    def _print_welcome(self):
+        """Print welcome message."""
+        print("\n" + "=" * 65)
+        print("==        Welcome to the SPT-3G polarized beam fitter!        ==")
+        print("== Questions? Contact Tijmen de Haan <tijmen.dehaan@gmail.com> ==")
+        print("=" * 65 + "\n")
+        print(f"Analysis for {self.config.bands}")
 
-            vmap_chi2 = jax.vmap(  # still batch over sources
-                self._objective_function_single_source,
-                in_axes=(None, 0, 0, 0, 0, 0, None),
-            )
+    def _initialize_state(self) -> FitterState:
+        """Initialize fitter state with coordinate grids."""
+        map_shape = (self.config.map_size_pix, self.config.map_size_pix)
+        ny, nx = map_shape
 
-            def _chi2_global(beams, yoff_padded, xoff_padded, flux_padded):
-                return vmap_chi2(beams, yoff_padded, xoff_padded, flux_padded, self.gaussfit_initial_amp_jax_padded, self.maps_fft_jax_padded, self.noise_psd_jax).sum()
+        # Create coordinate grids
+        y_coords = jnp.arange(-ny // 2, ny // 2, dtype=self.config.dtype_jax_real)
+        x_coords = jnp.arange(-nx // 2, nx // 2, dtype=self.config.dtype_jax_real)
+        y_grid = y_coords[:, None] * jnp.ones(nx, dtype=self.config.dtype_jax_real)
+        x_grid = x_coords[None, :] * jnp.ones((ny, 1), dtype=self.config.dtype_jax_real)
 
-            self._chi2_global = _chi2_global
+        # Create apodization mask
+        apod_mask = make_apodization_mask(map_shape, self.config.apodization_width_pix)
+        apod_mask_jax = jnp.asarray(apod_mask, dtype=self.config.dtype_jax_real)
 
-    def _pad_data_for_devices(self):
-        """Pad data to be evenly divisible by number of devices."""
-        n_devices = jax.local_device_count()
-        n_src_real = len(self.source_ids)
-        n_src_padded = int(n_devices * np.ceil(n_src_real / n_devices))
-        n_pad = n_src_padded - n_src_real
+        return FitterState(
+            y_grid=y_grid,
+            x_grid=x_grid,
+            apod_mask=apod_mask_jax,
+            apod_mask_broadcast=apod_mask_jax[:, :, None, None],
+            maps_jax=None,  # Will be filled during data loading
+            n_bands=len(self.config.bands),
+        )
 
-        source_ids_padded = self.source_ids
-        maps_fft_numpy_padded = self.maps_fft_numpy
-        gaussfit_initial_amp_numpy_padded = self.gaussfit_initial_amp_numpy
-        gaussfit_yoff_numpy_padded = self.gaussfit_yoff_numpy
-        gaussfit_xoff_numpy_padded = self.gaussfit_xoff_numpy
+    def _create_beam_models(self) -> Dict:
+        """Create beam models for each band."""
+        print("Creating beam models...")
+        models = {}
+        for band in self.config.bands:
+            models[band] = create_beam_model(self.config, self.state.y_grid, self.state.x_grid, band)
+        return models
 
-        if n_pad > 0:
-            print(f"Adding {n_pad} dummy sources to make the new total ({n_src_padded}) divisible by {n_devices} devices.")
+    def _load_data(self):
+        """Load and prepare data using cache if available."""
+        print("Loading data...")
 
-            source_ids_padded = np.concatenate([self.source_ids, [f"PAD_{i}" for i in range(n_pad)]])
+        # Use cache manager
+        cache = CacheManager(self.config)
+        loader = DataLoader(self.config)
 
-            ny, nx = self.map_shape
-            dummy_shape = (n_pad, ny, nx, self.n_bands, 3)
-            dummy_data = np.zeros(dummy_shape, dtype=self.maps_fft_numpy.dtype)
-            maps_fft_numpy_padded = np.concatenate([self.maps_fft_numpy, dummy_data], axis=0)
+        data = cache.load_or_create(loader.load_and_prepare)
 
-            dummy_amps = np.zeros((n_pad, self.n_bands, 3), dtype=self.gaussfit_initial_amp_numpy.dtype)
-            gaussfit_initial_amp_numpy_padded = np.concatenate([self.gaussfit_initial_amp_numpy, dummy_amps], axis=0)
+        # Unpack data
+        (
+            gaussfit_yoff,
+            gaussfit_xoff,
+            gaussfit_amp,
+            raw_maps,
+            qu_templates,
+            maps,
+            weights,
+            maps_fft,
+            source_ids,
+            n_src,
+        ) = data
 
-            dummy_yoff = np.zeros((n_pad,), dtype=self.gaussfit_yoff_numpy.dtype)
-            gaussfit_yoff_numpy_padded = np.concatenate([self.gaussfit_yoff_numpy, dummy_yoff], axis=0)
+        # Store in state
+        self.state.source_ids = source_ids
+        self.state.n_src = n_src
+        self.state.gaussfit_yoff_numpy = gaussfit_yoff
+        self.state.gaussfit_xoff_numpy = gaussfit_xoff
+        self.state.gaussfit_initial_amp_numpy = gaussfit_amp
 
-            dummy_xoff = np.zeros((n_pad,), dtype=self.gaussfit_xoff_numpy.dtype)
-            gaussfit_xoff_numpy_padded = np.concatenate([self.gaussfit_xoff_numpy, dummy_xoff], axis=0)
+        # Convert to JAX arrays
+        self.state.gaussfit_initial_amp_jax = jnp.asarray(gaussfit_amp, dtype=self.config.dtype_jax_real)
+        self.state.maps_jax = jnp.asarray(maps, dtype=self.config.dtype_jax_real)
 
-        return n_src_padded, source_ids_padded, maps_fft_numpy_padded, gaussfit_initial_amp_numpy_padded, gaussfit_yoff_numpy_padded, gaussfit_xoff_numpy_padded
+        # Setup for specific chi2 method
+        if self.config.chi2_method == "fourier":
+            self._setup_fourier_data(maps, maps_fft)
+        else:
+            self._setup_real_space_data(weights)
 
-    def _get_initial_physical_params(self):
-        """
-        Initialize parameters using the new simple structure.
+    def _setup_fourier_data(self, maps, maps_fft):
+        """Setup data for Fourier-space analysis."""
+        self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
 
-        Returns:
-        --------
-        dict
-            Physical parameters with structure:
-            {
-                "beams": [beam_params_band0, beam_params_band1, ...],
-                "sources": {
-                    "yoff": array (n_src,),
-                    "xoff": array (n_src,),
-                    "flux_correction": array (n_src, n_bands, 3)
-                }
-            }
-        """
-        params_physical = {"beams": [], "sources": {}}
+        # Calculate noise PSD
+        psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
+        noise_psd = psd_calc.calculate_noise_psd(maps)
+        self.state.noise_psd_jax = jnp.asarray(noise_psd, dtype=self.config.dtype_jax_real)
 
-        # Initialize beam parameters for each band
+        self.objective_data = (self.state.maps_fft_jax, self.state.noise_psd_jax)
+
+    def _setup_real_space_data(self, weights):
+        """Setup data for real-space analysis."""
+        self.state.weights_jax = jnp.asarray(weights, dtype=self.config.dtype_jax_real)
+        self.objective_data = (self.state.maps_jax, self.state.weights_jax)
+
+    def _initialize_parameters(self) -> Dict:
+        """Initialize fitting parameters."""
+        params = {"beams": [], "sources": {}}
+
+        # Initialize beam parameters
         for band in self.config.bands:
             beam_params = self.beam_models[band].get_initial_physical_params()
-            beam_params_jax = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), beam_params)
-            params_physical["beams"].append(beam_params_jax)
+            params["beams"].append(
+                jax.tree.map(
+                    lambda x: jnp.asarray(x, dtype=self.config.dtype_jax_real),
+                    beam_params,
+                )
+            )
 
-        yoff_init = self.gaussfit_yoff_numpy
-        xoff_init = self.gaussfit_xoff_numpy
-        flux_init = 0.9991  # 1.0 would be fine, but just to be on the safe side, let's pick a less precise number
+        # Initialize source parameters
+        yoff = self.state.gaussfit_yoff_numpy - 0.5
+        xoff = self.state.gaussfit_xoff_numpy - 0.5
 
-        params_physical["sources"] = {
-            "yoff": jnp.asarray(yoff_init, dtype=jnp.float32),
-            "xoff": jnp.asarray(xoff_init, dtype=jnp.float32),
-            "flux_correction": jnp.full((self.n_src, self.n_bands, 3), flux_init, dtype=jnp.float32),
+        params["sources"] = {
+            "yoff": jnp.asarray(yoff, dtype=self.config.dtype_jax_real),
+            "xoff": jnp.asarray(xoff, dtype=self.config.dtype_jax_real),
+            "flux": self.state.gaussfit_initial_amp_jax,
         }
 
-        return params_physical
+        return params
 
-    def _load_and_prepare_data(self):
-        """Load and prepare source data."""
-        print("Preparing source data...")
-        self._validate_skip_sources()
-        gaussfit_yoff, gaussfit_xoff, gaussfit_initial_amp, raw_maps, source_ids, n_src = self._read_coadd_files_and_fit_gaussians()
-        normalized_qu_templates = self._create_leakage_template(gaussfit_initial_amp, raw_maps)
-        maps_numpy, maps_fft_numpy = self._prepare_fft_maps(gaussfit_initial_amp, raw_maps, normalized_qu_templates)
-        return gaussfit_yoff, gaussfit_xoff, gaussfit_initial_amp, raw_maps, normalized_qu_templates, maps_numpy, maps_fft_numpy, source_ids, n_src
-
-    def _validate_skip_sources(self):
-        """Validate that skip_sources exist in the data files."""
-        all_source_ids = set()
-        for coadd_filename in self.config.coadd_filenames:
-            g3file = core.G3File(coadd_filename)
-            for frame in g3file:
-                if frame.type == core.G3FrameType.Map:
-                    # Check if any of our target bands are in the frame ID
-                    if any(band in frame["Id"] for band in self.config.bands):
-                        all_source_ids.add(frame["Id"])
-
-        missing_skip_sources = [skip for skip in self.config.skip_sources if not any(skip in sid for sid in all_source_ids)]
-
-        if missing_skip_sources:
-            print("WARNING: The following skip_sources were not found in any data files:")
-            for missing_source in missing_skip_sources:
-                print(f"  - {missing_source}")
-            print("This may indicate typos in the skip_sources list.")
-
-    def _create_leakage_template(self, gaussfit_initial_amp, raw_maps):
-        """Create T->QU leakage correction template."""
-        print(f"Creating T->P leakage template using {self.config.leakage_weighting} weighting...")
-
-        if self.config.leakage_weighting == "median":
-            normalized_qu_templates = np.median(raw_maps[:, :, :, :, 1:3], axis=0) / gaussfit_initial_amp
-        else:
-            # Proper weighted average over sources with per-source, per-band weights
-            # raw_maps shape: (n_src, ny, nx, n_bands, 3)
-            # weight_factor shape: (n_src, n_bands)
-            # Need to normalize by T amplitude per source per band
-            qu_maps = raw_maps[:, :, :, :, 1:3]  # Shape: (n_src, ny, nx, n_bands, 2)
-            t_amps = gaussfit_initial_amp[:, :, 0]  # Shape: (n_src, n_bands)
-
-            # Calculate weight factor based on T amplitude
-            weight_factor = {"flat": 1.0, "linear": t_amps, "squared": t_amps**2}[self.config.leakage_weighting]  # (n_src, n_bands)
-
-            # Normalize by T amplitude: (n_src, ny, nx, n_bands, 2) / (n_src, 1, 1, n_bands, 1)
-            normalized_qu_per_source = qu_maps / t_amps[:, None, None, :, None]
-
-            # Apply weights and average over sources
-            # weight_factor shape: (n_src, n_bands) -> (n_src, 1, 1, n_bands, 1)
-            weights = weight_factor[:, None, None, :, None]
-            weighted_sum = np.sum(normalized_qu_per_source * weights, axis=0)  # Sum over sources
-            weight_sum = np.sum(weights, axis=0)  # Sum of weights
-            normalized_qu_templates = weighted_sum / weight_sum  # Weighted average
-
-        print(f"Created leakage template from {self.n_src} bright sources")
-        return normalized_qu_templates
-
-    def _read_coadd_files_and_fit_gaussians(self):
+    def run_fit(self) -> Dict:
         """
-        Collect data from coadd files, then perform Gaussian fits.
-
-        The reason this is in a single function is that the results of the Gaussian fit decide which sources we
-        keep and which we discard.
-        """
-        gaussfit_results = {}
-        for band in self.config.bands:
-            gaussfit_results[band] = {}
-
-        for coadd_filename in self.config.coadd_filenames:
-            print(f"Processing file: {coadd_filename}")
-            g3file = core.G3File(coadd_filename)
-            for frame in g3file:
-                if frame.type == core.G3FrameType.Map:
-                    source_id = frame["Id"]
-                    # Check if this frame corresponds to any of our target bands
-                    frame_band = None
-                    for band in self.config.bands:
-                        if band in source_id:
-                            frame_band = band
-                            break
-
-                    if frame_band is None:
-                        continue
-
-                    if any(skip in source_id for skip in self.config.skip_sources):
-                        continue
-
-                    t_map, q_map, u_map, weight = frame["T"], frame["Q"], frame["U"], frame["Wpol"]
-                    maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)  # pylint: disable=no-member
-
-                    if not check_zero_fraction(t_map, source_id, max_zero_fraction=self.config.max_zero_fraction):
-                        continue
-
-                    yoff_fit, xoff_fit, t_amp_fit, meanoff_fit, q_amp_fit, u_amp_fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config)
-
-                    if t_amp_fit < self.config.min_t_amplitude:
-                        continue
-
-                    # we're later going to multiply q_amp and u_amp, so we better make sure it's not zero
-                    pol_amp_min = 0.001  # minimum allowed absolute value
-                    q_amp_sign = np.sign(q_amp_fit)
-                    u_amp_sign = np.sign(u_amp_fit)
-                    q_amp_fit = np.maximum(np.abs(q_amp_fit), pol_amp_min) * q_amp_sign  # overwrite
-                    u_amp_fit = np.maximum(np.abs(u_amp_fit), pol_amp_min) * u_amp_sign
-
-                    gaussfit_results[frame_band][source_id] = {
-                        "yoff": yoff_fit,
-                        "xoff": xoff_fit,
-                        "t_amp": t_amp_fit,
-                        "meanoff": meanoff_fit,
-                        "q_amp": q_amp_fit,
-                        "u_amp": u_amp_fit,
-                        "maps": (t_map, q_map, u_map, weight),
-                    }
-
-        # Extract source IDs, select the ones for which we have all bands, and determine final count
-        source_ids_list = list(gaussfit_results[self.config.bands[0]].keys())
-        if len(self.config.bands) > 1:
-            for source_id in source_ids_list.copy():
-                source_id_without_band = source_id.split("-" + self.config.bands[0])[0]
-                for band in self.config.bands[1:]:
-                    source_id_to_find = source_id_without_band + "-" + band
-                    if source_id_to_find not in [id.split("_")[0] for id in gaussfit_results[band]]:
-                        print(f"{source_id_to_find} not found in {band}. Skipping this source.")
-                        source_ids_list.remove(source_id)
-                        break
-
-        source_ids_without_band = []
-        for source_id in source_ids_list:
-            source_ids_without_band.append(source_id.split("-" + self.config.bands[0])[0])
-        source_ids_without_band.sort()
-
-        source_ids = np.array(source_ids_without_band)
-        self.source_ids = source_ids
-        n_src = len(source_ids)
-        self.n_src = n_src
-        ny, nx = self.map_shape
-
-        # convert to arrays with the standard ordering (n_source, ny, nx, n_bands, n_stokes)
-        gaussfit_yoff = np.zeros((self.n_src,))
-        gaussfit_xoff = np.zeros((self.n_src,))
-        gaussfit_initial_amp = np.zeros((self.n_src, self.n_bands, 3))
-        raw_maps = np.zeros((self.n_src, ny, nx, self.n_bands, 3))
-
-        band_for_positions = "150GHz" if "150GHz" in self.config.bands else self.config.bands[0]
-        print(f"Using {band_for_positions} for source position offset guesses.")
-        for source_idx, source_id in enumerate(source_ids):
-            gaussfit_yoff[source_idx] = gaussfit_results[band_for_positions][source_id + "-" + band_for_positions]["yoff"]
-            gaussfit_xoff[source_idx] = gaussfit_results[band_for_positions][source_id + "-" + band_for_positions]["xoff"]
-            for band_idx, band in enumerate(self.config.bands):
-                result = gaussfit_results[band][source_id + "-" + band]
-                gaussfit_initial_amp[source_idx, band_idx, 0] = result["t_amp"]
-                gaussfit_initial_amp[source_idx, band_idx, 1] = result["q_amp"]
-                gaussfit_initial_amp[source_idx, band_idx, 2] = result["u_amp"]
-                raw_maps[source_idx, :, :, band_idx, 0] = result["maps"][0]
-                raw_maps[source_idx, :, :, band_idx, 1] = result["maps"][1]
-                raw_maps[source_idx, :, :, band_idx, 2] = result["maps"][2]
-
-        return gaussfit_yoff, gaussfit_xoff, gaussfit_initial_amp, raw_maps, source_ids, n_src
-
-    def _prepare_fft_maps(self, gaussfit_initial_amp, raw_maps, normalized_qu_templates):
-        """Prepare final FFT data using leakage template with consistent array format."""
-        # Initialize arrays with consistent ordering: (n_source, ny, nx, n_bands, n_stokes)
-        ny, nx = self.map_shape
-        map_array = np.zeros((self.n_src, ny, nx, self.n_bands, 3))
-        map_fft_array = np.zeros((self.n_src, ny, nx, self.n_bands, 3), dtype=np.complex64)
-
-        for source_idx in range(self.n_src):
-            for band_idx, band in enumerate(self.config.bands):
-                map_array[source_idx, :, :, band_idx, :] = raw_maps[source_idx, :, :, band_idx, :]
-
-                # Apply T->QU leakage subtraction
-                map_array[source_idx, :, :, band_idx, 1] -= normalized_qu_templates[:, :, band_idx, 0] * gaussfit_initial_amp[source_idx, band_idx, 0]
-                map_array[source_idx, :, :, band_idx, 2] -= (
-                    normalized_qu_templates[:, :, band_idx, 1] * gaussfit_initial_amp[source_idx, band_idx, 0]
-                )  # is there a one-line way to do this?
-
-                # Apply apod mask
-                map_array_apodized = map_array[source_idx, :, :, band_idx, :] * self.apod_mask[:, :, None]
-
-                # Go to Fourier space
-                map_fft_array[source_idx, :, :, band_idx, :] = np.fft.fft2(map_array_apodized, axes=(0, 1))
-
-        print(f"Prepared {self.n_src} sources for fitting.")
-
-        return map_array, map_fft_array
-
-    def _objective_function_single_source(self, beam_params_list, yoff, xoff, flux_correction, initial_amplitudes_source, data_fft_source, noise_psd_source):
-        """
-        Loss function for a single source
-
-        Parameters:
-        -----------
-        beam_params_list : list
-            List of physical beam parameters for each band [beam_params_band0, beam_params_band1, ...]
-        yoff : jax.Array
-            Y offset of the source. Shape: (n_src,)
-        xoff : jax.Array
-            X offset of the source. Shape: (n_src,)
-        flux_correction : jax.Array
-            Flux correction for the source. Shape: (n_src, n_bands, 3)
-        initial_amplitudes_source : jax.Array
-            Initial T, Q, U amplitudes for the source. Shape: (n_bands, 3)
-        data_fft_source : jax.Array
-            FFT of the data maps for the source. Shape: (ny, nx, n_bands, 3)
-        noise_psd_source : jax.Array
-            Noise Power Spectral Density for the source.
-            For most PSD types, Shape: (ny, nx, n_bands, 3)
-            For the MultiBandCovarianceCalculator, Shape: (ny, nx, n_bands, n_bands, 3, 3)
+        Run optimization to find best-fit parameters.
 
         Returns:
-        --------
-        float
-            The calculated chi-squared value for the source, normalized by the degrees of freedom.
+            Dictionary of best-fit physical parameters
         """
-        # Evaluate beam maps for all bands
-        maps_per_band = [self.beam_models[band].evaluate_beam_maps(beam_params_list[i], yoff, xoff) for i, band in enumerate(self.config.bands)]
-        T_stack = jnp.stack([maps[0] for maps in maps_per_band], axis=-1)
-        P_stack = jnp.stack([maps[1] for maps in maps_per_band], axis=-1)
+        print(f"Starting {self.config.solver} optimization...")
 
-        # The final assembly of T, Q, U templates is the same
-        beam_templates = jnp.stack([T_stack, P_stack, P_stack], axis=-1)
-
-        # Calculate final T, Q, U amplitudes by applying the correction factor
-        final_amplitudes = initial_amplitudes_source * flux_correction  # Shape: (n_bands, 3)
-
-        # Create the real-space model via broadcasting: (ny,nx,n_bands,3) * (1,1,n_bands,3)
-        model_real = beam_templates * final_amplitudes[None, None, :, :]
-
-        # Apply the apodization mask and transform model to Fourier space
-        # Optimize: use pre-broadcast mask for better memory access patterns
-        model_apodized = model_real * self.apod_mask_broadcast
-        model_fft = jnp.fft.fft2(model_apodized, axes=(0, 1))
-
-        # residual in Fourier space: shape (ny, nx, n_bands, 3), complex
-        residual = data_fft_source - model_fft  # complex
-
-        if noise_psd_source.ndim == 6:
-            # full covariance case: noise_psd_source shape (ny, nx, band, band, stokes, stokes)
-            ny, nx = self.map_shape
-            B = self.n_bands
-            M = B * 3  # flatten (band, stokes) into length-M vector
-
-            # flatten residual to shape (ny*nx, M)
-            r_flat = residual.reshape(ny, nx, B, 3)
-            r_flat = r_flat.reshape(ny * nx, M)  # complex vector per pixel
-
-            # reorder and flatten covariance to (ny*nx, M, M)
-            # Original ordering is (ny, nx, b, b', s, s') with b,b' then s,s'.
-            # To get (b,s,b',s') we need to transpose accordingly:
-            C = noise_psd_source.transpose(0, 1, 2, 4, 3, 5)  # now (ny, nx, b, s, b', s')
-            C = C.reshape(ny * nx, M, M)  # full covariance matrix per pixel
-
-            # regularize slightly for numerical stability
-            eps = 1e-12
-            eye = jnp.eye(M, dtype=C.dtype)
-            C = C + eps * eye[None, :, :]  # broadcast to (ny*nx, M, M)
-
-            # solve C^{-1} r for each pixel: result shape (ny*nx, M)
-            x = jnp.linalg.solve(C, r_flat[..., None]).squeeze(-1)  # (ny*nx, M)
-
-            # compute chi2 per pixel: real part of r† (C^{-1} r)
-            # note: r_flat is complex; use conj(r_flat)
-            chi2_flat = jnp.real(jnp.sum(jnp.conj(r_flat) * x, axis=-1)) / (self.map_shape[0] * self.map_shape[1] * self.n_bands * 3)  # (ny*nx,)
-
-            total_chi2 = jnp.mean(chi2_flat)  # , dtype=jnp.float64)  # scalar
-
+        if self.config.solver == "optimistix_bfgs":
+            self._run_bfgs()
+        elif self.config.solver == "optax_adam":
+            self._run_adam()
         else:
-            # diagonal-in-(band,stokes) case: noise_psd_source shape (ny, nx, band, stokes)
-            chi2_components = (jnp.abs(residual) ** 2) / (noise_psd_source + 1e-30) / (self.map_shape[0] * self.map_shape[1]) # (ny, nx, band, stokes)
-            chi2_per_source = jnp.mean(chi2_components, axis=(0, 1))  # (band, stokes)
-            total_chi2 = jnp.mean(chi2_per_source)
+            raise ValueError(f"Unknown solver: {self.config.solver}")
 
-        return total_chi2
+        # Calculate and report final chi2
+        self._report_final_chi2()
 
-    def objective_function(self, params_logit, extra_args=None):
-        """
-        Total loss function
+        return self.params_physical
 
-        Parameters:
-        -----------
-        params_logit : dict
-            Parameters in logit space with structure:
-            {"beams": [beam_params_band0, ...], "sources": {"yoff": ..., "xoff": ..., "flux_correction": ...}}
-        extra_args : optional
-            Unused parameter needed for optimistix compatibility
-        """
-        params_phys = params_from_logit(params_logit, self.config)
+    def _run_bfgs(self):
+        """Run BFGS optimization."""
+        solver = optx.BFGS(**self.config.bfgs_kwargs)
 
-        yoff_padded = self.yoff_jax_padded.at[: self.n_src].set(params_phys["sources"]["yoff"])
-        xoff_padded = self.xoff_jax_padded.at[: self.n_src].set(params_phys["sources"]["xoff"])
-        flux_padded = self.flux_correction_jax_padded.at[: self.n_src].set(params_phys["sources"]["flux_correction"])
-
-        total_chi2 = self._chi2_global(
-            params_phys["beams"],
-            yoff_padded,
-            xoff_padded,
-            flux_padded,
+        sol = optx.minimise(
+            self.objective_function,
+            solver,
+            self.params_logit,
+            args=self.objective_data,
+            max_steps=self.config.n_steps,
+            throw=False,
         )
-        return total_chi2  # already replicated, no psum needed
-
-    def _get_individual_chi2s(self, params_phys):
-        """Get individual chi2 values for each source (not JIT compiled)."""
-
-        # Define a vmap-friendly version of the loss function
-        def vmap_friendly_loss(yoff, xoff, flux_correction, initial_amplitudes, data_fft_src):
-            # This function now closes over beam_params_list and noise_psd_jax
-            return self._objective_function_single_source(params_phys["beams"], yoff, xoff, flux_correction, initial_amplitudes, data_fft_src, self.noise_psd_jax)
-
-        # Use vmap over the source-specific parameters
-        # Note: We use the unpadded JAX arrays here
-        all_chi2s = jax.vmap(
-            vmap_friendly_loss,
-            in_axes=(0, 0, 0, 0, 0),  # vmap over all five arguments
-        )(
-            params_phys["sources"]["yoff"],
-            params_phys["sources"]["xoff"],
-            params_phys["sources"]["flux_correction"],
-            self.gaussfit_initial_amp_jax,  # Use pre-existing device array
-            self.maps_fft_jax,  # Use pre-existing device array
-        )
-        return all_chi2s
-
-    def run_fit(self):
-        """Run ML optimization using optimistix for both single and multi-band configurations."""
-        print(f"Starting optimization with max_steps={self.config.n_steps}...")
-
-        solver = optx.BFGS(rtol=1e-12, atol=1e-12)
-        y0 = self.params_logit
-
-        with jax.sharding.use_mesh(self.mesh):
-            sol = optx.minimise(self.objective_function, solver, y0, max_steps=self.config.n_steps, throw=False)
 
         if sol.result != optx.RESULTS.successful:
-            print(f"ERROR! BFGS did not converge successfully in {self.config.n_steps} steps.")
-            print(f"Final physical params: {params_from_logit(sol.value, self.config)}")
-            raise RuntimeError(optx.RESULTS[sol.result])
+            raise RuntimeError(f"BFGS failed: {optx.RESULTS[sol.result]}")
 
         self.params_logit = sol.value
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
         print(f"Optimization finished after {sol.stats['num_steps']} steps.")
-        print(optx.RESULTS[sol.result])
 
-        # Calculate final chi2
-        final_chi2s = self._get_individual_chi2s(self.params_physical)
-        self.latest_chi2s = np.array(final_chi2s)
-        print(f"Final chi2: {np.sum(self.latest_chi2s)}")
+    def _run_adam(self):
+        """Run Adam optimization."""
+        optimizer = optax.adam(**self.config.adam_kwargs)
+        opt_state = optimizer.init(self.params_logit)
 
-        return params_from_logit(self.params_logit, self.config)
+        for i in range(self.config.n_steps):
+            loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            self.params_logit = optax.apply_updates(self.params_logit, updates)
 
-    # NUTS sampling methods
-    def sample_with_nuts_uniform(
-        self,
-        num_warmup=None,
-        num_samples=None,
-        num_chains=None,
-        chain_method=None,
-        max_tree_depth=None,
-        target_accept_prob=None,
-        dense_mass=None,
-        seed=None,
-        return_samples=True,
-    ):
+            grad_norm = optax.global_norm(grads)
+
+            if i % 10 == 0:  # Print every 10 steps
+                print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2f}")
+
+            if grad_norm < 1:
+                print(f"Converged at step {i}")
+                break
+
+        self.params_physical = params_from_logit(self.params_logit, self.config)
+
+    def _report_final_chi2(self):
+        """Calculate and report final chi2 values."""
+        chi2s = self.calculate_individual_chi2s(self.params_physical)
+        self.latest_chi2s = np.array(chi2s)
+        print(f"Final total chi2: {np.sum(self.latest_chi2s):.2f}")
+        print(f"Mean chi2 per source: {np.mean(self.latest_chi2s):.2f}")
+
+    def calculate_individual_chi2s(self, params_phys: Dict) -> jnp.ndarray:
+        """Calculate chi2 for each source individually."""
+        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
+
+        if self.config.chi2_method == "fourier":
+
+            def chi2_fn(y, x, f, d):
+                return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, self.state.noise_psd_jax)
+
+            chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0))(
+                params_phys["sources"]["yoff"],
+                params_phys["sources"]["xoff"],
+                params_phys["sources"]["flux"],
+                self.state.maps_fft_jax,
+            )
+        else:
+
+            def chi2_fn(y, x, f, d, w):
+                return obj_builder._chi2_real_single(params_phys["beams"], y, x, f, d, w)
+
+            chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0, 0))(
+                params_phys["sources"]["yoff"],
+                params_phys["sources"]["xoff"],
+                params_phys["sources"]["flux"],
+                self.state.maps_jax,
+                self.state.weights_jax,
+            )
+
+        return chi2s
+
+    def sample_with_nuts(self, num_warmup: int = None, num_samples: int = None) -> Dict:
         """
-        Run NUTS sampling with uniform physical priors.
-        """
-        # Use defaults from config
-        num_warmup = self.config.nuts_num_warmup if num_warmup is None else num_warmup
-        num_samples = self.config.nuts_num_samples if num_samples is None else num_samples
-        num_chains = self.config.nuts_num_chains if num_chains is None else num_chains
-        chain_method = self.config.nuts_chain_method if chain_method is None else chain_method
-        max_tree_depth = self.config.nuts_max_tree_depth if max_tree_depth is None else max_tree_depth
-        target_accept_prob = self.config.nuts_target_accept if target_accept_prob is None else target_accept_prob
-        dense_mass = self.config.nuts_dense_mass if dense_mass is None else dense_mass
-        seed = self.config.nuts_seed if seed is None else seed
+        Run NUTS sampling for uncertainty estimation.
 
+        Args:
+            num_warmup: Number of warmup steps (default from config)
+            num_samples: Number of samples (default from config)
+
+        Returns:
+            Dictionary with samples and summary statistics
+        """
+        num_warmup = num_warmup or self.config.nuts_num_warmup
+        num_samples = num_samples or self.config.nuts_num_samples
+        num_chains = max(1, jax.local_device_count())
+
+        print(f"Starting NUTS sampling: {num_chains} chains, {num_warmup} warmup, {num_samples} samples")
+
+        # Define potential energy
+        def potential_fn(params_logit):
+            chi2, _ = self._loss_and_grad(params_logit, self.objective_data)
+            return 0.5 * self.config.chi2_normalization * chi2
+
+        # Setup MCMC
         kernel = NUTS(
-            self._nuts_model,
-            target_accept_prob=target_accept_prob,
-            max_tree_depth=max_tree_depth,
-            dense_mass=dense_mass,
-            adapt_step_size=self.config.nuts_adapt_step_size,
-            adapt_mass_matrix=self.config.nuts_adapt_mass_matrix,
-            find_heuristic_step_size=self.config.nuts_find_heuristic_step_size,
-            forward_mode_differentiation=self.config.nuts_forward_mode,
+            potential_fn=potential_fn,
+            target_accept_prob=self.config.nuts_target_accept,
+            max_tree_depth=self.config.nuts_max_tree_depth,
         )
 
         mcmc = MCMC(
@@ -620,183 +452,86 @@ class PolarizedBeamFitter:
             num_warmup=num_warmup,
             num_samples=num_samples,
             num_chains=num_chains,
-            chain_method=chain_method,
-            thinning=self.config.nuts_thin,
-            progress_bar=self.config.nuts_progress_bar,
+            chain_method="parallel" if num_chains > 1 else "sequential",
         )
 
-        rng_key = jax.random.PRNGKey(seed)
-        with jax.sharding.use_mesh(self.mesh):
-            mcmc.run(rng_key, init_strategy=self._nuts_init())
-        flat_samples = mcmc.get_samples(group_by_chain=False)
+        # Initialize and run
+        rng_key = jax.random.PRNGKey(0)
+        if num_chains > 1:
+            rng_key = jax.random.split(rng_key, num_chains)
+            init_params = jax.tree.map(
+                lambda x: jnp.broadcast_to(x, (num_chains,) + x.shape),
+                self.params_logit,
+            )
+        else:
+            init_params = self.params_logit
 
-        # Unflatten samples back into the structured pytree
-        samples_phys = self._unflatten_samples(flat_samples)
+        mcmc.run(rng_key, init_params=init_params, extra_fields=("potential_energy",))
 
-        # Build summaries
-        summary = jax.tree_util.tree_map(lambda x: {"mean": jnp.mean(x, axis=0), "q16_50_84": _q16_50_84(x)}, samples_phys)
+        # Process results
+        samples_logit = mcmc.get_samples(group_by_chain=False)
+        samples_phys = jax.vmap(lambda p: params_from_logit(p, self.config))(samples_logit)
+
+        # Calculate summary statistics
+        summary = self._calculate_summary_stats(samples_phys)
 
         return {
-            "samples_phys": samples_phys if return_samples else None,
+            "samples_logit": samples_logit,
+            "samples_phys": samples_phys,
             "summary": summary,
             "mcmc": mcmc,
         }
 
-    def _unflatten_samples(self, flat_samples):
-        """Unflattens the output of mcmc.get_samples() back into our parameter structure."""
-        samples_phys = {"beams": [], "sources": {}}
+    def _calculate_summary_stats(self, samples: Dict) -> Dict:
+        """Calculate summary statistics from samples."""
 
-        # Reconstruct beam parameters
-        for band_idx, band in enumerate(self.config.bands):
-            beam_samples = {}
-            for param_name in self.config.beam_coeff_bounds.keys():
-                key = f"beam_{band_idx}_{param_name}"
-                if key in flat_samples:
-                    beam_samples[param_name] = flat_samples[key]
-                else:
-                    raise KeyError(f"Sample key '{key}' not found in MCMC output.")
-            samples_phys["beams"].append(beam_samples)
+        def get_stats(x):
+            return {
+                "mean": jnp.mean(x, axis=0),
+                "std": jnp.std(x, axis=0),
+                "q16": jnp.percentile(x, 16, axis=0),
+                "q50": jnp.percentile(x, 50, axis=0),
+                "q84": jnp.percentile(x, 84, axis=0),
+            }
 
-        # Reconstruct source parameters
-        for param_name in ["yoff", "xoff", "flux_correction"]:
-            if param_name in flat_samples:
-                samples_phys["sources"][param_name] = flat_samples[param_name]
-            else:
-                raise KeyError(f"Sample key '{param_name}' not found in MCMC output.")
+        return jax.tree.map(get_stats, samples)
 
-        return samples_phys
-
-    def _nuts_likelihood(self, params_phys):
-        """Likelihood function for NUTS that works directly with physical parameters."""
-        # Explicitly shard the arrays to match the jit specification
-        Sh = jax.sharding.PartitionSpec("devices")
-        yoff_padded = jax.device_put(jnp.pad(params_phys["sources"]["yoff"], (0, self.n_src_padded - self.n_src)), jax.sharding.NamedSharding(self.mesh, Sh))
-        xoff_padded = jax.device_put(jnp.pad(params_phys["sources"]["xoff"], (0, self.n_src_padded - self.n_src)), jax.sharding.NamedSharding(self.mesh, Sh))
-        flux_padded = jax.device_put(
-            jnp.pad(params_phys["sources"]["flux_correction"], ((0, self.n_src_padded - self.n_src), (0, 0), (0, 0))), jax.sharding.NamedSharding(self.mesh, Sh)
-        )
-
-        # This call assumes _chi2_global can be JITted with these inputs
-        total_chi2 = self._chi2_global(
-            params_phys["beams"],
-            yoff_padded,
-            xoff_padded,
-            flux_padded,
-        )
-        return total_chi2
-
-    def _nuts_model(self, *args, **kwargs):
-        """Numpyro model with uniform priors in physical space."""
-        # Sample all parameters in physical space
-        params_phys = self._sample_params_phys_uniform()
-
-        chi2_total = self._nuts_likelihood(params_phys)
-
-        norm = jnp.asarray(self.config.chi2_normalization, dtype=jnp.float32)
-        numpyro.factor("likelihood", -0.5 * norm * chi2_total)
-
-    def _sample_params_phys_uniform(self):
-        """Sample all physical parameters using uniform priors from config bounds."""
-        params_phys = {"beams": [], "sources": {}}
-
-        # Sample beam parameters for each band
-        for band_idx, band in enumerate(self.config.bands):
-            beam_params = {}
-            for param_name, bounds in self.config.beam_coeff_bounds.items():
-                low, high = jnp.asarray(bounds[0], dtype=jnp.float32), jnp.asarray(bounds[1], dtype=jnp.float32)
-                # Create unique name for numpyro
-                name = f"beam_{band_idx}_{param_name}"
-                # Get shape from initial params
-                initial_shape = self.params_physical["beams"][band_idx][param_name].shape
-                if initial_shape == ():
-                    # Scalar parameter
-                    beam_params[param_name] = numpyro.sample(name, dist.Uniform(low, high))
-                else:
-                    # Array parameter
-                    uniform_dist = dist.Uniform(low=jnp.full(initial_shape, low), high=jnp.full(initial_shape, high))
-                    beam_params[param_name] = numpyro.sample(name, uniform_dist.to_event(len(initial_shape)))
-            params_phys["beams"].append(beam_params)
-
-        # Sample source parameters
-        yoff_bounds, xoff_bounds, flux_bounds = self.config.source_bounds
-
-        params_phys["sources"] = {
-            "yoff": numpyro.sample("yoff", dist.Uniform(low=jnp.full((self.n_src,), yoff_bounds[0]), high=jnp.full((self.n_src,), yoff_bounds[1])).to_event(1)),
-            "xoff": numpyro.sample("xoff", dist.Uniform(low=jnp.full((self.n_src,), xoff_bounds[0]), high=jnp.full((self.n_src,), xoff_bounds[1])).to_event(1)),
-            "flux_correction": numpyro.sample(
-                "flux_correction",
-                dist.Uniform(low=jnp.full((self.n_src, self.n_bands, 3), flux_bounds[0]), high=jnp.full((self.n_src, self.n_bands, 3), flux_bounds[1])).to_event(3),
-            ),
-        }
-
-        return params_phys
-
-    def _nuts_init(self):
-        """Initialize NUTS at current physical parameter values."""
-        # Get the current best-fit parameters in physical space
-        phys = params_from_logit(self.params_logit, self.config)
-
-        # Create numpyro-compatible initialization dictionary
-        init_vals = {}
-
-        # Add beam parameters
-        for band_idx, beam_params in enumerate(phys["beams"]):
-            for param_name, param_value in beam_params.items():
-                key = f"beam_{band_idx}_{param_name}"
-                init_vals[key] = jnp.asarray(param_value, dtype=jnp.float32)
-
-        # Add source parameters
-        init_vals["yoff"] = jnp.asarray(phys["sources"]["yoff"], dtype=jnp.float32)
-        init_vals["xoff"] = jnp.asarray(phys["sources"]["xoff"], dtype=jnp.float32)
-        init_vals["flux_correction"] = jnp.asarray(phys["sources"]["flux_correction"], dtype=jnp.float32)
-
-        return init_to_value(values=init_vals)
-
-    def create_model_maps(self, best_fit_params):
+    def create_model_maps(self, params: Dict) -> np.ndarray:
         """
-        Create model maps for all sources given the best-fit parameters.
-        This function is now vectorized with JAX for efficiency.
+        Create model maps for all sources.
+
+        Args:
+            params: Physical parameters dictionary
+
+        Returns:
+            Array of model maps with shape (n_src, ny, nx, n_bands, 3)
         """
-        params_phys = best_fit_params
+        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
 
-        # Define a function to compute the model for a single source and band
-        def get_model_for_source_band(yoff, xoff, flux_correction, initial_amplitude, beam_params, beam_model_instance):
-            beam_T_map, beam_P_map = beam_model_instance.evaluate_beam_maps(beam_params, yoff, xoff)
-            final_amplitudes = initial_amplitude * flux_correction
-            return jnp.stack([beam_T_map * final_amplitudes[0], beam_P_map * final_amplitudes[1], beam_P_map * final_amplitudes[2]], axis=-1)
+        def model_for_source(yoff, xoff, flux):
+            return obj_builder._build_model(params["beams"], yoff, xoff, flux)
 
-        yoffs = params_phys["sources"]["yoff"]
-        xoffs = params_phys["sources"]["xoff"]
-        flux_corrections = params_phys["sources"]["flux_correction"]
+        # Vectorize over sources
+        models = jax.vmap(model_for_source)(params["sources"]["yoff"], params["sources"]["xoff"], params["sources"]["flux"])
 
-        # Initialize output array: (n_src, ny, nx, n_bands, 3)
-        ny, nx = self.map_shape
-        n_src = len(self.source_ids)
-        all_models_numpy = np.zeros((n_src, ny, nx, self.n_bands, 3))
+        return np.array(models)
 
-        for band_idx, band in enumerate(self.config.bands):
-            beam_params = params_phys["beams"][band_idx]
-            beam_model = self.beam_models[band]
-            initial_amps_band = self.gaussfit_initial_amp_jax[:, band_idx, :]
-            flux_corrections_band = flux_corrections[:, band_idx, :]
+    def create_beam_profile_maps(self, params: Dict) -> Tuple[Dict, Dict]:
+        """
+        Create centered beam maps for profile analysis.
 
-            # Vectorize over all sources for the current band
-            # vmap over (yoff, xoff, flux_corr, initial_amp)
-            vmapped_get_model = jax.vmap(get_model_for_source_band, in_axes=(0, 0, 0, 0, None, None))
-            # Execute the vmapped function on the device
-            all_models_jax = vmapped_get_model(yoffs, xoffs, flux_corrections_band, initial_amps_band, beam_params, beam_model)
+        Args:
+            params: Physical parameters dictionary
 
-            # Transfer all results for this band to CPU at once
-            all_models_numpy[:, :, :, band_idx, :] = np.array(all_models_jax)
+        Returns:
+            Tuple of (T_maps, P_maps) dictionaries keyed by band
+        """
+        T_maps = {}
+        P_maps = {}
 
-        return all_models_numpy
+        for i, band in enumerate(self.config.bands):
+            T_map, P_map = self.beam_models[band].evaluate_beam_maps(params["beams"][i], 0.0, 0.0)
+            T_maps[band] = np.array(T_map)
+            P_maps[band] = np.array(P_map)
 
-    def create_beam_profile_maps(self, best_fit_params):
-        """Create centered beam maps for radial profile plotting."""
-        beam_T_maps = {}
-        beam_P_maps = {}
-        for band_idx, band in enumerate(self.config.bands):
-            beam_T_map, beam_P_map = self.beam_models[band].evaluate_beam_maps(best_fit_params["beams"][band_idx], 0.0, 0.0)
-            beam_T_maps[band] = beam_T_map
-            beam_P_maps[band] = beam_P_map
-        return beam_T_maps, beam_P_maps
+        return T_maps, P_maps

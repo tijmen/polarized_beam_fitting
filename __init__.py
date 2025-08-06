@@ -8,7 +8,13 @@ Author: Tijmen de Haan
 Version: 2025-06-11
 """
 
-from .beam_model import BeamModelBetaPol, BeamModelBetaTest, BeamModelBspline, BeamModelBSplinesGaussian, BeamModelGaussian
+from .beam_model import (
+    BeamModelBetaPol,
+    BeamModelBetaTest,
+    BeamModelBspline,
+    BeamModelBSplinesGaussian,
+    BeamModelGaussian,
+)
 from .bootstrap import BootstrapBeamFitter
 from .config import BeamFittingConfig
 from .fitter import PolarizedBeamFitter
@@ -19,7 +25,7 @@ from .noise_psd import (
     NoisePSDCalculator,
     create_noise_psd_calculator,
 )
-from .plotting import BeamPlotter, create_diagnostic_plots
+from .plotting import BeamPlotter, create_diagnostic_plots, create_nuts_plots
 from .source_fitting import fit_map_amplitude, gaussfit_source
 from .utils import (
     check_zero_fraction,
@@ -63,4 +69,5 @@ __all__ = [
     "KxAveragedCalculator",
     "EnsembleAsdMeanCalculator",
     "create_noise_psd_calculator",
+    "create_nuts_plots",
 ]
