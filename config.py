@@ -33,6 +33,7 @@ class BeamFittingConfig:
     solver = "optimistix_bfgs"  # "optimistix_bfgs", "optax_adam"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
     adam_kwargs = {"learning_rate": 0.02}
+    adam_gtol = 100.0  # Convergence criterion for Adam optimizer's gradient norm
     # after warmup, we arrive at peak_value, then decay by a factor of decay_rate every transition_steps steps
 
     debug = False

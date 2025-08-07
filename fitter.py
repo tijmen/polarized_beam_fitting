@@ -367,26 +367,25 @@ class PolarizedBeamFitter:
 
         for i in range(self.config.n_steps):
             loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            self.params_logit = optax.apply_updates(self.params_logit, updates)
-
             grad_norm = optax.global_norm(grads)
 
+            if grad_norm < self.config.adam_gtol:
+                print(f"Converged at step {i} with gradient norm {grad_norm:.2f} < {self.config.adam_gtol:.2f}")
+                break
+
+            updates, opt_state = optimizer.update(grads, opt_state)
+            self.params_logit = optax.apply_updates(self.params_logit, updates)
             if i % 10 == 0:  # Print every 10 steps
                 print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2f}")
-
-            if grad_norm < 1:
-                print(f"Converged at step {i}")
-                break
 
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
     def _report_final_chi2(self):
         """Calculate and report final chi2 values."""
         chi2s = self.calculate_individual_chi2s(self.params_physical)
-        self.latest_chi2s = np.array(chi2s)
-        print(f"Final total chi2: {np.sum(self.latest_chi2s):.2f}")
-        print(f"Mean chi2 per source: {np.mean(self.latest_chi2s):.2f}")
+        self._latest_chi2s = np.array(chi2s)
+        print(f"Final total chi2: {np.sum(self._latest_chi2s):.2f}")
+        print(f"Mean chi2 per source: {np.mean(self._latest_chi2s):.2f}")
 
     def calculate_individual_chi2s(self, params_phys: Dict) -> jnp.ndarray:
         """Calculate chi2 for each source individually."""
@@ -418,22 +417,52 @@ class PolarizedBeamFitter:
 
         return chi2s
 
-    def sample_with_nuts(self, num_warmup: int = None, num_samples: int = None) -> Dict:
+    def _make_jittered_inits(self, rng_key, num_chains: int):
+        """
+        Build per-chain initial points by adding small Gaussian noise to the
+        current MAP parameters in *physical* space, then converting to logit.
+
+        Jitter scales (1 σ):
+            • beam parameters       : 0.01  (additive, absolute)
+            • source y/x offsets    : 0.10  pixels
+            • flux amplitudes       : 0.01  (relative, i.e. 1 %)
+        """
+        # unpack convenience handles
+        beam_phys = self.params_physical["beams"]
+        src_phys = self.params_physical["sources"]
+
+        def jitter_one_chain(key):
+            key_beam, key_y, key_x, key_f = jax.random.split(key, 4)
+
+            # --- beam params -------------------------------------------------- #
+            def jitter_beam(bp, k):
+                flat, treedef = jax.tree.flatten(bp)
+                ks = jax.random.split(k, len(flat))
+                jittered = [p + 0.01 * jax.random.normal(kk, p.shape, p.dtype) for p, kk in zip(flat, ks)]
+                return jax.tree.unflatten(treedef, jittered)
+
+            beam_jittered = [jitter_beam(bp, k) for bp, k in zip(beam_phys, jax.random.split(key_beam, len(beam_phys)))]
+
+            yoff_j = src_phys["yoff"] + 0.10 * jax.random.normal(key_y, src_phys["yoff"].shape)
+            xoff_j = src_phys["xoff"] + 0.10 * jax.random.normal(key_x, src_phys["xoff"].shape)
+            flux_j = src_phys["flux"] * (1.0 + 0.01 * jax.random.normal(key_f, src_phys["flux"].shape))
+
+            phys_jittered = {
+                "beams": beam_jittered,
+                "sources": {"yoff": yoff_j, "xoff": xoff_j, "flux": flux_j},
+            }
+            return params_to_logit(phys_jittered, self.config)
+
+        chain_keys = jax.random.split(rng_key, num_chains)
+        return jax.vmap(jitter_one_chain)(chain_keys)
+
+    def sample_with_nuts(self) -> Dict:
         """
         Run NUTS sampling for uncertainty estimation.
-
-        Args:
-            num_warmup: Number of warmup steps (default from config)
-            num_samples: Number of samples (default from config)
-
-        Returns:
-            Dictionary with samples and summary statistics
         """
-        num_warmup = num_warmup or self.config.nuts_num_warmup
-        num_samples = num_samples or self.config.nuts_num_samples
         num_chains = max(1, jax.local_device_count())
 
-        print(f"Starting NUTS sampling: {num_chains} chains, {num_warmup} warmup, {num_samples} samples")
+        print(f"Starting NUTS sampling: {num_chains} chains, {self.config.nuts_num_warmup} warmup, {self.config.nuts_num_samples} samples")
 
         # Define potential energy
         def potential_fn(params_logit):
@@ -449,22 +478,20 @@ class PolarizedBeamFitter:
 
         mcmc = MCMC(
             kernel,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
+            num_warmup=self.config.nuts_num_warmup,
+            num_samples=self.config.nuts_num_samples,
             num_chains=num_chains,
             chain_method="parallel" if num_chains > 1 else "sequential",
         )
 
         # Initialize and run
         rng_key = jax.random.PRNGKey(0)
+        init_params_with_chain_dim = self._make_jittered_inits(rng_key, num_chains)
+
         if num_chains > 1:
-            rng_key = jax.random.split(rng_key, num_chains)
-            init_params = jax.tree.map(
-                lambda x: jnp.broadcast_to(x, (num_chains,) + x.shape),
-                self.params_logit,
-            )
+            init_params = init_params_with_chain_dim
         else:
-            init_params = self.params_logit
+            init_params = jax.tree.map(lambda x: x[0], init_params_with_chain_dim)
 
         mcmc.run(rng_key, init_params=init_params, extra_fields=("potential_energy",))
 
@@ -535,3 +562,16 @@ class PolarizedBeamFitter:
             P_maps[band] = np.array(P_map)
 
         return T_maps, P_maps
+
+    def _get_latest_chi2s(self):
+        """Get latest chi2 values."""
+        if hasattr(self, "_latest_chi2s"):
+            return self._latest_chi2s
+        else:
+            # Calculate if not available
+            return np.array(self.calculate_individual_chi2s(self.params_physical))
+
+    @property
+    def latest_chi2s(self):
+        """Access latest chi2 values."""
+        return self._get_latest_chi2s()

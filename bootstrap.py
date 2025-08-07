@@ -76,7 +76,7 @@ class BootstrapBeamFitter:
 
     def _prepare_bootstrap_weights(self):
         """Prepare bootstrap weight arrays."""
-        n_sources = len(self.base_fitter.source_ids)
+        n_sources = len(self.base_fitter.state.source_ids)
 
         # Generate all bootstrap indices at once
         self.rng_key, subkey = jax.random.split(self.rng_key)
@@ -239,15 +239,11 @@ class BootstrapBeamFitter:
 
     @property
     def source_ids(self):
-        return self.base_fitter.source_ids
+        return self.base_fitter.state.source_ids
 
     @property
     def latest_chi2s(self):
         return self.base_fitter.latest_chi2s
-
-    @property
-    def gaussfit_initial_amp_numpy(self):
-        return self.base_fitter.gaussfit_initial_amp_numpy
 
     @property
     def beam_models(self):
@@ -259,8 +255,8 @@ class BootstrapBeamFitter:
 
     @property
     def noise_psd_numpy(self):
-        return self.base_fitter.noise_psd_numpy
+        return np.array(self.base_fitter.state.noise_psd_jax) if self.base_fitter.state.noise_psd_jax is not None else None
 
     @property
     def maps_numpy(self):
-        return self.base_fitter.maps_numpy
+        return np.array(self.base_fitter.state.maps_jax)

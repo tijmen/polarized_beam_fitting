@@ -103,8 +103,8 @@ class BeamPlotter:
             print("No skip_sources specified for template projection analysis")
             return []
 
-        maps_numpy = self.base_fitter.maps_numpy
-        source_ids = self.base_fitter.source_ids
+        maps_numpy = np.array(self.base_fitter.state.maps_jax)
+        source_ids = self.base_fitter.state.source_ids
         flux = best_fit_params["sources"]["flux"]
 
         filenames = []
@@ -514,7 +514,7 @@ class BeamPlotter:
             print("Skipping source diagnostic plots (n_diagnostic_plots = 0)")
             return []
 
-        total_sources = len(self.base_fitter.source_ids)
+        total_sources = len(self.base_fitter.state.source_ids)
         if isinstance(n_sources, str) and n_sources.lower() == "all":
             n_to_plot = total_sources
             print(f"\n--- Generating Data/Model/Residual Maps for All {n_to_plot} Sources ---")
@@ -525,9 +525,9 @@ class BeamPlotter:
         if central_crop is not None:
             print(f"Using central {central_crop}x{central_crop} pixel crop")
 
-        maps_numpy = self.base_fitter.maps_numpy
+        maps_numpy = np.array(self.base_fitter.state.maps_jax)
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
-        source_ids = self.base_fitter.source_ids
+        source_ids = self.base_fitter.state.source_ids
         flux = best_fit_params["sources"]["flux"]
 
         # Rank sources by polarization amplitude in the primary band
@@ -651,10 +651,10 @@ class BeamPlotter:
             List of filenames if saved, empty list otherwise
         """
         print("\n--- Generating ASD Analysis ---")
-        maps_numpy = self.base_fitter.maps_numpy
+        maps_numpy = np.array(self.base_fitter.state.maps_jax)
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
         flux = best_fit_params["sources"]["flux"]
-        source_ids = self.base_fitter.source_ids
+        source_ids = self.base_fitter.state.source_ids
 
         filenames = []
         for band_idx, band in enumerate(self.fitter.config.bands):
@@ -695,7 +695,7 @@ class BeamPlotter:
             d_map, m_map, r_map = stokes_data[stokes]
             asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
 
-            noise_psd = self.base_fitter.noise_psd_numpy[:, :, band_idx, i]
+            noise_psd = np.array(self.base_fitter.state.noise_psd_jax)[:, :, band_idx, i]
             noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
             asd_ratio = asd_residual / noise_asd
 
@@ -734,13 +734,50 @@ class BeamPlotter:
             plt.show()
             return None
 
+    def _process_nuts_samples(self, nuts_output):
+        """
+        Process NUTS samples for plotting by reshaping chains and flattening structure.
+
+        Returns:
+        --------
+        tuple
+            (az_data, samples_flat, n_chains) for use in plotting methods
+        """
+        mcmc = nuts_output["mcmc"]
+        n_chains = mcmc.num_chains
+        samples_phys = nuts_output["samples_phys"]
+
+        # Helper: reshape leading axis into (chain, draw, …)
+        def _reshape_chain_draw(arr, n_chains):
+            arr = np.asarray(arr)
+            n_draws = arr.shape[0] // n_chains
+            return arr.reshape(n_chains, n_draws, *arr.shape[1:])
+
+        # Helper: flatten nested dict for ArviZ
+        def _flatten_for_arviz(samples_phys):
+            flat = {}
+            # beams
+            for b_idx, beam_dict in enumerate(samples_phys["beams"]):
+                for name, arr in beam_dict.items():
+                    flat[f"beam_{b_idx}_{name}"] = _reshape_chain_draw(arr, n_chains)
+            # sources
+            flat["yoff"] = _reshape_chain_draw(samples_phys["sources"]["yoff"], n_chains)
+            flat["xoff"] = _reshape_chain_draw(samples_phys["sources"]["xoff"], n_chains)
+            flat["flux"] = _reshape_chain_draw(samples_phys["sources"]["flux"], n_chains)
+            return flat
+
+        samples_flat = _flatten_for_arviz(samples_phys)
+        az_data = az.from_dict(samples_flat)
+
+        return az_data, samples_flat, n_chains
+
     def plot_nuts_trace(self, nuts_output, save=True):
         """
         Plot trace plots for NUTS samples.
         """
         print("\n--- Generating NUTS Trace Plots ---")
-        samples = nuts_output["samples_phys"]
-        az_data = az.from_dict(samples)
+
+        az_data, samples_flat, n_chains = self._process_nuts_samples(nuts_output)
 
         # Plot beam parameters
         for band_idx, band in enumerate(self.fitter.config.bands):
@@ -750,7 +787,8 @@ class BeamPlotter:
             plt.suptitle(f"NUTS Trace for Beam Parameters ({band_suffix})", y=1.02)
             if save:
                 filename = os.path.join(self.output_dir, f"nuts_trace_beam_{band_suffix}.png")
-                plt.savefig(filename, dpi=150)
+                plt.tight_layout()
+                plt.savefig(filename, dpi=200)
                 plt.close()
                 print(f"Saved beam trace plot to: {filename}")
 
@@ -765,7 +803,8 @@ class BeamPlotter:
                 plt.suptitle(f"NUTS Trace for Flux ({stokes}, {band_suffix})", y=1.02)
                 if save:
                     filename = os.path.join(self.output_dir, f"nuts_trace_flux_{stokes}_{band_suffix}.png")
-                    plt.savefig(filename, dpi=150)
+                    plt.tight_layout()
+                    plt.savefig(filename, dpi=200)
                     plt.close()
                     print(f"Saved flux trace plot to: {filename}")
 
@@ -774,67 +813,78 @@ class BeamPlotter:
         plt.suptitle("NUTS Trace for Source Offsets", y=1.02)
         if save:
             filename = os.path.join(self.output_dir, "nuts_trace_offsets.png")
-            plt.savefig(filename, dpi=150)
+            plt.tight_layout()
+            plt.savefig(filename, dpi=200)
             plt.close()
             print(f"Saved offset trace plot to: {filename}")
 
-    def plot_nuts_corner(self, nuts_output, save=True):
+    def plot_nuts_corner(self, nuts_output):
         """
-        Plot corner plot for NUTS samples with improved labels.
+        Corner plot for NUTS samples (chain-aware, band-aware).
+        Shows ⟨T⟩, ⟨P⟩, ⟨y_off⟩, ⟨x_off⟩ plus all beam parameters.
         """
         print("\n--- Generating NUTS Corner Plot ---")
-        samples = nuts_output["samples_phys"]
 
-        # Create derived parameters
-        flux_samples = samples["sources"]["flux"]
-        t_flux = np.mean(flux_samples[:, :, :, 0], axis=1)
-        p_flux = np.mean(
-            np.sqrt(flux_samples[:, :, :, 1] ** 2 + flux_samples[:, :, :, 2] ** 2),
-            axis=1,
-        )
-        yoff_mean = np.mean(samples["sources"]["yoff"], axis=1)
-        xoff_mean = np.mean(samples["sources"]["xoff"], axis=1)
+        az_data, samples_flat, _ = self._process_nuts_samples(nuts_output)
 
-        # Define a mapping from internal names to prettier labels
+        def _merge_cd(arr):
+            c, d = arr.shape[:2]
+            return arr.reshape(c * d, *arr.shape[2:])   # (nsamp, ...)
+
+        flux_flat = _merge_cd(samples_flat["flux"])      # (nsamp, n_src, n_bands, 3)
+        primary_band = 0
+
+        t_flux = flux_flat[:, :, primary_band, 0].mean(axis=1)  # <T> per sample
+        p_flux = np.sqrt(
+            flux_flat[:, :, primary_band, 1] ** 2 +
+            flux_flat[:, :, primary_band, 2] ** 2
+        ).mean(axis=1)                                          # <P> per sample
+
+        yoff_mean = _merge_cd(samples_flat["yoff"]).mean(axis=1)
+        xoff_mean = _merge_cd(samples_flat["xoff"]).mean(axis=1)
+
         label_map = {
-            "t_flux": r"$\langle T \rangle$",
-            "p_flux": r"$\langle P \rangle$",
-            "yoff_mean": r"$\langle y_{\rm off} \rangle$",
-            "xoff_mean": r"$\langle x_{\rm off} \rangle$",
+            "t_flux":     r"$\langle T \rangle$",
+            "p_flux":     r"$\langle P \rangle$",
+            "yoff_mean":  r"$\langle y_{\rm off} \rangle$",
+            "xoff_mean":  r"$\langle x_{\rm off} \rangle$",
+        }
+        corner_data = {
+            "t_flux":     t_flux,
+            "p_flux":     p_flux,
+            "yoff_mean":  yoff_mean,
+            "xoff_mean":  xoff_mean,
         }
 
-        corner_data = {
-            "t_flux": t_flux,
-            "p_flux": p_flux,
-            "yoff_mean": yoff_mean,
-            "xoff_mean": xoff_mean,
-        }
         for band_idx, band in enumerate(self.fitter.config.bands):
             band_suffix = self._get_band_suffix(band)
             for param_name in self.fitter.config.beam_coeff_bounds.keys():
-                internal_name = f"beam_{band_suffix}_{param_name}"
-                corner_data[internal_name] = samples["beams"][band_idx][param_name]
-                # Add pretty labels for beam parameters
-                if "beta" in param_name:
-                    stokes = "T" if "T" in param_name else "P"
-                    label_map[internal_name] = f"$\beta_{{{stokes}, {band_suffix}}}$"
-                else:
-                    label_map[internal_name] = f"{param_name} ({band_suffix})"
+                key_flat  = f"beam_{band_idx}_{param_name}"
+                var_flat  = _merge_cd(samples_flat[key_flat])                    # (nsamp,)
+                pretty    = (
+                    rf"$\beta_{{{'T' if 'T' in param_name else 'P'}, {band_suffix}}}$"
+                    if "beta" in param_name else f"{param_name} ({band_suffix})"
+                )
+                label_map[key_flat] = pretty
+                corner_data[key_flat] = var_flat
 
-        # Convert to array for corner plot
-        corner_array = np.array(list(corner_data.values())).T
-        labels = [label_map.get(key, key) for key in corner_data.keys()]
+        param_order   = list(corner_data.keys())                      # deterministic order
+        corner_array  = np.column_stack([corner_data[k] for k in param_order])
+        labels        = [label_map.get(k, k) for k in param_order]
 
-        fig = corner.corner(corner_array, labels=labels, quantiles=[0.16, 0.5, 0.84], show_titles=True)
+        fig = corner.corner(
+            corner_array,
+            labels       = labels,
+            quantiles    = [0.16, 0.5, 0.84],
+            show_titles  = True,
+        )
         fig.suptitle("NUTS Corner Plot", y=1.02)
 
-        if save:
-            filename = os.path.join(self.output_dir, "nuts_corner.png")
-            plt.savefig(filename, dpi=150)
-            plt.close()
-            print(f"Saved corner plot to: {filename}")
-        else:
-            plt.show()
+        filename = os.path.join(self.output_dir, "nuts_corner.png")
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150)
+        plt.close()
+        print(f"Saved corner plot to: {filename}")
 
 
 def create_diagnostic_plots(
