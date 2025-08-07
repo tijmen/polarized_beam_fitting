@@ -184,15 +184,15 @@ class BootstrapBeamFitter:
         n_bands = len(self.config.bands)
         for band_idx in range(n_bands):
             band_key = f"band_{band_idx}"
-            if self.config.beam_model_type == "betapol":
+            if self.config.beam_model_type == "beta_pol":
                 organized[f"{band_key}_beta_pol"] = np.array([p["beams"][band_idx]["beta_pol"] for p in bootstrap_params])
             elif self.config.beam_model_type == "gaussian":
                 organized[f"{band_key}_T_width_arcmin"] = np.array([p["beams"][band_idx]["T_width_arcmin"] for p in bootstrap_params])
                 organized[f"{band_key}_P_width_arcmin"] = np.array([p["beams"][band_idx]["P_width_arcmin"] for p in bootstrap_params])
-            elif self.config.beam_model_type == "b_spline":
+            elif self.config.beam_model_type == "bsplines":
                 organized[f"{band_key}_T_coeffs"] = np.array([p["beams"][band_idx]["T_coeffs"] for p in bootstrap_params])
                 organized[f"{band_key}_P_coeffs"] = np.array([p["beams"][band_idx]["P_coeffs"] for p in bootstrap_params])
-            elif self.config.beam_model_type == "betatest":
+            elif self.config.beam_model_type == "beta_T":
                 organized[f"{band_key}_beta_T"] = np.array([p["beams"][band_idx]["beta_T"] for p in bootstrap_params])
             elif self.config.beam_model_type == "bsplines_plus_gaussian":
                 organized[f"{band_key}_gaussian_sigma_arcmin"] = np.array([p["beams"][band_idx]["gaussian_sigma_arcmin"] for p in bootstrap_params])

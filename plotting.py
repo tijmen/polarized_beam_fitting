@@ -389,7 +389,7 @@ class BeamPlotter:
         str or None
             Filename if saved, None otherwise
         """
-        if self.base_fitter.config.beam_model_type != "b_spline":
+        if self.base_fitter.config.beam_model_type != "bsplines":
             print(f"Skipping basis diagnostics for {self.base_fitter.config.beam_model_type} beam model")
             return None
 
@@ -696,7 +696,7 @@ class BeamPlotter:
             asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
 
             noise_psd = np.array(self.base_fitter.state.noise_psd_jax)[:, :, band_idx, i]
-            noise_asd = np.fft.fftshift(np.sqrt(noise_psd))
+            noise_asd = np.sqrt(noise_psd)
             asd_ratio = asd_residual / noise_asd
 
             # Plotting ASDs
@@ -862,7 +862,7 @@ class BeamPlotter:
                 key_flat  = f"beam_{band_idx}_{param_name}"
                 var_flat  = _merge_cd(samples_flat[key_flat])                    # (nsamp,)
                 pretty    = (
-                    rf"$\beta_{{{'T' if 'T' in param_name else 'P'}, {band_suffix}}}$"
+                    rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$"
                     if "beta" in param_name else f"{param_name} ({band_suffix})"
                 )
                 label_map[key_flat] = pretty
@@ -922,7 +922,7 @@ def create_diagnostic_plots(
     filenames["beam_profiles"] = plotter.plot_beam_profiles(best_fit_params)
 
     # Basis diagnostics (per band)
-    if plotter.base_fitter.config.beam_model_type == "b_spline":
+    if plotter.base_fitter.config.beam_model_type == "bsplines":
         filenames["basis_diagnostics"] = []
         for band in plotter.fitter.config.bands:
             filename = plotter.plot_basis_diagnostics(save=True, band=band)

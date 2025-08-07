@@ -124,22 +124,34 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         """
         orig_reso_arcmin = 0.25  # arcmin per pixel
         target_reso_arcmin = self.config.reso_arcmin
-        target_shape = self.map_shape
+        ny, nx = self.map_shape
 
+        # How much of the target Fourier grid is covered by the original PSD?
+        # If target is finer (kmax_ratio > 1), coverage is a fraction 1/kmax_ratio of the target grid.
+        # If target is coarser (kmax_ratio < 1), we can fill the whole target grid.
         kmax_ratio = orig_reso_arcmin / target_reso_arcmin
-        n_covered = int(target_shape[0] * kmax_ratio)
-        n_inf = target_shape[0] - n_covered
+
+        # Covered side length on the target grid (isotropic)
+        n_cov = int(round(ny / kmax_ratio)) if kmax_ratio > 1 else ny
+        n_cov = max(1, min(ny, n_cov))
+
+        # Downsample original PSD to the covered region size if needed
+        if psd_orig.shape[0] >= n_cov and psd_orig.shape[1] >= n_cov:
+            lowk_psd = self._rebin_psd_with_averaging(psd_orig, (n_cov, n_cov))
+        else:
+            # Fallback: gentle upsample if original is smaller (rare)
+            from scipy.ndimage import zoom
+            zoom_y = n_cov / psd_orig.shape[0]
+            zoom_x = n_cov / psd_orig.shape[1]
+            lowk_psd = zoom(psd_orig, (zoom_y, zoom_x), order=1)
 
         # Initialize with high value for unmeasured high-k modes
-        psd_resampled = np.full(target_shape, 1e9)
+        psd_resampled = np.full((ny, nx), 1e9, dtype=self.config.dtype_np_real)
 
-        # Resample the low-k portion using mean-pooling
-        lowk_psd = self._rebin_psd_with_averaging(psd_orig, (n_covered, n_covered))
-
-        # Place rebinned data in the center of the high-k array
-        start_idx = n_inf // 2
-        end_idx = start_idx + n_covered
-        psd_resampled[start_idx:end_idx, start_idx:end_idx] = np.fft.fftshift(lowk_psd)
+        # Place rebinned low-k box in the center of the target grid
+        sy = (ny - n_cov) // 2
+        sx = (nx - n_cov) // 2
+        psd_resampled[sy : sy + n_cov, sx : sx + n_cov] = np.fft.fftshift(lowk_psd)
 
         # Set high values for k_x=0 modes to avoid division by zero
         psd_resampled[:, 0] = 1e12
@@ -165,6 +177,9 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         """
         old_ny, old_nx = psd_array.shape
         new_ny, new_nx = target_shape
+
+        assert new_ny <= old_ny, "_rebin_psd_with_averaging can only downsample, but is being asked to upsample"
+        assert new_nx <= old_nx, "_rebin_psd_with_averaging can only downsample, but is being asked to upsample"
 
         # Calculate bin sizes
         bin_y = old_ny // new_ny
@@ -203,7 +218,7 @@ class KxAveragedCalculator(NoisePSDCalculator):
         Returns:
         --------
         np.ndarray
-            Array with shape (ny,kx,band,stokes) containing global noise PSD
+            Array with shape (ny, nx, band, stokes) containing global noise PSD
         """
         print("Calculating individual data-driven noise PSDs for each source...")
 
@@ -414,7 +429,7 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
 
         # Source-averaged cross-PSD over band and stokes
         n_src = masked_maps_fft.shape[0]
-        covariance_sum = np.einsum("nyxbs,nyxct->yx b c s t", masked_maps_fft, np.conj(masked_maps_fft))  # (ky, kx, band, band, stokes, stokes)
+        covariance_sum = np.einsum("nyxbs,nyxct->yxbcst", masked_maps_fft, np.conj(masked_maps_fft))  # (ky, kx, band, band, stokes, stokes)
 
         effective_area = np.sum(noise_mask**2)
         covariance_psd = covariance_sum / (n_src * effective_area)

@@ -54,10 +54,8 @@ def get_test_config(**kwargs):
         setattr(config, key, value)
 
     # --- Handle special cases based on config ---
-    if config.beam_model_type == "betapol":
-        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-        os.makedirs(data_dir, exist_ok=True)
-        dummy_betapol_file = os.path.join(data_dir, "betapol_tests.npz")
+    if config.beam_model_type == "beta_pol":
+        dummy_betapol_file = os.path.join(config.cache_dir, "betapol_tests.npz")
         r_fine = np.linspace(0, 10, 100)
         sigma_main, sigma_bt = 1.2 / 2.355, 1.4 / 2.355
         bmain = np.exp(-0.5 * (r_fine / sigma_main) ** 2)
@@ -68,7 +66,7 @@ def get_test_config(**kwargs):
             BT_r_norm_150=bt,
             Bmain_r_norm_150=bmain,
         )
-        config.betapol_template_path = dummy_betapol_file
+        config.betapol_data_path = dummy_betapol_file
 
     if config.noise_psd_method == "clusterfinder_psd":
         psd_file = tempfile.NamedTemporaryFile(delete=False, suffix=".fits").name
@@ -206,7 +204,7 @@ class TestEndToEndRecovery(unittest.TestCase):
     @unittest.skip("B-spline model is currently known to be broken, skipping test...")
     def test_beam_model_bspline(self, *mocks):
         print("\n--- Testing Beam Model: B-spline ---")
-        config = get_test_config(beam_model_type="b_spline")
+        config = get_test_config(beam_model_type="bsplines")
         y, x = np.ogrid[-32:32, -32:32]
         beam_model = create_beam_model(config, y, x, config.bands[0])
         true_coeffs = beam_model.fit_gaussian_coefficients(1.3)

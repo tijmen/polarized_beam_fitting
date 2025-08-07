@@ -26,6 +26,7 @@ class BeamFittingConfig:
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
     cache_dir = "/home/tijmen/cmb_analysis/beam_analysis/cache"
+    betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
 
     # Analysis parameters
     bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
@@ -97,19 +98,19 @@ class BeamFittingConfig:
     source_flux_bounds = (-5.0, 100.0)  # T, Q, U flux in uK
 
     # Select which can of parameterized model you want to fit.
-    # The betapol model just has one free parameter
+    # The beta_pol model just has one free parameter
     # The Gaussian model frees the width of the T and P beams separately
     # The B-spline model is very flexible, but suffers from the P beam spike problem described at
     #   https://pole.uchicago.edu/spt3g/index.php/Polarized_Point_Source_Stack#An_Explanation_for_the_Peaky_P_Beam
     # The bsplines_plus_gaussian model combines a central Gaussian with area-normalized B-splines starting at 0.5 arcmin
-    beam_model_type = "betapol"  # 'b_spline', 'gaussian', 'betapol', 'betatest', or 'bsplines_plus_gaussian'
+    beam_model_type = "beta_pol"  # 'bsplines', 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
 
     # Default bounds for each beam model type
     beam_model_bounds = {
-        "b_spline": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
+        "bsplines": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
-        "betapol": {"beta_pol": (-0.5, 2.0)},
-        "betatest": {"beta_T": (-0.5, 2.0)},
+        "beta_pol": {"beta_pol": (-0.5, 2.0)},
+        "beta_T": {"beta_T": (-0.5, 2.0)},
         "bsplines_plus_gaussian": {
             "gaussian_sigma_arcmin": (0.1, 1.0),
             "bspline_coeffs_T": (-0.5, 1.5),

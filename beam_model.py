@@ -531,9 +531,7 @@ class BeamModelBetaPol(BeamModelBase):
         self.n_fittable_coeffs = 1
 
         # Load the pre-calculated beam profiles
-        import os
-
-        data_path = os.path.join(os.path.dirname(__file__), "data", "betapol_TdH.npz")
+        data_path = config.betapol_data_path
         try:
             beam_data = np.load(data_path)
         except FileNotFoundError:
@@ -621,9 +619,7 @@ class BeamModelBetaTest(BeamModelBase):
         self.n_fittable_coeffs = 1
 
         # Load the pre-calculated beam profiles
-        import os
-
-        data_path = os.path.join(os.path.dirname(__file__), "data", "betapol_TdH.npz")
+        data_path = config.betapol_data_path
         try:
             beam_data = np.load(data_path)
         except FileNotFoundError:
@@ -985,7 +981,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
 def create_beam_model(config, y_grid, x_grid, band):
     """Factory function to create a beam model instance."""
-    if config.beam_model_type == "b_spline":
+    if config.beam_model_type == "bsplines":
         return BeamModelBspline(
             config,
             y_grid,
@@ -997,9 +993,9 @@ def create_beam_model(config, y_grid, x_grid, band):
         )
     elif config.beam_model_type == "gaussian":
         return BeamModelGaussian(config, y_grid, x_grid, band)
-    elif config.beam_model_type == "betapol":
+    elif config.beam_model_type == "beta_pol":
         return BeamModelBetaPol(config, y_grid, x_grid, band)
-    elif config.beam_model_type == "betatest":
+    elif config.beam_model_type == "beta_T":
         return BeamModelBetaTest(config, y_grid, x_grid, band)
     elif config.beam_model_type == "bsplines_plus_gaussian":
         return BeamModelBSplinesGaussian(config, y_grid, x_grid, band)

@@ -11,6 +11,7 @@ from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import jax.flatten_util
 import numpy as np
 import optax
 import optimistix as optx
@@ -24,6 +25,7 @@ from .utils import (
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
+    build_whitening_transform,
 )
 
 
@@ -417,15 +419,50 @@ class PolarizedBeamFitter:
 
         return chi2s
 
+    def _prepare_nuts_transform(self):
+        """Calculate the Hessian at the MAP and build the whitening transform for NUTS."""
+        print("Calculating Hessian at MAP for NUTS whitening transform...")
+
+        # Define a function that takes physical parameters and returns the chi-squared value
+        def objective_physical(params_phys):
+            params_logit = params_to_logit(params_phys, self.config)
+            return self.objective_function(params_logit, self.objective_data)
+
+        # Efficiently calculate the diagonal of the Hessian (curvature)
+        # This avoids instantiating the full Hessian, which is too large for memory.
+        # See: https://github.com/google/jax/issues/3957
+        flattened_params, unflatten_fn = jax.flatten_util.ravel_pytree(self.params_physical)
+
+        def get_hessian_diag_element(i):
+            # Define a function that takes the flattened parameter vector and returns the i-th element of the gradient
+            grad_fn = jax.grad(lambda p: objective_physical(unflatten_fn(p)))
+            # The i-th diagonal element of the Hessian is the i-th element of the gradient of the gradient
+            return jax.grad(lambda p: grad_fn(p)[i])(flattened_params)[i]
+
+        # Use lax.scan for a memory-efficient loop over parameters
+        def body_fn(carry, i):
+            return carry, get_hessian_diag_element(i)
+
+        _, diag_hessian_flat = jax.lax.scan(body_fn, None, jnp.arange(len(flattened_params)))
+
+        # Unflatten the diagonal Hessian back into a pytree
+        curvature = unflatten_fn(diag_hessian_flat)
+
+        # Build the transformation functions
+        self.to_whitened, self.from_whitened, self.log_det_jacobian = build_whitening_transform(
+            self.params_physical, curvature
+        )
+        print("Whitening transform for NUTS is ready.")
+
     def _make_jittered_inits(self, rng_key, num_chains: int):
         """
         Build per-chain initial points by adding small Gaussian noise to the
         current MAP parameters in *physical* space, then converting to logit.
 
         Jitter scales (1 σ):
-            • beam parameters       : 0.01  (additive, absolute)
-            • source y/x offsets    : 0.10  pixels
-            • flux amplitudes       : 0.01  (relative, i.e. 1 %)
+            • beam parameters       : 0.001  (additive, absolute)
+            • source y/x offsets    : 0.010  pixels
+            • flux amplitudes       : 0.001  (relative, i.e. 1 %)
         """
         # unpack convenience handles
         beam_phys = self.params_physical["beams"]
@@ -438,14 +475,14 @@ class PolarizedBeamFitter:
             def jitter_beam(bp, k):
                 flat, treedef = jax.tree.flatten(bp)
                 ks = jax.random.split(k, len(flat))
-                jittered = [p + 0.01 * jax.random.normal(kk, p.shape, p.dtype) for p, kk in zip(flat, ks)]
+                jittered = [p + 0.001 * jax.random.normal(kk, p.shape, p.dtype) for p, kk in zip(flat, ks)]
                 return jax.tree.unflatten(treedef, jittered)
 
             beam_jittered = [jitter_beam(bp, k) for bp, k in zip(beam_phys, jax.random.split(key_beam, len(beam_phys)))]
 
-            yoff_j = src_phys["yoff"] + 0.10 * jax.random.normal(key_y, src_phys["yoff"].shape)
-            xoff_j = src_phys["xoff"] + 0.10 * jax.random.normal(key_x, src_phys["xoff"].shape)
-            flux_j = src_phys["flux"] * (1.0 + 0.01 * jax.random.normal(key_f, src_phys["flux"].shape))
+            yoff_j = src_phys["yoff"] + 0.010 * jax.random.normal(key_y, src_phys["yoff"].shape)
+            xoff_j = src_phys["xoff"] + 0.010 * jax.random.normal(key_x, src_phys["xoff"].shape)
+            flux_j = src_phys["flux"] * (1.0 + 0.001 * jax.random.normal(key_f, src_phys["flux"].shape))
 
             phys_jittered = {
                 "beams": beam_jittered,
@@ -462,16 +499,24 @@ class PolarizedBeamFitter:
         """
         num_chains = max(1, jax.local_device_count())
 
+        # Prepare for NUTS sampling by calculating the Hessian for the whitening transform
+        self._prepare_nuts_transform()
+
         print(f"Starting NUTS sampling: {num_chains} chains, {self.config.nuts_num_warmup} warmup, {self.config.nuts_num_samples} samples")
 
-        # Define potential energy
-        def potential_fn(params_logit):
-            chi2, _ = self._loss_and_grad(params_logit, self.objective_data)
-            return 0.5 * self.config.chi2_normalization * chi2
+        # Define potential energy in the whitened space
+        def potential_fn_whitened(params_white):
+            # Transform from whitened space back to physical space
+            params_phys = self.from_whitened(params_white)
+            # The objective function expects logit params, so we do another conversion
+            params_logit = params_to_logit(params_phys, self.config)
+            chi2 = self.objective_function(params_logit, self.objective_data)
+            # Return the potential energy, including the Jacobian correction term
+            return 0.5 * self.config.chi2_normalization * chi2 - self.log_det_jacobian
 
         # Setup MCMC
         kernel = NUTS(
-            potential_fn=potential_fn,
+            potential_fn=potential_fn_whitened,
             target_accept_prob=self.config.nuts_target_accept,
             max_tree_depth=self.config.nuts_max_tree_depth,
         )
@@ -484,26 +529,28 @@ class PolarizedBeamFitter:
             chain_method="parallel" if num_chains > 1 else "sequential",
         )
 
-        # Initialize and run
+        # Initialize and run in the whitened space
+        # The initial points are draws from a standard normal distribution,
+        # which corresponds to the whitened MAP.
         rng_key = jax.random.PRNGKey(0)
-        init_params_with_chain_dim = self._make_jittered_inits(rng_key, num_chains)
+        map_white = self.to_whitened(self.params_physical)
+        init_params_white = jax.random.normal(rng_key, (num_chains, map_white.shape[0]))
 
-        if num_chains > 1:
-            init_params = init_params_with_chain_dim
-        else:
-            init_params = jax.tree.map(lambda x: x[0], init_params_with_chain_dim)
+        if num_chains == 1:
+            init_params_white = init_params_white[0]
 
-        mcmc.run(rng_key, init_params=init_params, extra_fields=("potential_energy",))
+        mcmc.run(rng_key, init_params=init_params_white, extra_fields=("potential_energy",))
 
         # Process results
-        samples_logit = mcmc.get_samples(group_by_chain=False)
-        samples_phys = jax.vmap(lambda p: params_from_logit(p, self.config))(samples_logit)
+        samples_white = mcmc.get_samples(group_by_chain=False)
+        # Transform samples back to the physical space for analysis and plotting
+        samples_phys = jax.vmap(self.from_whitened)(samples_white)
 
         # Calculate summary statistics
         summary = self._calculate_summary_stats(samples_phys)
 
         return {
-            "samples_logit": samples_logit,
+            "samples_white": samples_white,
             "samples_phys": samples_phys,
             "summary": summary,
             "mcmc": mcmc,

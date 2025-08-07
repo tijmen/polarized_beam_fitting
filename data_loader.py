@@ -214,11 +214,11 @@ class DataLoader:
         """Create T->QU leakage correction template."""
         print(f"Creating T->P leakage template ({self.config.leakage_weighting} weighting)...")
 
-        if self.config.leakage_weighting == "median":
-            return np.median(raw_maps[:, :, :, :, 1:3], axis=0) / gaussfit_amp
-
         qu_maps = raw_maps[:, :, :, :, 1:3]
         t_amps = gaussfit_amp[:, :, 0]
+
+        if self.config.leakage_weighting == "median":
+            return np.median(qu_maps / t_amps[:, None, None, :, None], axis=0)
 
         weight_map = {"flat": 1.0, "linear": t_amps, "squared": t_amps**2}
         weights = weight_map[self.config.leakage_weighting][:, None, None, :, None]

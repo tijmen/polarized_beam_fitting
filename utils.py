@@ -628,3 +628,41 @@ def params_from_logit(logit_params, config):
     }
 
     return physical_params
+
+
+# Whitening transform utilities for NUTS
+def build_whitening_transform(map_params, curvature):
+    """
+    Builds functions to transform between physical and whitened parameter spaces.
+
+    Args:
+        map_params (pytree): The parameters at the maximum a posteriori (MAP) estimate.
+        curvature (pytree): The diagonal of the Hessian (second derivatives) at the MAP.
+
+    Returns:
+        (to_whitened, from_whitened): A tuple of transformation functions.
+    """
+    # Flatten the pytrees into 1D vectors and get the unflattening function
+    map_vector, unflatten_fn = jax.flatten_util.ravel_pytree(map_params)
+    curvature_vector, _ = jax.flatten_util.ravel_pytree(curvature)
+
+    # The scale is the sqrt of the curvature (diagonal of Hessian)
+    # Add a small epsilon to avoid division by zero or taking sqrt of negative numbers
+    scale_vector = jnp.sqrt(jnp.maximum(curvature_vector, 1e-12))
+
+    def to_whitened(params_phys):
+        params_vector, _ = jax.flatten_util.ravel_pytree(params_phys)
+        return (params_vector - map_vector) * scale_vector
+
+    def from_whitened(params_white):
+        # params_white is already a flat vector
+        params_vector = (params_white / scale_vector) + map_vector
+        return unflatten_fn(params_vector)
+
+    # The log-determinant of the Jacobian of the `from_whitened` transform.
+    # This is a constant correction term for the potential energy in NUTS.
+    # det(J) = det(diag(1/scale)) = 1 / product(scale_vector)
+    # log|det(J)| = -sum(log(scale_vector))
+    log_det_jacobian = -jnp.sum(jnp.log(scale_vector))
+
+    return to_whitened, from_whitened, log_det_jacobian
