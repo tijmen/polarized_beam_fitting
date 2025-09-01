@@ -521,7 +521,7 @@ class BeamModelBetaPol(BeamModelBase):
      - BT_r(r), the AGN+Saturn stitched beam
      - Bmain_r(r), the physical model fit to the multiband inner 0.75 arcmin of the stitched beam
     Uses a single free parameter, beta_pol.
-    Temperature beam(r) = BT_r(t)
+    Temperature beam(r) = BT_r(r)
     Polarization beam(r) = Bmain_r(r) + beta_pol * (BT_r(r) - Bmain_r(r))
     """
 
