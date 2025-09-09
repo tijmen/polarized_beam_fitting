@@ -8,6 +8,7 @@ import os
 
 import arviz as az
 import corner
+import jax
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -587,9 +588,21 @@ class BeamPlotter:
             y_end = y_start + central_crop
             x_start = (nx - central_crop) // 2
             x_end = x_start + central_crop
-            data_T, data_Q, data_U = data_T[y_start:y_end, x_start:x_end], data_Q[y_start:y_end, x_start:x_end], data_U[y_start:y_end, x_start:x_end]
-            model_T, model_Q, model_U = model_T[y_start:y_end, x_start:x_end], model_Q[y_start:y_end, x_start:x_end], model_U[y_start:y_end, x_start:x_end]
-            residual_T, residual_Q, residual_U = residual_T[y_start:y_end, x_start:x_end], residual_Q[y_start:y_end, x_start:x_end], residual_U[y_start:y_end, x_start:x_end]
+            data_T, data_Q, data_U = (
+                data_T[y_start:y_end, x_start:x_end],
+                data_Q[y_start:y_end, x_start:x_end],
+                data_U[y_start:y_end, x_start:x_end],
+            )
+            model_T, model_Q, model_U = (
+                model_T[y_start:y_end, x_start:x_end],
+                model_Q[y_start:y_end, x_start:x_end],
+                model_U[y_start:y_end, x_start:x_end],
+            )
+            residual_T, residual_Q, residual_U = (
+                residual_T[y_start:y_end, x_start:x_end],
+                residual_Q[y_start:y_end, x_start:x_end],
+                residual_U[y_start:y_end, x_start:x_end],
+            )
 
         fig, axes = plt.subplots(3, 3, figsize=(12, 12), sharex=True, sharey=True)
         crop_suffix = f" (Central {central_crop}x{central_crop})" if central_crop else ""
@@ -734,18 +747,26 @@ class BeamPlotter:
             plt.show()
             return None
 
-    def _process_nuts_samples(self, nuts_output):
+    def _process_sampling_output(self, sampling_output, sampler_type="nuts"):
         """
-        Process NUTS samples for plotting by reshaping chains and flattening structure.
+        Process sampling output for plotting by reshaping chains and flattening structure.
+        Supports both NUTS and MCLMC output formats.
 
         Returns:
         --------
         tuple
             (az_data, samples_flat, n_chains) for use in plotting methods
         """
-        mcmc = nuts_output["mcmc"]
-        n_chains = mcmc.num_chains
-        samples_phys = nuts_output["samples_phys"]
+        if sampler_type == "nuts":
+            mcmc = sampling_output["mcmc"]
+            n_chains = mcmc.num_chains
+        elif sampler_type == "mclmc":
+            # For MCLMC, estimate chains from device count
+            n_chains = max(1, jax.local_device_count())
+        else:
+            raise ValueError(f"Unknown sampler type: {sampler_type}")
+
+        samples_phys = sampling_output["samples_phys"]
 
         # Helper: reshape leading axis into (chain, draw, …)
         def _reshape_chain_draw(arr, n_chains):
@@ -771,22 +792,23 @@ class BeamPlotter:
 
         return az_data, samples_flat, n_chains
 
-    def plot_nuts_trace(self, nuts_output, save=True):
+    def plot_sampling_trace(self, sampling_output, sampler_type="nuts", save=True):
         """
-        Plot trace plots for NUTS samples.
+        Plot trace plots for sampling output (NUTS or MCLMC).
         """
-        print("\n--- Generating NUTS Trace Plots ---")
+        sampler_name = sampler_type.upper()
+        print(f"\n--- Generating {sampler_name} Trace Plots ---")
 
-        az_data, samples_flat, n_chains = self._process_nuts_samples(nuts_output)
+        az_data, samples_flat, n_chains = self._process_sampling_output(sampling_output, sampler_type)
 
         # Plot beam parameters
         for band_idx, band in enumerate(self.fitter.config.bands):
             band_suffix = self._get_band_suffix(band)
             beam_params = [f"beam_{band_idx}_{p}" for p in self.fitter.config.beam_coeff_bounds.keys()]
             az.plot_trace(az_data, var_names=beam_params)
-            plt.suptitle(f"NUTS Trace for Beam Parameters ({band_suffix})", y=1.02)
+            plt.suptitle(f"{sampler_name} Trace for Beam Parameters ({band_suffix})", y=1.02)
             if save:
-                filename = os.path.join(self.output_dir, f"nuts_trace_beam_{band_suffix}.png")
+                filename = os.path.join(self.output_dir, f"{sampler_type}_trace_beam_{band_suffix}.png")
                 plt.tight_layout()
                 plt.savefig(filename, dpi=200)
                 plt.close()
@@ -800,9 +822,9 @@ class BeamPlotter:
                 var_name = "flux"
                 coords = {"flux_dim_1": band_idx, "flux_dim_2": stokes_idx}
                 az.plot_trace(az_data, var_names=[var_name], coords=coords)
-                plt.suptitle(f"NUTS Trace for Flux ({stokes}, {band_suffix})", y=1.02)
+                plt.suptitle(f"{sampler_name} Trace for Flux ({stokes}, {band_suffix})", y=1.02)
                 if save:
-                    filename = os.path.join(self.output_dir, f"nuts_trace_flux_{stokes}_{band_suffix}.png")
+                    filename = os.path.join(self.output_dir, f"{sampler_type}_trace_flux_{stokes}_{band_suffix}.png")
                     plt.tight_layout()
                     plt.savefig(filename, dpi=200)
                     plt.close()
@@ -810,81 +832,100 @@ class BeamPlotter:
 
         # Plot offsets
         az.plot_trace(az_data, var_names=["yoff", "xoff"])
-        plt.suptitle("NUTS Trace for Source Offsets", y=1.02)
+        plt.suptitle(f"{sampler_name} Trace for Source Offsets", y=1.02)
         if save:
-            filename = os.path.join(self.output_dir, "nuts_trace_offsets.png")
+            filename = os.path.join(self.output_dir, f"{sampler_type}_trace_offsets.png")
             plt.tight_layout()
             plt.savefig(filename, dpi=200)
             plt.close()
             print(f"Saved offset trace plot to: {filename}")
 
-    def plot_nuts_corner(self, nuts_output):
+    def plot_nuts_trace(self, nuts_output, save=True):
         """
-        Corner plot for NUTS samples (chain-aware, band-aware).
+        Plot trace plots for NUTS samples.
+        """
+        return self.plot_sampling_trace(nuts_output, sampler_type="nuts", save=save)
+
+    def plot_mclmc_trace(self, mclmc_output, save=True):
+        """
+        Plot trace plots for MCLMC samples.
+        """
+        return self.plot_sampling_trace(mclmc_output, sampler_type="mclmc", save=save)
+
+    def plot_sampling_corner(self, sampling_output, sampler_type="nuts"):
+        """
+        Corner plot for sampling output (NUTS or MCLMC).
         Shows ⟨T⟩, ⟨P⟩, ⟨y_off⟩, ⟨x_off⟩ plus all beam parameters.
         """
-        print("\n--- Generating NUTS Corner Plot ---")
+        sampler_name = sampler_type.upper()
+        print(f"\n--- Generating {sampler_name} Corner Plot ---")
 
-        az_data, samples_flat, _ = self._process_nuts_samples(nuts_output)
+        az_data, samples_flat, _ = self._process_sampling_output(sampling_output, sampler_type)
 
         def _merge_cd(arr):
             c, d = arr.shape[:2]
-            return arr.reshape(c * d, *arr.shape[2:])   # (nsamp, ...)
+            return arr.reshape(c * d, *arr.shape[2:])  # (nsamp, ...)
 
-        flux_flat = _merge_cd(samples_flat["flux"])      # (nsamp, n_src, n_bands, 3)
+        flux_flat = _merge_cd(samples_flat["flux"])  # (nsamp, n_src, n_bands, 3)
         primary_band = 0
 
         t_flux = flux_flat[:, :, primary_band, 0].mean(axis=1)  # <T> per sample
-        p_flux = np.sqrt(
-            flux_flat[:, :, primary_band, 1] ** 2 +
-            flux_flat[:, :, primary_band, 2] ** 2
-        ).mean(axis=1)                                          # <P> per sample
+        p_flux = np.sqrt(flux_flat[:, :, primary_band, 1] ** 2 + flux_flat[:, :, primary_band, 2] ** 2).mean(axis=1)  # <P> per sample
 
         yoff_mean = _merge_cd(samples_flat["yoff"]).mean(axis=1)
         xoff_mean = _merge_cd(samples_flat["xoff"]).mean(axis=1)
 
         label_map = {
-            "t_flux":     r"$\langle T \rangle$",
-            "p_flux":     r"$\langle P \rangle$",
-            "yoff_mean":  r"$\langle y_{\rm off} \rangle$",
-            "xoff_mean":  r"$\langle x_{\rm off} \rangle$",
+            "t_flux": r"$\langle T \rangle$",
+            "p_flux": r"$\langle P \rangle$",
+            "yoff_mean": r"$\langle y_{\rm off} \rangle$",
+            "xoff_mean": r"$\langle x_{\rm off} \rangle$",
         }
         corner_data = {
-            "t_flux":     t_flux,
-            "p_flux":     p_flux,
-            "yoff_mean":  yoff_mean,
-            "xoff_mean":  xoff_mean,
+            "t_flux": t_flux,
+            "p_flux": p_flux,
+            "yoff_mean": yoff_mean,
+            "xoff_mean": xoff_mean,
         }
 
         for band_idx, band in enumerate(self.fitter.config.bands):
             band_suffix = self._get_band_suffix(band)
             for param_name in self.fitter.config.beam_coeff_bounds.keys():
-                key_flat  = f"beam_{band_idx}_{param_name}"
-                var_flat  = _merge_cd(samples_flat[key_flat])                    # (nsamp,)
-                pretty    = (
-                    rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$"
-                    if "beta" in param_name else f"{param_name} ({band_suffix})"
-                )
+                key_flat = f"beam_{band_idx}_{param_name}"
+                var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
+                pretty = rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$" if "beta" in param_name else f"{param_name} ({band_suffix})"
                 label_map[key_flat] = pretty
                 corner_data[key_flat] = var_flat
 
-        param_order   = list(corner_data.keys())                      # deterministic order
-        corner_array  = np.column_stack([corner_data[k] for k in param_order])
-        labels        = [label_map.get(k, k) for k in param_order]
+        param_order = list(corner_data.keys())  # deterministic order
+        corner_array = np.column_stack([corner_data[k] for k in param_order])
+        labels = [label_map.get(k, k) for k in param_order]
 
         fig = corner.corner(
             corner_array,
-            labels       = labels,
-            quantiles    = [0.16, 0.5, 0.84],
-            show_titles  = True,
+            labels=labels,
+            quantiles=[0.16, 0.5, 0.84],
+            show_titles=True,
         )
-        fig.suptitle("NUTS Corner Plot", y=1.02)
+        fig.suptitle(f"{sampler_name} Corner Plot", y=1.02)
 
-        filename = os.path.join(self.output_dir, "nuts_corner.png")
+        filename = os.path.join(self.output_dir, f"{sampler_type}_corner.png")
         plt.tight_layout()
         plt.savefig(filename, dpi=150)
         plt.close()
         print(f"Saved corner plot to: {filename}")
+
+    def plot_nuts_corner(self, nuts_output):
+        """
+        Corner plot for NUTS samples.
+        """
+        return self.plot_sampling_corner(nuts_output, sampler_type="nuts")
+
+    def plot_mclmc_corner(self, mclmc_output):
+        """
+        Corner plot for MCLMC samples.
+        """
+        return self.plot_sampling_corner(mclmc_output, sampler_type="mclmc")
 
 
 def create_diagnostic_plots(
@@ -951,3 +992,25 @@ def create_nuts_plots(fitter, nuts_output, output_dir=None):
     plotter.plot_nuts_trace(nuts_output)
     plotter.plot_nuts_corner(nuts_output)
     print("\n--- All NUTS plotting complete. ---")
+
+
+def create_mclmc_plots(fitter, mclmc_output, output_dir=None):
+    """
+    Convenience function to create all MCLMC diagnostic plots.
+    """
+    plotter = BeamPlotter(fitter, output_dir)
+    plotter.plot_mclmc_trace(mclmc_output)
+    plotter.plot_mclmc_corner(mclmc_output)
+    print("\n--- All MCLMC plotting complete. ---")
+
+
+def create_sampling_plots(fitter, sampling_output, sampler_type="nuts", output_dir=None):
+    """
+    Convenience function to create all sampling diagnostic plots.
+    Supports both NUTS and MCLMC samplers.
+    """
+    plotter = BeamPlotter(fitter, output_dir)
+    plotter.plot_sampling_trace(sampling_output, sampler_type)
+    plotter.plot_sampling_corner(sampling_output, sampler_type)
+    sampler_name = sampler_type.upper()
+    print(f"\n--- All {sampler_name} plotting complete. ---")

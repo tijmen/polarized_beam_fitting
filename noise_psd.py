@@ -141,6 +141,7 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         else:
             # Fallback: gentle upsample if original is smaller (rare)
             from scipy.ndimage import zoom
+
             zoom_y = n_cov / psd_orig.shape[0]
             zoom_x = n_cov / psd_orig.shape[1]
             lowk_psd = zoom(psd_orig, (zoom_y, zoom_x), order=1)

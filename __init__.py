@@ -25,7 +25,7 @@ from .noise_psd import (
     NoisePSDCalculator,
     create_noise_psd_calculator,
 )
-from .plotting import BeamPlotter, create_diagnostic_plots, create_nuts_plots
+from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
 from .source_fitting import fit_map_amplitude, gaussfit_source
 from .utils import (
     check_zero_fraction,
@@ -70,4 +70,5 @@ __all__ = [
     "EnsembleAsdMeanCalculator",
     "create_noise_psd_calculator",
     "create_nuts_plots",
+    "create_mclmc_plots",
 ]

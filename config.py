@@ -22,6 +22,8 @@ class BeamFittingConfig:
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
+        "/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
+        "/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3",
     ]
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
@@ -155,11 +157,11 @@ class BeamFittingConfig:
     # Chi-squared normalization for sampling
     chi2_normalization = 1.0
 
-    # NUTS / MCMC controls
-    nuts_num_warmup = 1000
-    nuts_num_samples = 1000
-    nuts_target_accept = 0.8
-    nuts_max_tree_depth = 10  # increase to 12–14 if many divergences
+    # MCMC controls
+    mcmc_num_warmup = 1000
+    mcmc_num_samples = 1000
+    mcmc_target_accept = 0.8
+    mcmc_max_tree_depth = 10  # increase to 12–14 if many divergences
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)

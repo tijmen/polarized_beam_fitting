@@ -153,8 +153,6 @@ class BootstrapBeamFitter:
 
         return bootstrap_params
 
-    # Note: _convert_physical_to_logit is no longer needed with the new parameter structure
-
     def _analyze_results(self, bootstrap_params):
         """Analyze bootstrap results."""
         if not bootstrap_params:

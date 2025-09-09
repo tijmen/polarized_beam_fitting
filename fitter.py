@@ -9,9 +9,10 @@ efficient parallelization across devices.
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
+import blackjax
 import jax
-import jax.numpy as jnp
 import jax.flatten_util
+import jax.numpy as jnp
 import numpy as np
 import optax
 import optimistix as optx
@@ -22,10 +23,10 @@ from .cache import CacheManager
 from .data_loader import DataLoader
 from .noise_psd import create_noise_psd_calculator
 from .utils import (
+    build_whitening_transform,
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
-    build_whitening_transform,
 )
 
 
@@ -382,6 +383,116 @@ class PolarizedBeamFitter:
 
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
+    def sample_with_mclmc(self) -> Dict:
+        """
+        Runs MCMC sampling using the dynamically-adjusted MCLMC algorithm.
+
+        This implementation uses a pmapped manual warmup loop with dual-averaging
+        step size adaptation for each chain.
+        """
+        devices = jax.devices()
+        num_devices = len(devices)
+
+        self._prepare_nuts_transform()
+
+        def logdensity_fn(params_white, objective_data):
+            """
+            Computes the unnormalized log posterior density in the whitened space.
+
+            The function includes a failsafe to return -inf for non-finite values
+            of chi-squared, preventing numerical errors from halting the sampler.
+            """
+            params_phys = self.from_whitened(params_white)
+            params_logit = params_to_logit(params_phys, self.config)
+            chi2 = self.objective_function(params_logit, objective_data)
+
+            # Failsafe for numerical instability
+            log_prob = -0.5 * self.config.chi2_normalization * chi2 + self.log_det_jacobian
+            return jnp.where(jnp.isfinite(chi2), log_prob, -jnp.inf)
+
+        # Generate physically-jittered initial positions for each chain
+        rng_key = jax.random.PRNGKey(0)
+        print(f"Generating {num_devices} physically-jittered initial positions...")
+        jittered_params_logit = self._make_jittered_inits(rng_key, num_devices)
+        jittered_params_phys = jax.vmap(params_from_logit, in_axes=(0, None))(jittered_params_logit, self.config)
+        init_positions = jax.vmap(self.to_whitened)(jittered_params_phys)
+
+        # Replicate data for each device to be used in pmap
+        replicated_data = jax.tree.map(lambda x: jnp.array([x] * num_devices), self.objective_data)
+
+        @jax.pmap
+        def run_chain(initial_position, rng_key, data):
+            """
+            Performs warmup and sampling for a single chain on a single device.
+            """
+
+            def sampler_logdensity(p):
+                return logdensity_fn(p, data)
+
+            # -- WARMUP: Dual-averaging adaptation for step size --
+            warmup_rng, sample_rng = jax.random.split(rng_key)
+            target_accept = 0.9
+            da_init, da_update, _ = blackjax.dual_averaging.dual_averaging()
+            adapt_state = da_init(10.0)  # Initial step size
+            kernel = blackjax.mcmc.adjusted_mclmc_dynamic.build_kernel(
+                integration_steps_fn=lambda _: 10  # Fixed integration steps during warmup
+            )
+
+            def warmup_step(carry, rng_key):
+                state, adapt_state = carry
+                step_size = jnp.exp(adapt_state.log_x)
+
+                next_state, info = kernel(rng_key, state, sampler_logdensity, step_size, L_proposal_factor=0.1)
+
+                # Robustly calculate acceptance rate to update step size
+                error_signal = target_accept - jnp.nan_to_num(info.acceptance_rate)
+                new_adapt_state = da_update(adapt_state, error_signal)
+
+                return (next_state, new_adapt_state), None
+
+            initial_state = blackjax.mcmc.adjusted_mclmc_dynamic.init(initial_position, sampler_logdensity, warmup_rng)
+
+            (final_state, final_adapt_state), _ = jax.lax.scan(warmup_step, (initial_state, adapt_state), jax.random.split(warmup_rng, self.config.mcmc_num_warmup))
+
+            adapted_step_size = jnp.exp(final_adapt_state.log_x_avg)
+
+            # -- SAMPLING --
+            def sample_step(state, key):
+                # just re-use the fixed integration step kernel, but alternatively could use e.g.
+                #  dynamic_kernel = blackjax.mcmc.adjusted_mclmc_dynamic.build_kernel(integration_steps_fn=lambda key: jax.random.randint(key, (), 10, 25))
+                next_state, info = kernel(key, state, sampler_logdensity, adapted_step_size, L_proposal_factor=0.1)
+                return next_state, (next_state.position, info.acceptance_rate)
+
+            _, (samples, acceptance_rates) = jax.lax.scan(sample_step, final_state, jax.random.split(sample_rng, self.config.mcmc_num_samples))
+
+            return samples, acceptance_rates, adapted_step_size
+
+        # Distribute keys to devices and run the pmapped function
+        keys = jax.random.split(rng_key, num_devices)
+        print(f"Starting warmup and sampling with {num_devices} chains...")
+        samples_pmap, acceptance_pmap, step_size_pmap = run_chain(init_positions, keys, replicated_data)
+
+        mean_acceptance = jnp.mean(acceptance_pmap)
+        mean_step_size = jnp.mean(step_size_pmap)
+        print("\nSampling complete.")
+        print(f"  Mean acceptance rate: {mean_acceptance:.3f}")
+        print(f"  Mean adapted step size: {mean_step_size:.4f}")
+
+        # Combine results from all chains
+        samples_white = samples_pmap.reshape(-1, samples_pmap.shape[-1])
+        samples_phys = jax.vmap(self.from_whitened)(samples_white)
+        summary = self._calculate_summary_stats(samples_phys)
+
+        return {
+            "samples_white": samples_white,
+            "samples_phys": samples_phys,
+            "summary": summary,
+            "adapted_params": {
+                "step_size_per_chain": np.array(step_size_pmap),
+                "mean_acceptance_rate": float(mean_acceptance),
+            },
+        }
+
     def _report_final_chi2(self):
         """Calculate and report final chi2 values."""
         chi2s = self.calculate_individual_chi2s(self.params_physical)
@@ -449,9 +560,7 @@ class PolarizedBeamFitter:
         curvature = unflatten_fn(diag_hessian_flat)
 
         # Build the transformation functions
-        self.to_whitened, self.from_whitened, self.log_det_jacobian = build_whitening_transform(
-            self.params_physical, curvature
-        )
+        self.to_whitened, self.from_whitened, self.log_det_jacobian = build_whitening_transform(self.params_physical, curvature)
         print("Whitening transform for NUTS is ready.")
 
     def _make_jittered_inits(self, rng_key, num_chains: int):
@@ -502,7 +611,7 @@ class PolarizedBeamFitter:
         # Prepare for NUTS sampling by calculating the Hessian for the whitening transform
         self._prepare_nuts_transform()
 
-        print(f"Starting NUTS sampling: {num_chains} chains, {self.config.nuts_num_warmup} warmup, {self.config.nuts_num_samples} samples")
+        print(f"Starting NUTS sampling: {num_chains} chains, {self.config.mcmc_num_warmup} warmup, {self.config.mcmc_num_samples} samples")
 
         # Define potential energy in the whitened space
         def potential_fn_whitened(params_white):
@@ -517,14 +626,14 @@ class PolarizedBeamFitter:
         # Setup MCMC
         kernel = NUTS(
             potential_fn=potential_fn_whitened,
-            target_accept_prob=self.config.nuts_target_accept,
-            max_tree_depth=self.config.nuts_max_tree_depth,
+            target_accept_prob=self.config.mcmc_target_accept,
+            max_tree_depth=self.config.mcmc_max_tree_depth,
         )
 
         mcmc = MCMC(
             kernel,
-            num_warmup=self.config.nuts_num_warmup,
-            num_samples=self.config.nuts_num_samples,
+            num_warmup=self.config.mcmc_num_warmup,
+            num_samples=self.config.mcmc_num_samples,
             num_chains=num_chains,
             chain_method="parallel" if num_chains > 1 else "sequential",
         )
