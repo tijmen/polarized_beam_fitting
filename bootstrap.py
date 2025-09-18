@@ -13,14 +13,13 @@ from .fitter import PolarizedBeamFitter
 from .utils import check_convergence, params_from_logit, params_to_logit
 
 
-def make_bootstrap_objective(get_individual_chi2s_func, weight_array, config):
+def make_bootstrap_objective(get_individual_chi2s_func, config):
     """
-    Creates and JIT-compiles a bootstrap objective function with a specific
-    bootstrap weight array baked into its closure.
+    Creates and JIT-compiles a bootstrap objective function that takes weight_array as data.
     """
 
     @jax.jit
-    def bootstrap_objective(params_logit, extra_args=None):
+    def bootstrap_objective(params_logit, weight_array):
         # Convert logit parameters to physical space for chi2 calculation
         params_phys = params_from_logit(params_logit, config)
         individual_chi2s = get_individual_chi2s_func(params_phys)
@@ -198,7 +197,7 @@ class BootstrapBeamFitter:
             initial_params_logit = self._create_bootstrap_initial_params(weight_array)
 
             # Build a dedicated objective function for this bootstrap sample
-            objective_func = make_bootstrap_objective(self.base_fitter.calculate_individual_chi2s, weight_array, self.config)
+            objective_func = make_bootstrap_objective(self.base_fitter.calculate_individual_chi2s, self.config)
 
             # Run Adam optimization with smart initialization and gradient masking
             optimized_params_logit = self._run_adam_bootstrap(objective_func, initial_params_logit, weight_array)
@@ -219,16 +218,16 @@ class BootstrapBeamFitter:
         current_params = initial_params_logit
 
         # Compile loss and gradient function for this objective
-        loss_and_grad = jax.jit(jax.value_and_grad(lambda p: objective_func(p, None)))
+        loss_and_grad = jax.jit(jax.value_and_grad(objective_func))
 
         # Initialize convergence tracking
         convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
-        _, initial_grads = loss_and_grad(current_params)
+        _, initial_grads = loss_and_grad(current_params, weight_array)
         initial_masked_grads = mask_gradients_for_excluded_sources(initial_grads, weight_array)
         initial_grad_norm = optax.global_norm(initial_masked_grads)
 
         for i in range(self.config.n_steps):
-            loss, grads = loss_and_grad(current_params)
+            loss, grads = loss_and_grad(current_params, weight_array)
 
             # Mask gradients for excluded sources (weight = 0)
             masked_grads = mask_gradients_for_excluded_sources(grads, weight_array)
