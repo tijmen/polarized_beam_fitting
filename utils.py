@@ -666,3 +666,75 @@ def build_whitening_transform(map_params, curvature):
     log_det_jacobian = -jnp.sum(jnp.log(scale_vector))
 
     return to_whitened, from_whitened, log_det_jacobian
+
+
+# Convergence criteria utilities
+def check_convergence(loss, grad_norm, step, config, convergence_state=None, initial_grad_norm=None):
+    """
+    Check if convergence criterion is met.
+
+    Parameters:
+    -----------
+    loss : float
+        Current loss value
+    grad_norm : float
+        Current gradient norm
+    step : int
+        Current optimization step
+    config : BeamFittingConfig
+        Configuration object containing convergence parameters
+    convergence_state : dict, optional
+        State dictionary for tracking convergence (modified in-place)
+    initial_grad_norm : float, optional
+        Initial gradient norm (required for relative_gtol)
+
+    Returns:
+    --------
+    tuple
+        (converged: bool, message: str, best_loss: float)
+    """
+    # Initialize convergence state if not provided
+    if convergence_state is None:
+        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
+
+    criterion_type = config.convergence_criterion
+
+    if criterion_type == "absolute_gtol":
+        converged = grad_norm < config.absolute_gtol
+        message = f"gradient norm {grad_norm:.2e} < {config.absolute_gtol:.2e}" if converged else ""
+        return converged, message, convergence_state.get("best_loss", loss)
+
+    elif criterion_type == "relative_gtol":
+        if initial_grad_norm is None:
+            raise ValueError("relative_gtol requires initial_grad_norm")
+        relative_grad = grad_norm / initial_grad_norm
+        converged = relative_grad < config.relative_gtol
+        message = f"relative gradient {relative_grad:.2e} < {config.relative_gtol:.2e}" if converged else ""
+        return converged, message, convergence_state.get("best_loss", loss)
+
+    elif criterion_type == "loss_history":
+        # Update best loss if current loss is better
+        if loss < convergence_state["best_loss"]:
+            convergence_state["best_loss"] = loss
+            convergence_state["best_step"] = step
+
+        # Add current loss to history
+        convergence_state["loss_history"].append(loss)
+
+        # Keep only the last N entries
+        history_length = config.loss_history_length
+        if len(convergence_state["loss_history"]) > history_length:
+            convergence_state["loss_history"].pop(0)
+
+        # Check if we have enough history and no improvement
+        if len(convergence_state["loss_history"]) >= history_length:
+            steps_since_best = step - convergence_state["best_step"]
+            converged = steps_since_best >= history_length
+            message = f"no improvement for {steps_since_best} steps" if converged else ""
+            return converged, message, convergence_state["best_loss"]
+
+        # Not enough history yet
+        return False, "", convergence_state["best_loss"]
+
+    else:
+        raise ValueError(f"Unknown convergence criterion: {criterion_type}")

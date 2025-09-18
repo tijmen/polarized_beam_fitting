@@ -36,8 +36,17 @@ class BeamFittingConfig:
     solver = "optax_adam"  # "optimistix_bfgs", "optax_adam"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
     adam_kwargs = {"learning_rate": 0.001}
-    adam_gtol = 100.0  # Convergence criterion for Adam optimizer's gradient norm
-    # after warmup, we arrive at peak_value, then decay by a factor of decay_rate every transition_steps steps
+    # Convergence criteria options
+    convergence_criterion = "relative_gtol"  # "absolute_gtol", "relative_gtol", or "loss_history"
+
+    # Absolute gradient tolerance (used when convergence_criterion = "absolute_gtol")
+    absolute_gtol = 100.0
+
+    # Relative gradient tolerance (used when convergence_criterion = "relative_gtol")
+    relative_gtol = 1.0 / (3e5)  # Default: 1/(3e5)
+
+    # Loss history parameters (used when convergence_criterion = "loss_history")
+    loss_history_length = 10  # Number of steps without improvement before convergence
 
     debug = False
 

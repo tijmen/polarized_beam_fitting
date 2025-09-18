@@ -229,7 +229,9 @@ class DataLoader:
 
         return weighted_sum / weight_sum
 
-    def _prepare_clean_maps(self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, qu_templates: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    def _prepare_clean_maps(
+        self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, qu_templates: np.ndarray
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Apply leakage correction and prepare final maps."""
         n_src, ny, nx, n_bands, _ = raw_maps.shape
         maps_clean = raw_maps.copy()

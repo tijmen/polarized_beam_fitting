@@ -548,7 +548,9 @@ class BeamPlotter:
                 print(f"\nCreating diagnostic plots for rank #{rank + 1} source: {source_id} (P-amp={p_amp:.1f} μK)")
 
                 for band_idx, band in enumerate(self.fitter.config.bands):
-                    filename = self._create_source_diagnostic_plot(source_id, idx, rank + 1, maps_numpy, model_maps, band, band_idx, central_crop, save)
+                    filename = self._create_source_diagnostic_plot(
+                        source_id, idx, rank + 1, maps_numpy, model_maps, band, band_idx, central_crop, save
+                    )
                     if filename:
                         filenames.append(filename)
                         print(f"  Saved plot for band {band} to: {filename}")
@@ -876,7 +878,9 @@ class BeamPlotter:
         if chain_descriptions is None:
             chain_descriptions = [f"Chain {i + 1}" for i in range(len(sampling_output))]
         elif len(chain_descriptions) != len(sampling_output):
-            raise ValueError(f"Number of chain_descriptions ({len(chain_descriptions)}) must match number of chains ({len(sampling_output)})")
+            raise ValueError(
+                f"Number of chain_descriptions ({len(chain_descriptions)}) must match number of chains ({len(sampling_output)})"
+            )
 
         sampler_name = sampler_type.upper()
         if is_single_chain:
@@ -923,7 +927,11 @@ class BeamPlotter:
                 for param_name in self.fitter.config.beam_coeff_bounds.keys():
                     key_flat = f"beam_{band_idx}_{param_name}"
                     var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
-                    pretty = rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$" if "beta" in param_name else f"{param_name} ({band_suffix})"
+                    pretty = (
+                        rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$"
+                        if "beta" in param_name
+                        else f"{param_name} ({band_suffix})"
+                    )
                     label_map[key_flat] = pretty
                     corner_data[key_flat] = var_flat
 
@@ -949,15 +957,25 @@ class BeamPlotter:
         else:
             # Multiple chains - overlaid comparison
             fig = corner.corner(
-                all_corner_arrays[0], labels=all_labels, quantiles=[0.16, 0.5, 0.84], show_titles=True, color=colors[0], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6}
+                all_corner_arrays[0],
+                labels=all_labels,
+                quantiles=[0.16, 0.5, 0.84],
+                show_titles=True,
+                color=colors[0],
+                hist_kwargs={"alpha": 0.6},
+                contour_kwargs={"alpha": 0.6},
             )
 
             # Overlay additional chains
             for i in range(1, len(all_corner_arrays)):
-                fig = corner.corner(all_corner_arrays[i], fig=fig, color=colors[i % len(colors)], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6})
+                fig = corner.corner(
+                    all_corner_arrays[i], fig=fig, color=colors[i % len(colors)], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6}
+                )
 
             # Add legend in upper right corner
-            legend_elements = [plt.Line2D([0], [0], color=colors[i % len(colors)], lw=2, label=desc) for i, desc in enumerate(chain_descriptions)]
+            legend_elements = [
+                plt.Line2D([0], [0], color=colors[i % len(colors)], lw=2, label=desc) for i, desc in enumerate(chain_descriptions)
+            ]
 
             # Find the top-right unused corner and add legend
             ndim = len(all_labels)

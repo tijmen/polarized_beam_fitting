@@ -10,7 +10,7 @@ import numpy as np
 import optax
 
 from .fitter import PolarizedBeamFitter
-from .utils import params_from_logit, params_to_logit
+from .utils import check_convergence, params_from_logit, params_to_logit
 
 
 def make_bootstrap_objective(get_individual_chi2s_func, weight_array, config):
@@ -46,20 +46,14 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
                 if param_name == "flux":
                     # For flux gradients, need to expand mask to match shape (n_sources, n_bands, 3)
                     flux_grad_shape = masked_grads["sources"][param_name].shape
-                    zero_weight_mask_expanded = jnp.broadcast_to(
-                        zero_weight_mask.reshape(-1, 1, 1), flux_grad_shape
-                    )
+                    zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_grad_shape)
                     masked_grads["sources"][param_name] = jnp.where(
-                        zero_weight_mask_expanded,
-                        jnp.zeros_like(masked_grads["sources"][param_name]),
-                        masked_grads["sources"][param_name]
+                        zero_weight_mask_expanded, jnp.zeros_like(masked_grads["sources"][param_name]), masked_grads["sources"][param_name]
                     )
                 else:
                     # For yoff and xoff, mask has correct shape already
                     masked_grads["sources"][param_name] = jnp.where(
-                        zero_weight_mask,
-                        jnp.zeros_like(masked_grads["sources"][param_name]),
-                        masked_grads["sources"][param_name]
+                        zero_weight_mask, jnp.zeros_like(masked_grads["sources"][param_name]), masked_grads["sources"][param_name]
                     )
 
     # Beam parameters are NOT masked - they affect all sources
@@ -181,12 +175,10 @@ class BootstrapBeamFitter:
             initial_params_physical["sources"]["xoff"] = jnp.where(
                 zero_weight_mask, neutral_xoff, initial_params_physical["sources"]["xoff"]
             )
-            
+
             # For flux, need to expand mask to match flux array shape (n_sources, n_bands, 3)
             flux_shape = initial_params_physical["sources"]["flux"].shape
-            zero_weight_mask_expanded = jnp.broadcast_to(
-                zero_weight_mask.reshape(-1, 1, 1), flux_shape
-            )
+            zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_shape)
             initial_params_physical["sources"]["flux"] = jnp.where(
                 zero_weight_mask_expanded, neutral_flux, initial_params_physical["sources"]["flux"]
             )
@@ -229,6 +221,12 @@ class BootstrapBeamFitter:
         # Compile loss and gradient function for this objective
         loss_and_grad = jax.jit(jax.value_and_grad(lambda p: objective_func(p, None)))
 
+        # Initialize convergence tracking
+        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
+        _, initial_grads = loss_and_grad(current_params)
+        initial_masked_grads = mask_gradients_for_excluded_sources(initial_grads, weight_array)
+        initial_grad_norm = optax.global_norm(initial_masked_grads)
+
         for i in range(self.config.n_steps):
             loss, grads = loss_and_grad(current_params)
 
@@ -237,8 +235,13 @@ class BootstrapBeamFitter:
 
             grad_norm = optax.global_norm(masked_grads)
 
-            if grad_norm < self.config.adam_gtol:
-                print(f"  Converged at step {i}")
+            # Check convergence using the new unified criterion
+            converged, message, best_loss = check_convergence(loss, grad_norm, i, self.config, convergence_state, initial_grad_norm)
+
+            if converged:
+                print(f"  Converged at step {i}: {message}")
+                if self.config.convergence_criterion == "loss_history":
+                    print(f"  Returning best loss found: {best_loss:.2f}")
                 break
 
             updates, opt_state = optimizer.update(masked_grads, opt_state)

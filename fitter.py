@@ -24,6 +24,7 @@ from .data_loader import DataLoader
 from .noise_psd import create_noise_psd_calculator
 from .utils import (
     build_whitening_transform,
+    check_convergence,
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
@@ -368,12 +369,22 @@ class PolarizedBeamFitter:
         optimizer = optax.adam(**self.config.adam_kwargs)
         opt_state = optimizer.init(self.params_logit)
 
+        # Initialize convergence tracking
+        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
+        _, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
+        initial_grad_norm = optax.global_norm(initial_grads)
+
         for i in range(self.config.n_steps):
             loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
             grad_norm = optax.global_norm(grads)
 
-            if grad_norm < self.config.adam_gtol:
-                print(f"Converged at step {i} with gradient norm {grad_norm:.2f} < {self.config.adam_gtol:.2f}")
+            # Check convergence using the new unified criterion
+            converged, message, best_loss = check_convergence(loss, grad_norm, i, self.config, convergence_state, initial_grad_norm)
+
+            if converged:
+                print(f"Converged at step {i}: {message}")
+                if self.config.convergence_criterion == "loss_history":
+                    print(f"Returning best loss found: {best_loss:.2f}")
                 break
 
             updates, opt_state = optimizer.update(grads, opt_state)
@@ -453,16 +464,14 @@ class PolarizedBeamFitter:
 
             initial_state = blackjax.mcmc.adjusted_mclmc_dynamic.init(initial_position, sampler_logdensity, warmup_rng)
 
-            (final_state, final_adapt_state), _ = jax.lax.scan(warmup_step, (initial_state, adapt_state), jax.random.split(warmup_rng, self.config.mcmc_num_warmup))
+            (final_state, final_adapt_state), _ = jax.lax.scan(
+                warmup_step, (initial_state, adapt_state), jax.random.split(warmup_rng, self.config.mcmc_num_warmup)
+            )
 
             adapted_step_size = jnp.exp(final_adapt_state.log_x_avg)
 
             # Fall back to default step size if adapted value is outside reasonable bounds
-            adapted_step_size = jnp.where(
-                (adapted_step_size < 0.1) | (adapted_step_size > 100.0),
-                default_step_size,
-                adapted_step_size
-            )
+            adapted_step_size = jnp.where((adapted_step_size < 0.1) | (adapted_step_size > 100.0), default_step_size, adapted_step_size)
 
             # -- SAMPLING --
             def sample_step(state, key):
@@ -471,7 +480,9 @@ class PolarizedBeamFitter:
                 next_state, info = kernel(key, state, sampler_logdensity, adapted_step_size, L_proposal_factor=0.1)
                 return next_state, (next_state.position, info.acceptance_rate)
 
-            _, (samples, acceptance_rates) = jax.lax.scan(sample_step, final_state, jax.random.split(sample_rng, self.config.mcmc_num_samples))
+            _, (samples, acceptance_rates) = jax.lax.scan(
+                sample_step, final_state, jax.random.split(sample_rng, self.config.mcmc_num_samples)
+            )
 
             return samples, acceptance_rates, adapted_step_size
 
