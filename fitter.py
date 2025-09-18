@@ -433,7 +433,8 @@ class PolarizedBeamFitter:
             warmup_rng, sample_rng = jax.random.split(rng_key)
             target_accept = 0.9
             da_init, da_update, _ = blackjax.dual_averaging.dual_averaging()
-            adapt_state = da_init(10.0)  # Initial step size
+            default_step_size = 5.0
+            adapt_state = da_init(default_step_size)  # Initial step size
             kernel = blackjax.mcmc.adjusted_mclmc_dynamic.build_kernel(
                 integration_steps_fn=lambda _: 10  # Fixed integration steps during warmup
             )
@@ -455,6 +456,13 @@ class PolarizedBeamFitter:
             (final_state, final_adapt_state), _ = jax.lax.scan(warmup_step, (initial_state, adapt_state), jax.random.split(warmup_rng, self.config.mcmc_num_warmup))
 
             adapted_step_size = jnp.exp(final_adapt_state.log_x_avg)
+
+            # Fall back to default step size if adapted value is outside reasonable bounds
+            adapted_step_size = jnp.where(
+                (adapted_step_size < 0.1) | (adapted_step_size > 100.0),
+                default_step_size,
+                adapted_step_size
+            )
 
             # -- SAMPLING --
             def sample_step(state, key):
@@ -573,7 +581,6 @@ class PolarizedBeamFitter:
             • source y/x offsets    : 0.010  pixels
             • flux amplitudes       : 0.001  (relative, i.e. 1 %)
         """
-        # unpack convenience handles
         beam_phys = self.params_physical["beams"]
         src_phys = self.params_physical["sources"]
 
@@ -584,14 +591,14 @@ class PolarizedBeamFitter:
             def jitter_beam(bp, k):
                 flat, treedef = jax.tree.flatten(bp)
                 ks = jax.random.split(k, len(flat))
-                jittered = [p + 0.001 * jax.random.normal(kk, p.shape, p.dtype) for p, kk in zip(flat, ks)]
+                jittered = [p + 0.0001 * jax.random.normal(kk, p.shape, p.dtype) for p, kk in zip(flat, ks)]
                 return jax.tree.unflatten(treedef, jittered)
 
             beam_jittered = [jitter_beam(bp, k) for bp, k in zip(beam_phys, jax.random.split(key_beam, len(beam_phys)))]
 
-            yoff_j = src_phys["yoff"] + 0.010 * jax.random.normal(key_y, src_phys["yoff"].shape)
-            xoff_j = src_phys["xoff"] + 0.010 * jax.random.normal(key_x, src_phys["xoff"].shape)
-            flux_j = src_phys["flux"] * (1.0 + 0.001 * jax.random.normal(key_f, src_phys["flux"].shape))
+            yoff_j = src_phys["yoff"] + 0.001 * jax.random.normal(key_y, src_phys["yoff"].shape)
+            xoff_j = src_phys["xoff"] + 0.001 * jax.random.normal(key_x, src_phys["xoff"].shape)
+            flux_j = src_phys["flux"] * (1.0 + 0.0001 * jax.random.normal(key_f, src_phys["flux"].shape))
 
             phys_jittered = {
                 "beams": beam_jittered,

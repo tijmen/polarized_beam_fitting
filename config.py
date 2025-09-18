@@ -33,9 +33,9 @@ class BeamFittingConfig:
     # Analysis parameters
     bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
     double_precision = True  # Use 64-bit precision for all calculations
-    solver = "optimistix_bfgs"  # "optimistix_bfgs", "optax_adam"
+    solver = "optax_adam"  # "optimistix_bfgs", "optax_adam"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
-    adam_kwargs = {"learning_rate": 0.02}
+    adam_kwargs = {"learning_rate": 0.001}
     adam_gtol = 100.0  # Convergence criterion for Adam optimizer's gradient norm
     # after warmup, we arrive at peak_value, then decay by a factor of decay_rate every transition_steps steps
 
@@ -85,7 +85,6 @@ class BeamFittingConfig:
     n_bootstrap_samples = 100  # Number of bootstrap iterations
     bootstrap_seed = 42  # Random seed for reproducibility (None for random)
     bootstrap_confidence_levels = [68, 95]  # Confidence levels to report (percentiles)
-    bootstrap_warm_start = False  # If True, warm-start from previous optimum; if False, use same initial params as global fit
 
     # Plotting options
     n_diagnostic_plots = 3  # Number of highest chi2 sources to plot diagnostics for.

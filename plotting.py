@@ -852,80 +852,155 @@ class BeamPlotter:
         """
         return self.plot_sampling_trace(mclmc_output, sampler_type="mclmc", save=save)
 
-    def plot_sampling_corner(self, sampling_output, sampler_type="nuts"):
+    def plot_sampling_corner(self, sampling_output, sampler_type="nuts", chain_descriptions=None):
         """
         Corner plot for sampling output (NUTS or MCLMC).
         Shows ⟨T⟩, ⟨P⟩, ⟨y_off⟩, ⟨x_off⟩ plus all beam parameters.
+
+        Parameters:
+        -----------
+        sampling_output : dict or list of dict
+            Single sampling output dict, or list of sampling output dicts for comparison
+        sampler_type : str
+            Sampler type ("nuts" or "mclmc")
+        chain_descriptions : list of str, optional
+            Text descriptions for each chain (only used when sampling_output is a list)
         """
+        # Handle single output vs list of outputs
+        if not isinstance(sampling_output, list):
+            sampling_output = [sampling_output]
+            is_single_chain = True
+        else:
+            is_single_chain = False
+
+        if chain_descriptions is None:
+            chain_descriptions = [f"Chain {i + 1}" for i in range(len(sampling_output))]
+        elif len(chain_descriptions) != len(sampling_output):
+            raise ValueError(f"Number of chain_descriptions ({len(chain_descriptions)}) must match number of chains ({len(sampling_output)})")
+
         sampler_name = sampler_type.upper()
-        print(f"\n--- Generating {sampler_name} Corner Plot ---")
+        if is_single_chain:
+            print(f"\n--- Generating {sampler_name} Corner Plot ---")
+        else:
+            print(f"\n--- Generating {sampler_name} Comparison Corner Plot for {len(sampling_output)} Chains ---")
 
-        az_data, samples_flat, _ = self._process_sampling_output(sampling_output, sampler_type)
+        # Process all chains
+        all_corner_arrays = []
+        all_labels = None
+        colors = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]  # Default matplotlib colors
 
-        def _merge_cd(arr):
-            c, d = arr.shape[:2]
-            return arr.reshape(c * d, *arr.shape[2:])  # (nsamp, ...)
+        for i, output in enumerate(sampling_output):
+            az_data, samples_flat, _ = self._process_sampling_output(output, sampler_type)
 
-        flux_flat = _merge_cd(samples_flat["flux"])  # (nsamp, n_src, n_bands, 3)
-        primary_band = 0
+            def _merge_cd(arr):
+                c, d = arr.shape[:2]
+                return arr.reshape(c * d, *arr.shape[2:])  # (nsamp, ...)
 
-        t_flux = flux_flat[:, :, primary_band, 0].mean(axis=1)  # <T> per sample
-        p_flux = np.sqrt(flux_flat[:, :, primary_band, 1] ** 2 + flux_flat[:, :, primary_band, 2] ** 2).mean(axis=1)  # <P> per sample
+            flux_flat = _merge_cd(samples_flat["flux"])  # (nsamp, n_src, n_bands, 3)
+            primary_band = 0
 
-        yoff_mean = _merge_cd(samples_flat["yoff"]).mean(axis=1)
-        xoff_mean = _merge_cd(samples_flat["xoff"]).mean(axis=1)
+            t_flux = flux_flat[:, :, primary_band, 0].mean(axis=1)  # <T> per sample
+            p_flux = np.sqrt(flux_flat[:, :, primary_band, 1] ** 2 + flux_flat[:, :, primary_band, 2] ** 2).mean(axis=1)  # <P> per sample
 
-        label_map = {
-            "t_flux": r"$\langle T \rangle$",
-            "p_flux": r"$\langle P \rangle$",
-            "yoff_mean": r"$\langle y_{\rm off} \rangle$",
-            "xoff_mean": r"$\langle x_{\rm off} \rangle$",
-        }
-        corner_data = {
-            "t_flux": t_flux,
-            "p_flux": p_flux,
-            "yoff_mean": yoff_mean,
-            "xoff_mean": xoff_mean,
-        }
+            yoff_mean = _merge_cd(samples_flat["yoff"]).mean(axis=1)
+            xoff_mean = _merge_cd(samples_flat["xoff"]).mean(axis=1)
 
-        for band_idx, band in enumerate(self.fitter.config.bands):
-            band_suffix = self._get_band_suffix(band)
-            for param_name in self.fitter.config.beam_coeff_bounds.keys():
-                key_flat = f"beam_{band_idx}_{param_name}"
-                var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
-                pretty = rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$" if "beta" in param_name else f"{param_name} ({band_suffix})"
-                label_map[key_flat] = pretty
-                corner_data[key_flat] = var_flat
+            label_map = {
+                "t_flux": r"$\langle T \rangle$",
+                "p_flux": r"$\langle P \rangle$",
+                "yoff_mean": r"$\langle y_{\rm off} \rangle$",
+                "xoff_mean": r"$\langle x_{\rm off} \rangle$",
+            }
+            corner_data = {
+                "t_flux": t_flux,
+                "p_flux": p_flux,
+                "yoff_mean": yoff_mean,
+                "xoff_mean": xoff_mean,
+            }
 
-        param_order = list(corner_data.keys())  # deterministic order
-        corner_array = np.column_stack([corner_data[k] for k in param_order])
-        labels = [label_map.get(k, k) for k in param_order]
+            for band_idx, band in enumerate(self.fitter.config.bands):
+                band_suffix = self._get_band_suffix(band)
+                for param_name in self.fitter.config.beam_coeff_bounds.keys():
+                    key_flat = f"beam_{band_idx}_{param_name}"
+                    var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
+                    pretty = rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$" if "beta" in param_name else f"{param_name} ({band_suffix})"
+                    label_map[key_flat] = pretty
+                    corner_data[key_flat] = var_flat
 
-        fig = corner.corner(
-            corner_array,
-            labels=labels,
-            quantiles=[0.16, 0.5, 0.84],
-            show_titles=True,
-        )
-        fig.suptitle(f"{sampler_name} Corner Plot", y=1.02)
+            param_order = list(corner_data.keys())  # deterministic order
+            corner_array = np.column_stack([corner_data[k] for k in param_order])
 
-        filename = os.path.join(self.output_dir, f"{sampler_type}_corner.png")
+            # Store labels from first chain
+            if all_labels is None:
+                all_labels = [label_map.get(k, k) for k in param_order]
+
+            all_corner_arrays.append(corner_array)
+
+        # Create the corner plot
+        if is_single_chain:
+            # Single chain - original behavior
+            fig = corner.corner(
+                all_corner_arrays[0],
+                labels=all_labels,
+                quantiles=[0.16, 0.5, 0.84],
+                show_titles=True,
+            )
+            fig.suptitle(f"{sampler_name} Corner Plot", y=1.02)
+        else:
+            # Multiple chains - overlaid comparison
+            fig = corner.corner(
+                all_corner_arrays[0], labels=all_labels, quantiles=[0.16, 0.5, 0.84], show_titles=True, color=colors[0], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6}
+            )
+
+            # Overlay additional chains
+            for i in range(1, len(all_corner_arrays)):
+                fig = corner.corner(all_corner_arrays[i], fig=fig, color=colors[i % len(colors)], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6})
+
+            # Add legend in upper right corner
+            legend_elements = [plt.Line2D([0], [0], color=colors[i % len(colors)], lw=2, label=desc) for i, desc in enumerate(chain_descriptions)]
+
+            # Find the top-right unused corner and add legend
+            ndim = len(all_labels)
+            ax_legend = fig.axes[ndim - 1]  # Top-right subplot
+            ax_legend.legend(handles=legend_elements, loc="center", frameon=True, fancybox=True, shadow=True, fontsize=10)
+
+            fig.suptitle(f"{sampler_name} Comparison Corner Plot", y=1.02)
+
+        filename = os.path.join(self.output_dir, f"{sampler_type}_corner{'_comparison' if not is_single_chain else ''}.png")
         plt.tight_layout()
         plt.savefig(filename, dpi=150)
         plt.close()
-        print(f"Saved corner plot to: {filename}")
 
-    def plot_nuts_corner(self, nuts_output):
+        if is_single_chain:
+            print(f"Saved corner plot to: {filename}")
+        else:
+            print(f"Saved comparison corner plot to: {filename}")
+
+    def plot_nuts_corner(self, nuts_output, chain_descriptions=None):
         """
         Corner plot for NUTS samples.
-        """
-        return self.plot_sampling_corner(nuts_output, sampler_type="nuts")
 
-    def plot_mclmc_corner(self, mclmc_output):
+        Parameters:
+        -----------
+        nuts_output : dict or list of dict
+            Single NUTS output dict, or list of NUTS output dicts for comparison
+        chain_descriptions : list of str, optional
+            Text descriptions for each chain (only used when nuts_output is a list)
+        """
+        return self.plot_sampling_corner(nuts_output, sampler_type="nuts", chain_descriptions=chain_descriptions)
+
+    def plot_mclmc_corner(self, mclmc_output, chain_descriptions=None):
         """
         Corner plot for MCLMC samples.
+
+        Parameters:
+        -----------
+        mclmc_output : dict or list of dict
+            Single MCLMC output dict, or list of MCLMC output dicts for comparison
+        chain_descriptions : list of str, optional
+            Text descriptions for each chain (only used when mclmc_output is a list)
         """
-        return self.plot_sampling_corner(mclmc_output, sampler_type="mclmc")
+        return self.plot_sampling_corner(mclmc_output, sampler_type="mclmc", chain_descriptions=chain_descriptions)
 
 
 def create_diagnostic_plots(
