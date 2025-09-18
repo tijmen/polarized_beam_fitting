@@ -221,7 +221,13 @@ class DataLoader:
             return np.median(qu_maps / t_amps[:, None, None, :, None], axis=0)
 
         weight_map = {"flat": 1.0, "linear": t_amps, "squared": t_amps**2}
-        weights = weight_map[self.config.leakage_weighting][:, None, None, :, None]
+        weights_base = weight_map[self.config.leakage_weighting]
+        
+        # Handle flat weighting case (scalar) vs array weighting cases
+        if self.config.leakage_weighting == "flat":
+            weights = np.ones_like(t_amps)[:, None, None, :, None]
+        else:
+            weights = weights_base[:, None, None, :, None]
 
         normalized_qu = qu_maps / t_amps[:, None, None, :, None]
         weighted_sum = np.sum(normalized_qu * weights, axis=0)

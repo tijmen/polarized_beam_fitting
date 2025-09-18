@@ -18,7 +18,7 @@ def make_bootstrap_objective(get_individual_chi2s_func, config):
     Creates and JIT-compiles a bootstrap objective function that takes weight_array as data.
     """
 
-    @jax.jit
+    #@jax.jit # FIXME: this compiles a function that closes over the data, we don't want to do that
     def bootstrap_objective(params_logit, weight_array):
         # Convert logit parameters to physical space for chi2 calculation
         params_phys = params_from_logit(params_logit, config)
@@ -234,7 +234,6 @@ class BootstrapBeamFitter:
 
             grad_norm = optax.global_norm(masked_grads)
 
-            # Check convergence using the new unified criterion
             converged, message, best_loss = check_convergence(loss, grad_norm, i, self.config, convergence_state, initial_grad_norm)
 
             if converged:

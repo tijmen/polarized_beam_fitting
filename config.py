@@ -46,7 +46,7 @@ class BeamFittingConfig:
     relative_gtol = 1.0 / (3e5)  # Default: 1 part in 300,000
 
     # Loss history parameters (used when convergence_criterion = "loss_history")
-    loss_history_length = 10  # Number of steps without improvement before convergence
+    loss_history_length = 200  # Number of steps without improvement before convergence
 
     debug = False
 
