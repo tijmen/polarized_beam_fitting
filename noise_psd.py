@@ -9,7 +9,7 @@ differences is whether the noise PSD is fully diagonal (each ky,kx,band,stokes
 is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
-Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean] are fully diagonal,
+Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pink_noise] are fully diagonal,
 and [multiband_covariance] is only diagonal in Fourier space.
 """
 
@@ -17,6 +17,12 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from astropy.io import fits
+import numpy as np
+import warnings
+from scipy.optimize import minimize
+from scipy.stats import binned_statistic
+from typing import Tuple, Dict
+from sklearn.decomposition import PCA
 
 from .utils import make_apod_mask_center_excised
 
@@ -439,6 +445,80 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         return covariance_psd
 
 
+class PinkNoisePSDCalculator(NoisePSDCalculator):
+    """
+
+    PinkNoisePSDCalculator is a per-source PSD calculator holding whatever PSD I'm currently developing. It is the default.
+
+    Calculates noise PSDs using a data-driven, log-space PCA model. Each component is a PSD. Log space is good
+    because the individual PSDs have chi-squared-distributed noise with two degrees of freedom. I believe the
+    log of that will have Gaussian noise.
+    """
+    N_COMPONENTS = 4
+
+    def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
+        """
+        Calculates noise PSDs using a log-space PCA model built from the data.
+
+        Parameters:
+        -----------
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, n_stokes) containing the maps.
+
+        Returns:
+        --------
+        np.ndarray
+            Array of the same shape containing the reconstructed 2D noise PSDs.
+        """
+        print(f"Calculating noise PSDs with log-space PCA model ({self.N_COMPONENTS} components)...")
+        n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
+        map_shape = (ny, nx)
+
+        noise_mask = make_apod_mask_center_excised(
+            map_shape,
+            self.config.apodization_width_pix,
+            self.config.noise_hole_radius_arcmin,
+            self.config.reso_arcmin,
+        )
+        effective_area = np.sum(noise_mask**2)
+        print("Collating all map PSDs...")
+        all_psds_flat_linear = []
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                for stokes_idx in range(n_stokes):
+                    real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
+                    masked_map = real_map * noise_mask
+                    fft_2d = np.fft.fft2(masked_map)
+                    psd_2d = np.abs(fft_2d)**2 / effective_area
+                    all_psds_flat_linear.append(psd_2d.flatten())
+
+        X_linear = np.array(all_psds_flat_linear)
+        X_log = np.log(X_linear)
+        print("Performing PCA on log-transformed PSDs...")
+        mean_log_psd = np.mean(X_log, axis=0)
+        X_log_centered = X_log - mean_log_psd
+        pca = PCA(n_components=self.N_COMPONENTS, svd_solver='randomized')
+        pca.fit(X_log_centered)
+        print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+
+        print("Reconstructing denoised PSDs...")
+        coeffs = pca.transform(X_log_centered)
+        X_reconstructed_log_centered = pca.inverse_transform(coeffs)
+        X_reconstructed_log = X_reconstructed_log_centered + mean_log_psd
+        X_reconstructed_linear = np.exp(X_reconstructed_log)
+        
+        per_source_psd_array = np.zeros_like(maps_numpy, dtype=self.config.dtype_np_real)
+        map_idx = 0
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                for stokes_idx in range(n_stokes):
+                    per_source_psd_array[i, :, :, band_idx, stokes_idx] = X_reconstructed_linear[map_idx].reshape(map_shape)
+                    map_idx += 1
+
+        print("PCA-based PSD calculation complete.")
+        return per_source_psd_array
+
+
 class WhiteNoiseCalculator(NoisePSDCalculator):
     """
     Calculate simple white noise PSD with constant values.
@@ -501,6 +581,8 @@ def create_noise_psd_calculator(config, map_shape):
         return EnsembleAsdMeanCalculator(config, map_shape)
     elif config.noise_psd_method == "multiband_covariance":
         return MultiBandCovarianceCalculator(config, map_shape)
+    elif config.noise_psd_method == "pink_noise":
+        return PinkNoisePSDCalculator(config, map_shape)
     elif config.noise_psd_method == "white_noise":
         return WhiteNoiseCalculator(config, map_shape)
     else:

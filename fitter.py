@@ -80,7 +80,13 @@ class ObjectiveFunctions:
 
     def _build_fourier_objective(self):
         """Build Fourier-space objective."""
-        vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, None))
+        # Check if we're using per-source PSDs
+        if self.config.noise_psd_method == "pink_noise":
+            # For per-source PSDs, vmap over noise_psd as well (axis 0)
+            vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
+        else:
+            # For global PSDs, don't vmap over noise_psd (None)
+            vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, None))
 
         def objective(params_logit, data, extra_args=None):
             maps_fft, noise_psd = data
@@ -524,16 +530,29 @@ class PolarizedBeamFitter:
         obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
 
         if self.config.chi2_method == "fourier":
+            if self.config.noise_psd_method == "pink_noise":
+                # For per-source PSDs, include noise_psd in the vmap
+                def chi2_fn(y, x, f, d, n):
+                    return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, n)
 
-            def chi2_fn(y, x, f, d):
-                return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, self.state.noise_psd_jax)
+                chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0, 0))(
+                    params_phys["sources"]["yoff"],
+                    params_phys["sources"]["xoff"],
+                    params_phys["sources"]["flux"],
+                    self.state.maps_fft_jax,
+                    self.state.noise_psd_jax,
+                )
+            else:
+                # For global PSDs, use the same PSD for all sources
+                def chi2_fn(y, x, f, d):
+                    return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, self.state.noise_psd_jax)
 
-            chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0))(
-                params_phys["sources"]["yoff"],
-                params_phys["sources"]["xoff"],
-                params_phys["sources"]["flux"],
-                self.state.maps_fft_jax,
-            )
+                chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0))(
+                    params_phys["sources"]["yoff"],
+                    params_phys["sources"]["xoff"],
+                    params_phys["sources"]["flux"],
+                    self.state.maps_fft_jax,
+                )
         else:
 
             def chi2_fn(y, x, f, d, w):

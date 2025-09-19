@@ -87,7 +87,7 @@ class BeamFittingConfig:
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
 
     # Optimization parameters
-    n_steps = 100000
+    n_steps = 8000
 
     # Bootstrap resampling parameters
     enable_bootstrap = False  # Enable/disable bootstrap uncertainty estimation
