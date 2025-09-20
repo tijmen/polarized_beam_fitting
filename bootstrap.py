@@ -1,7 +1,9 @@
 """
 Bootstrap uncertainty estimation for polarized beam fitting.
 
-Improved implementation with smart warm-starting based on bootstrap weights.
+ - Warm-start from non-resampled best-fit parameters
+ - No closure over the data (JAX doesn't compile the data in as constants)
+ - Parallel execution across multiple GPUs.
 """
 
 import jax
@@ -9,21 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from .fitter import PolarizedBeamFitter
-from .utils import check_convergence, params_from_logit, params_to_logit
-
-
-def make_bootstrap_objective(get_individual_chi2s_func, config):
-    """
-    Creates and JIT-compiles a bootstrap objective function that takes weight_array as data.
-    """
-    def bootstrap_objective(params_logit, weight_array):
-        # Convert logit parameters to physical space for chi2 calculation
-        params_phys = params_from_logit(params_logit, config)
-        individual_chi2s = get_individual_chi2s_func(params_phys)
-        return jnp.sum(individual_chi2s * weight_array)
-
-    return bootstrap_objective
+from .fitter import ObjectiveFunctions, PolarizedBeamFitter
+from .utils import params_from_logit, params_to_logit
 
 
 def mask_gradients_for_excluded_sources(grad_tree, weight_array):
@@ -34,7 +23,7 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
     zero_weight_mask = weight_array == 0
 
     # Create a copy of the gradient tree
-    masked_grads = jax.tree_util.tree_map(lambda x: x, grad_tree)
+    masked_grads = jax.tree.map(lambda x: x, grad_tree)
 
     # Mask source parameter gradients for excluded sources
     if "sources" in masked_grads:
@@ -45,12 +34,16 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
                     flux_grad_shape = masked_grads["sources"][param_name].shape
                     zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_grad_shape)
                     masked_grads["sources"][param_name] = jnp.where(
-                        zero_weight_mask_expanded, jnp.zeros_like(masked_grads["sources"][param_name]), masked_grads["sources"][param_name]
+                        zero_weight_mask_expanded,
+                        jnp.zeros_like(masked_grads["sources"][param_name]),
+                        masked_grads["sources"][param_name],
                     )
                 else:
                     # For yoff and xoff, mask has correct shape already
                     masked_grads["sources"][param_name] = jnp.where(
-                        zero_weight_mask, jnp.zeros_like(masked_grads["sources"][param_name]), masked_grads["sources"][param_name]
+                        zero_weight_mask,
+                        jnp.zeros_like(masked_grads["sources"][param_name]),
+                        masked_grads["sources"][param_name],
                     )
 
     # Beam parameters are NOT masked - they affect all sources
@@ -59,17 +52,7 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
 
 class BootstrapBeamFitter:
     """
-    Bootstrap wrapper for PolarizedBeamFitter with smart warm-starting.
-
-    Improved implementation that:
-    1. Runs initial ML fit to get baseline parameters
-    2. For each bootstrap sample, intelligently initializes parameters based on
-       which sources are included (weight > 0) vs excluded (weight = 0)
-    3. Beam parameters always start from ML solution (affect all sources)
-    4. Source parameters are initialized based on bootstrap weights:
-       - Weight > 0: Use ML parameters as starting point
-       - Weight = 0: Use neutral/default values (won't affect optimization)
-    5. Tracks convergence and provides detailed diagnostics
+    Bootstrap resampling over PolarizedBeamFitter with warm-starting.
     """
 
     def __init__(self, config):
@@ -130,121 +113,177 @@ class BootstrapBeamFitter:
     def _create_bootstrap_initial_params(self, weight_array):
         """
         Create smart initial parameters for a bootstrap sample based on source weights.
+        This function is vmappable (no Python conditionals on traced values).
 
         Strategy:
         - Beam parameters: Always use ML solution (they affect all sources)
         - Source parameters:
           * Weight > 0: Use ML parameters (these sources are included)
           * Weight = 0: Use neutral/default values (these sources are excluded)
-
-        Args:
-            weight_array: Bootstrap weights for sources [n_sources]
-
-        Returns:
-            Initial parameters in logit space for this bootstrap sample
         """
         # Start with ML parameters as base
-        initial_params_physical = jax.tree_util.tree_map(lambda x: x, self.ml_params_physical)
+        initial_params_physical = jax.tree.map(lambda x: x, self.ml_params_physical)
 
-        # For sources with weight = 0, set to neutral values
+        # Create masks for excluded sources (weight = 0)
         zero_weight_mask = weight_array == 0
-        n_zero_sources = jnp.sum(zero_weight_mask)
 
-        if n_zero_sources > 0:
-            # Set neutral values for excluded sources
-            # These values won't affect the objective, but should be reasonable for optimization
+        # Prepare neutral values for excluded sources
+        neutral_yoff = jnp.zeros_like(initial_params_physical["sources"]["yoff"])
+        neutral_xoff = jnp.zeros_like(initial_params_physical["sources"]["xoff"])
+        neutral_flux = jnp.ones_like(initial_params_physical["sources"]["flux"])
 
-            # Small offset values (near zero but not exactly zero to avoid numerical issues)
-            neutral_yoff = jnp.zeros_like(initial_params_physical["sources"]["yoff"])
-            neutral_xoff = jnp.zeros_like(initial_params_physical["sources"]["xoff"])
+        # Apply neutral values to excluded sources using jnp.where
+        # This works regardless of whether any sources are excluded
+        initial_params_physical["sources"]["yoff"] = jnp.where(zero_weight_mask, neutral_yoff, initial_params_physical["sources"]["yoff"])
+        initial_params_physical["sources"]["xoff"] = jnp.where(zero_weight_mask, neutral_xoff, initial_params_physical["sources"]["xoff"])
 
-            # Unit flux values (neutral multiplicative factor)
-            neutral_flux = jnp.ones_like(initial_params_physical["sources"]["flux"])
-
-            # Apply neutral values only to excluded sources
-            initial_params_physical["sources"]["yoff"] = jnp.where(
-                zero_weight_mask, neutral_yoff, initial_params_physical["sources"]["yoff"]
-            )
-            initial_params_physical["sources"]["xoff"] = jnp.where(
-                zero_weight_mask, neutral_xoff, initial_params_physical["sources"]["xoff"]
-            )
-
-            # For flux, need to expand mask to match flux array shape (n_sources, n_bands, 3)
-            flux_shape = initial_params_physical["sources"]["flux"].shape
-            zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_shape)
-            initial_params_physical["sources"]["flux"] = jnp.where(
-                zero_weight_mask_expanded, neutral_flux, initial_params_physical["sources"]["flux"]
-            )
+        # For flux, expand mask to match flux array shape (n_sources, n_bands, 3)
+        flux_shape = initial_params_physical["sources"]["flux"].shape
+        zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_shape)
+        initial_params_physical["sources"]["flux"] = jnp.where(
+            zero_weight_mask_expanded, neutral_flux, initial_params_physical["sources"]["flux"]
+        )
 
         # Convert to logit space for optimization
         return params_to_logit(initial_params_physical, self.config)
 
+    def _build_bootstrap_objective(self):
+        """
+        Build a bootstrap objective function that takes data explicitly.
+        This avoids closing over data in the JIT compilation.
+        """
+        # Create a fresh ObjectiveFunctions instance to build objectives
+        obj_builder = ObjectiveFunctions(self.config, self.base_fitter.state, self.base_fitter.beam_models)
+
+        # Build bootstrap-specific objective that includes weights
+        if self.config.chi2_method == "fourier":
+
+            def bootstrap_objective(params_logit, data, weight_array):
+                """Bootstrap objective for Fourier space."""
+                maps_fft, noise_psd = data
+                params_phys = params_from_logit(params_logit, self.config)
+
+                # Use the chi2 calculation from the objective builder
+                vmap_chi2 = jax.vmap(obj_builder._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
+
+                individual_chi2s = vmap_chi2(
+                    params_phys["beams"],
+                    params_phys["sources"]["yoff"],
+                    params_phys["sources"]["xoff"],
+                    params_phys["sources"]["flux"],
+                    maps_fft,
+                    noise_psd,
+                )
+
+                return jnp.sum(individual_chi2s * weight_array)
+        else:
+
+            def bootstrap_objective(params_logit, data, weight_array):
+                """Bootstrap objective for real space."""
+                maps, weights = data
+                params_phys = params_from_logit(params_logit, self.config)
+
+                # Use the chi2 calculation from the objective builder
+                vmap_chi2 = jax.vmap(obj_builder._chi2_real_single, in_axes=(None, 0, 0, 0, 0, 0))
+
+                individual_chi2s = vmap_chi2(
+                    params_phys["beams"],
+                    params_phys["sources"]["yoff"],
+                    params_phys["sources"]["xoff"],
+                    params_phys["sources"]["flux"],
+                    maps,
+                    weights,
+                )
+
+                return jnp.sum(individual_chi2s * weight_array)
+
+        return bootstrap_objective
+
     def _run_bootstrap_fits(self):
-        """Run all bootstrap fits with smart warm-starting."""
+        """Run all bootstrap fits with smart warm-starting and parallel execution."""
         bootstrap_weights = self._prepare_bootstrap_weights()
+
+        # Build the bootstrap objective function once
+        bootstrap_objective = self._build_bootstrap_objective()
+
+        # Get data from base fitter
+        objective_data = self.base_fitter.objective_data
+
+        # Get available devices
+        devices = jax.devices()
+        n_devices = len(devices)
+        print(f"Using {n_devices} device(s) for bootstrap fitting")
+
+        # Process bootstrap samples in batches that match device count
         bootstrap_params = []
+        n_samples = len(bootstrap_weights)
 
-        for i, weight_array in enumerate(bootstrap_weights):
-            print(f"Bootstrap iteration {i + 1}/{self.config.n_bootstrap_samples}")
+        # Process in batches of n_devices
+        for batch_start in range(0, n_samples, n_devices):
+            batch_end = min(batch_start + n_devices, n_samples)
+            batch_weights = bootstrap_weights[batch_start:batch_end]
+            batch_size = len(batch_weights)
 
-            # Create smart initial parameters for this bootstrap sample
-            initial_params_logit = self._create_bootstrap_initial_params(weight_array)
+            print(f"Processing bootstrap samples {batch_start + 1}-{batch_end}/{n_samples}")
 
-            # Build a dedicated objective function for this bootstrap sample
-            objective_func = make_bootstrap_objective(self.base_fitter.calculate_individual_chi2s, self.config)
+            # If batch size < n_devices, pad with dummy weights
+            if batch_size < n_devices:
+                padding_size = n_devices - batch_size
+                dummy_weights = jnp.zeros((padding_size,) + batch_weights.shape[1:])
+                batch_weights = jnp.concatenate([batch_weights, dummy_weights])
 
-            # Run Adam optimization with smart initialization and gradient masking
-            optimized_params_logit = self._run_adam_bootstrap(objective_func, initial_params_logit, weight_array)
+            # Create initial parameters for this batch
+            batch_initial_params = jax.vmap(self._create_bootstrap_initial_params)(batch_weights)
 
-            # Convert logit parameters back to physical space for storage
-            physical_params = params_from_logit(optimized_params_logit, self.config)
-            bootstrap_params.append(physical_params)
+            # Replicate data across devices
+            replicated_data = jax.tree.map(lambda x: jnp.array([x] * n_devices), objective_data)
+
+            # Run optimization in parallel using pmap
+            batch_results = self._run_batch_optimization_pmap(batch_initial_params, replicated_data, batch_weights, bootstrap_objective)
+
+            # Extract only the actual results (not padding)
+            for i in range(batch_size):
+                bootstrap_params.append(batch_results[i])
 
         return bootstrap_params
 
-    def _run_adam_bootstrap(self, objective_func, initial_params_logit, weight_array):
-        """
-        Run Adam optimization for a single bootstrap iteration.
-        Only optimizes parameters for sources with weight > 0.
-        """
-        optimizer = optax.adam(**self.config.adam_kwargs)
-        opt_state = optimizer.init(initial_params_logit)
-        current_params = initial_params_logit
+    def _run_batch_optimization_pmap(self, batch_initial_params, replicated_data, batch_weights, bootstrap_objective):
+        """Run a batch of bootstrap optimizations in parallel using pmap."""
 
-        # Compile loss and gradient function for this objective
-        loss_and_grad = jax.jit(jax.value_and_grad(objective_func))
+        @jax.pmap
+        def optimize_single(initial_params_logit, data, weight_array):
+            """Optimize a single bootstrap sample on one device."""
+            # Create optimizer
+            optimizer = optax.adam(**self.config.adam_kwargs)
+            opt_state = optimizer.init(initial_params_logit)
+            current_params = initial_params_logit
 
-        # Initialize convergence tracking
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
-        _, initial_grads = loss_and_grad(current_params, weight_array)
-        initial_masked_grads = mask_gradients_for_excluded_sources(initial_grads, weight_array)
-        initial_grad_norm = optax.global_norm(initial_masked_grads)
+            # Compile loss and gradient function for this objective
+            loss_and_grad = jax.jit(jax.value_and_grad(lambda p: bootstrap_objective(p, data, weight_array)))
 
-        for i in range(self.config.n_steps):
-            loss, grads = loss_and_grad(current_params, weight_array)
+            # Run optimization
+            for i in range(self.config.n_steps):
+                loss, grads = loss_and_grad(current_params)
 
-            # Mask gradients for excluded sources (weight = 0)
-            masked_grads = mask_gradients_for_excluded_sources(grads, weight_array)
+                # Mask gradients for excluded sources (weight = 0)
+                masked_grads = mask_gradients_for_excluded_sources(grads, weight_array)
 
-            grad_norm = optax.global_norm(masked_grads)
+                # Check for convergence (simplified for pmap)
+                optax.global_norm(masked_grads)
+                # Note: We can't break early in pmap, so we just keep going
 
-            converged, message, best_loss = check_convergence(loss, grad_norm, i, self.config, convergence_state, initial_grad_norm)
+                updates, opt_state = optimizer.update(masked_grads, opt_state)
+                current_params = optax.apply_updates(current_params, updates)
 
-            if converged:
-                print(f"  Converged at step {i}: {message}")
-                if self.config.convergence_criterion == "loss_history":
-                    print(f"  Returning best loss found: {best_loss:.2f}")
-                break
+            # Convert back to physical parameters
+            return params_from_logit(current_params, self.config)
 
-            updates, opt_state = optimizer.update(masked_grads, opt_state)
-            current_params = optax.apply_updates(current_params, updates)
+        # Run parallel optimization
+        return optimize_single(batch_initial_params, replicated_data, batch_weights)
 
-            if i % 100 == 0:
-                print(f"  Step {i}: loss={loss:.2f}, |grad|={grad_norm:.3f}")
-
-        return current_params
-
-    # Delegate methods to base fitter
+    def calculate_individual_chi2s(self, params_phys):
+        """Calculate chi2 for each source individually."""
+        return self.base_fitter.calculate_individual_chi2s(params_phys)
 
     def create_model_maps(self, best_fit_params):
         return self.base_fitter.create_model_maps(best_fit_params)

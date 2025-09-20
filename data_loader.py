@@ -222,7 +222,7 @@ class DataLoader:
 
         weight_map = {"flat": 1.0, "linear": t_amps, "squared": t_amps**2}
         weights_base = weight_map[self.config.leakage_weighting]
-        
+
         # Handle flat weighting case (scalar) vs array weighting cases
         if self.config.leakage_weighting == "flat":
             weights = np.ones_like(t_amps)[:, None, None, :, None]

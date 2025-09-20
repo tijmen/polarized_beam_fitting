@@ -22,10 +22,10 @@ from .noise_psd import (
     ClusterfinderPSDCalculator,
     EnsembleAsdMeanCalculator,
     KxAveragedCalculator,
+    MultiBandCovarianceCalculator,
     NoisePSDCalculator,
     PcaPsdCalculator,
     PcaPsdSeparateTQUCalculator,
-    MultiBandCovarianceCalculator,
     WhiteNoiseCalculator,
     create_noise_psd_calculator,
 )

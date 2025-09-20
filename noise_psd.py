@@ -17,11 +17,6 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from astropy.io import fits
-import numpy as np
-import warnings
-from scipy.optimize import minimize
-from scipy.stats import binned_statistic
-from typing import Tuple, Dict
 from sklearn.decomposition import PCA
 
 from .utils import make_apod_mask_center_excised
@@ -454,6 +449,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
     because the individual PSDs have chi-squared-distributed noise with two degrees of freedom. I believe the
     log of that will have Gaussian noise.
     """
+
     N_COMPONENTS = 4
 
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
@@ -489,7 +485,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
                     real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
                     masked_map = real_map * noise_mask
                     fft_2d = np.fft.fft2(masked_map)
-                    psd_2d = np.abs(fft_2d)**2 / effective_area
+                    psd_2d = np.abs(fft_2d) ** 2 / effective_area
                     all_psds_flat_linear.append(psd_2d.flatten())
 
         X_linear = np.array(all_psds_flat_linear)
@@ -497,7 +493,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
         print("Performing PCA on log-transformed PSDs...")
         mean_log_psd = np.mean(X_log, axis=0)
         X_log_centered = X_log - mean_log_psd
-        pca = PCA(n_components=self.N_COMPONENTS, svd_solver='randomized')
+        pca = PCA(n_components=self.N_COMPONENTS, svd_solver="randomized")
         pca.fit(X_log_centered)
         print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
 
@@ -506,7 +502,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
         X_reconstructed_log_centered = pca.inverse_transform(coeffs)
         X_reconstructed_log = X_reconstructed_log_centered + mean_log_psd
         X_reconstructed_linear = np.exp(X_reconstructed_log)
-        
+
         per_source_psd_array = np.zeros_like(maps_numpy, dtype=self.config.dtype_np_real)
         map_idx = 0
         for i in range(n_src):
@@ -527,8 +523,9 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
     This approach allows for different noise structures between temperature and polarization
     measurements, which can be important for cosmic microwave background observations.
     """
-    N_COMPONENTS_T = 4    # Number of PCA components for temperature
-    N_COMPONENTS_QU = 4   # Number of PCA components for Q,U polarization
+
+    N_COMPONENTS_T = 4  # Number of PCA components for temperature
+    N_COMPONENTS_QU = 4  # Number of PCA components for Q,U polarization
 
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
         """
@@ -567,7 +564,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
                 real_map = maps_numpy[i, :, :, band_idx, 0]  # T component
                 masked_map = real_map * noise_mask
                 fft_2d = np.fft.fft2(masked_map)
-                psd_2d = np.abs(fft_2d)**2 / effective_area
+                psd_2d = np.abs(fft_2d) ** 2 / effective_area
                 all_psds_T_flat_linear.append(psd_2d.flatten())
 
         X_T_linear = np.array(all_psds_T_flat_linear)
@@ -575,7 +572,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         print("Performing PCA on T log-transformed PSDs...")
         mean_log_psd_T = np.mean(X_T_log, axis=0)
         X_T_log_centered = X_T_log - mean_log_psd_T
-        pca_T = PCA(n_components=self.N_COMPONENTS_T, svd_solver='randomized')
+        pca_T = PCA(n_components=self.N_COMPONENTS_T, svd_solver="randomized")
         pca_T.fit(X_T_log_centered)
         print(f"T PCA explained variance ratio: {pca_T.explained_variance_ratio_}")
 
@@ -601,7 +598,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
                     real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
                     masked_map = real_map * noise_mask
                     fft_2d = np.fft.fft2(masked_map)
-                    psd_2d = np.abs(fft_2d)**2 / effective_area
+                    psd_2d = np.abs(fft_2d) ** 2 / effective_area
                     all_psds_QU_flat_linear.append(psd_2d.flatten())
 
         X_QU_linear = np.array(all_psds_QU_flat_linear)
@@ -609,7 +606,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         print("Performing PCA on Q,U log-transformed PSDs...")
         mean_log_psd_QU = np.mean(X_QU_log, axis=0)
         X_QU_log_centered = X_QU_log - mean_log_psd_QU
-        pca_QU = PCA(n_components=self.N_COMPONENTS_QU, svd_solver='randomized')
+        pca_QU = PCA(n_components=self.N_COMPONENTS_QU, svd_solver="randomized")
         pca_QU.fit(X_QU_log_centered)
         print(f"Q,U PCA explained variance ratio: {pca_QU.explained_variance_ratio_}")
 

@@ -6,6 +6,7 @@ Contains helper functions for data processing, apodization, and coordinate trans
 
 import os
 import re
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,12 +16,13 @@ from scipy.special import j0  # pylint: disable=no-name-in-module
 def parse_declination(source_id):
     """Parses the declination in degrees from a source ID string."""
     # Regex to find negative declination in format DDMM.M
-    match = re.search(r'-(\d{2})(\d{2}\.\d)', str(source_id))
+    match = re.search(r"-(\d{2})(\d{2}\.\d)", str(source_id))
     if match:
         deg = float(match.group(1))
         arcmin = float(match.group(2))
         return -(deg + arcmin / 60.0)
-    return None # Return None if pattern not found
+    return None  # Return None if pattern not found
+
 
 def predict_nyquist_kx(declination_deg):
     """Predicts the k_x of the TOD Nyquist frequency feature."""
@@ -30,10 +32,10 @@ def predict_nyquist_kx(declination_deg):
     scan_speed_az_deg_s = 1.0  # Given scan speed on the bearing
     tod_sampling_hz = 20e6 / 2**17  # ~152.59 Hz
     nyquist_hz = tod_sampling_hz / 2.0
-    
+
     # Effective scan speed on the sky depends on declination
     on_sky_scan_speed_deg_s = scan_speed_az_deg_s * np.cos(np.deg2rad(declination_deg))
-    
+
     # Avoid division by zero for sources near the pole
     if on_sky_scan_speed_deg_s < 1e-6:
         return np.inf
@@ -41,10 +43,11 @@ def predict_nyquist_kx(declination_deg):
     # Convert temporal frequency (Hz) to spatial frequency (cycles/deg)
     return nyquist_hz / on_sky_scan_speed_deg_s
 
+
 def calculate_tod_nyquist_kx_mask(source_id, map_shape, config):
     """
     Calculates a Fourier-space mask to exclude modes above 0.85 * TOD Nyquist in kx.
-    
+
     Returns a boolean mask that is True for modes that should be *included*.
     """
     ny, nx = map_shape
@@ -69,6 +72,7 @@ def calculate_tod_nyquist_kx_mask(source_id, map_shape, config):
 
     # Expand to a 2D mask (same mask for all ky)
     return np.tile(kx_mask_1d, (ny, 1))
+
 
 def make_apodization_mask(map_shape, width):
     """

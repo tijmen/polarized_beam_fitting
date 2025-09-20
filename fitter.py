@@ -317,10 +317,10 @@ class PolarizedBeamFitter:
         kx_masks = []
         for sid in source_ids:
             kx_masks.append(calculate_tod_nyquist_kx_mask(sid, map_shape, self.config))
-        kx_masks_numpy = np.stack(kx_masks) # Shape: (n_src, ny, nx)
+        kx_masks_numpy = np.stack(kx_masks)  # Shape: (n_src, ny, nx)
 
         # Check if original PSD is global or per-source
-        is_global_psd = noise_psd.ndim == 4 # Shape (ny, nx, n_bands, 3)
+        is_global_psd = noise_psd.ndim == 4  # Shape (ny, nx, n_bands, 3)
 
         if is_global_psd:
             # Broadcast global PSD to per-source shape
@@ -566,6 +566,7 @@ class PolarizedBeamFitter:
         obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
 
         if self.config.chi2_method == "fourier":
+
             def chi2_fn(y, x, f, d, n):
                 return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, n)
 
@@ -574,9 +575,10 @@ class PolarizedBeamFitter:
                 params_phys["sources"]["xoff"],
                 params_phys["sources"]["flux"],
                 self.state.maps_fft_jax,
-                self.state.noise_psd_jax, # per-source PSD
+                self.state.noise_psd_jax,  # per-source PSD
             )
         else:
+
             def chi2_fn(y, x, f, d, w):
                 return obj_builder._chi2_real_single(params_phys["beams"], y, x, f, d, w)
 

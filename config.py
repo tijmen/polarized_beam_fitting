@@ -22,8 +22,8 @@ class BeamFittingConfig:
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
-        #"/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
-        #"/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3", # these targeted sources are sus
+        # "/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
+        # "/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3", # these targeted sources are sus
     ]
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
