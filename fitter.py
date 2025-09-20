@@ -80,13 +80,7 @@ class ObjectiveFunctions:
 
     def _build_fourier_objective(self):
         """Build Fourier-space objective."""
-        # Check if we're using per-source PSDs
-        if self.config.noise_psd_method == "pink_noise":
-            # For per-source PSDs, vmap over noise_psd as well (axis 0)
-            vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
-        else:
-            # For global PSDs, don't vmap over noise_psd (None)
-            vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, None))
+        vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
 
         def objective(params_logit, data, extra_args=None):
             maps_fft, noise_psd = data
@@ -137,10 +131,7 @@ class ObjectiveFunctions:
         model_apod = model * self.state.apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
         residual_fft = data_fft - model_fft
-
-        # Full covariance not yet supported in this refactored version
-        # Add 1e-30 to avoid division by zero
-        chi2 = (jnp.abs(residual_fft) ** 2) / (noise_psd + 1e-30)
+        chi2 = (jnp.abs(residual_fft) ** 2) / noise_psd
         return jnp.sum(jnp.mean(chi2, axis=(0, 1)))
 
     def _build_model(self, beam_params_list, yoff, xoff, flux):
@@ -290,17 +281,62 @@ class PolarizedBeamFitter:
         """Setup data for Fourier-space analysis."""
         self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
 
-        # Calculate noise PSD
+        # Calculate original noise PSD
         psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
-        noise_psd = psd_calc.calculate_noise_psd(maps)
-        self.state.noise_psd_jax = jnp.asarray(noise_psd, dtype=self.config.dtype_jax_real)
+        original_noise_psd = psd_calc.calculate_noise_psd(maps)
 
+        # Apply the Nyquist mask to the PSD ---
+        modified_noise_psd = self._apply_nyquist_mask_to_psd(original_noise_psd, self.state.source_ids)
+
+        self.state.noise_psd_jax = jnp.asarray(modified_noise_psd, dtype=self.config.dtype_jax_real)
+
+        # The objective data is now simpler
         self.objective_data = (self.state.maps_fft_jax, self.state.noise_psd_jax)
 
     def _setup_real_space_data(self, weights):
         """Setup data for real-space analysis."""
         self.state.weights_jax = jnp.asarray(weights, dtype=self.config.dtype_jax_real)
         self.objective_data = (self.state.maps_jax, self.state.weights_jax)
+
+    def _apply_nyquist_mask_to_psd(self, noise_psd, source_ids):
+        """
+        Applies the TOD Nyquist kx mask to the noise PSD.
+
+        This modifies the noise PSD by setting values for kx modes above the
+        0.85 * Nyquist threshold to infinity for each source. This effectively
+        removes them from the chi-squared calculation.
+
+        Returns a per-source noise PSD array.
+        """
+        print("Applying source-specific TOD Nyquist masks to noise PSD...")
+        from .utils import calculate_tod_nyquist_kx_mask
+
+        map_shape = (self.config.map_size_pix, self.config.map_size_pix)
+
+        # Calculate boolean masks (True = keep)
+        kx_masks = []
+        for sid in source_ids:
+            kx_masks.append(calculate_tod_nyquist_kx_mask(sid, map_shape, self.config))
+        kx_masks_numpy = np.stack(kx_masks) # Shape: (n_src, ny, nx)
+
+        # Check if original PSD is global or per-source
+        is_global_psd = noise_psd.ndim == 4 # Shape (ny, nx, n_bands, 3)
+
+        if is_global_psd:
+            # Broadcast global PSD to per-source shape
+            n_src = len(source_ids)
+            noise_psd_per_source = np.broadcast_to(noise_psd, (n_src,) + noise_psd.shape)
+        else:
+            noise_psd_per_source = noise_psd
+
+        # Apply mask using np.where. We need to broadcast the mask shape.
+        # kx_masks_numpy: (n_src, ny, nx) -> (n_src, ny, nx, 1, 1)
+        # noise_psd_per_source: (n_src, ny, nx, n_bands, 3)
+        mask_broadcast = kx_masks_numpy[:, :, :, np.newaxis, np.newaxis]
+
+        modified_psd = np.where(mask_broadcast, noise_psd_per_source, np.inf)
+
+        return modified_psd
 
     def _initialize_parameters(self) -> Dict:
         """Initialize fitting parameters."""
@@ -530,31 +566,17 @@ class PolarizedBeamFitter:
         obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
 
         if self.config.chi2_method == "fourier":
-            if self.config.noise_psd_method == "pink_noise":
-                # For per-source PSDs, include noise_psd in the vmap
-                def chi2_fn(y, x, f, d, n):
-                    return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, n)
+            def chi2_fn(y, x, f, d, n):
+                return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, n)
 
-                chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0, 0))(
-                    params_phys["sources"]["yoff"],
-                    params_phys["sources"]["xoff"],
-                    params_phys["sources"]["flux"],
-                    self.state.maps_fft_jax,
-                    self.state.noise_psd_jax,
-                )
-            else:
-                # For global PSDs, use the same PSD for all sources
-                def chi2_fn(y, x, f, d):
-                    return obj_builder._chi2_fourier_single(params_phys["beams"], y, x, f, d, self.state.noise_psd_jax)
-
-                chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0))(
-                    params_phys["sources"]["yoff"],
-                    params_phys["sources"]["xoff"],
-                    params_phys["sources"]["flux"],
-                    self.state.maps_fft_jax,
-                )
+            chi2s = jax.vmap(chi2_fn, in_axes=(0, 0, 0, 0, 0))(
+                params_phys["sources"]["yoff"],
+                params_phys["sources"]["xoff"],
+                params_phys["sources"]["flux"],
+                self.state.maps_fft_jax,
+                self.state.noise_psd_jax, # per-source PSD
+            )
         else:
-
             def chi2_fn(y, x, f, d, w):
                 return obj_builder._chi2_real_single(params_phys["beams"], y, x, f, d, w)
 

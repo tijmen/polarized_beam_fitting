@@ -9,7 +9,7 @@ differences is whether the noise PSD is fully diagonal (each ky,kx,band,stokes
 is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
-Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pink_noise] are fully diagonal,
+Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pca_psd, pca_psd_separate_tqu] are fully diagonal,
 and [multiband_covariance] is only diagonal in Fourier space.
 """
 
@@ -445,10 +445,10 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         return covariance_psd
 
 
-class PinkNoisePSDCalculator(NoisePSDCalculator):
+class PcaPsdCalculator(NoisePSDCalculator):
     """
 
-    PinkNoisePSDCalculator is a per-source PSD calculator holding whatever PSD I'm currently developing. It is the default.
+    PcaPsdCalculator is a per-source PSD calculator holding whatever PSD I'm currently developing. It is the default.
 
     Calculates noise PSDs using a data-driven, log-space PCA model. Each component is a PSD. Log space is good
     because the individual PSDs have chi-squared-distributed noise with two degrees of freedom. I believe the
@@ -519,6 +519,118 @@ class PinkNoisePSDCalculator(NoisePSDCalculator):
         return per_source_psd_array
 
 
+class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
+    """
+    PcaPsdSeparateTQUCalculator performs separate PCA analyses: one on temperature (T) only,
+    and another on the combination of polarization (Q,U) maps.
+
+    This approach allows for different noise structures between temperature and polarization
+    measurements, which can be important for cosmic microwave background observations.
+    """
+    N_COMPONENTS_T = 4    # Number of PCA components for temperature
+    N_COMPONENTS_QU = 4   # Number of PCA components for Q,U polarization
+
+    def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
+        """
+        Calculates noise PSDs using separate log-space PCA models for T and for (Q,U).
+
+        Parameters:
+        -----------
+        maps_numpy : np.ndarray
+            Array with shape (n_src, ny, nx, n_bands, n_stokes) containing the maps.
+
+        Returns:
+        --------
+        np.ndarray
+            Array of the same shape containing the reconstructed 2D noise PSDs.
+        """
+        print(f"Calculating noise PSDs with separate PCA models (T: {self.N_COMPONENTS_T}, Q,U: {self.N_COMPONENTS_QU} components)...")
+        n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
+        map_shape = (ny, nx)
+
+        noise_mask = make_apod_mask_center_excised(
+            map_shape,
+            self.config.apodization_width_pix,
+            self.config.noise_hole_radius_arcmin,
+            self.config.reso_arcmin,
+        )
+        effective_area = np.sum(noise_mask**2)
+
+        # Initialize output array
+        per_source_psd_array = np.zeros_like(maps_numpy, dtype=self.config.dtype_np_real)
+
+        # Process T maps (stokes_idx = 0) separately
+        print("Collating T (temperature) map PSDs...")
+        all_psds_T_flat_linear = []
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                real_map = maps_numpy[i, :, :, band_idx, 0]  # T component
+                masked_map = real_map * noise_mask
+                fft_2d = np.fft.fft2(masked_map)
+                psd_2d = np.abs(fft_2d)**2 / effective_area
+                all_psds_T_flat_linear.append(psd_2d.flatten())
+
+        X_T_linear = np.array(all_psds_T_flat_linear)
+        X_T_log = np.log(X_T_linear)
+        print("Performing PCA on T log-transformed PSDs...")
+        mean_log_psd_T = np.mean(X_T_log, axis=0)
+        X_T_log_centered = X_T_log - mean_log_psd_T
+        pca_T = PCA(n_components=self.N_COMPONENTS_T, svd_solver='randomized')
+        pca_T.fit(X_T_log_centered)
+        print(f"T PCA explained variance ratio: {pca_T.explained_variance_ratio_}")
+
+        print("Reconstructing denoised T PSDs...")
+        coeffs_T = pca_T.transform(X_T_log_centered)
+        X_T_reconstructed_log_centered = pca_T.inverse_transform(coeffs_T)
+        X_T_reconstructed_log = X_T_reconstructed_log_centered + mean_log_psd_T
+        X_T_reconstructed_linear = np.exp(X_T_reconstructed_log)
+
+        # Fill T component in output array
+        map_idx = 0
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                per_source_psd_array[i, :, :, band_idx, 0] = X_T_reconstructed_linear[map_idx].reshape(map_shape)
+                map_idx += 1
+
+        # Process Q,U maps (stokes_idx = 1,2) together
+        print("Collating Q,U (polarization) map PSDs...")
+        all_psds_QU_flat_linear = []
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                for stokes_idx in [1, 2]:  # Q and U components
+                    real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
+                    masked_map = real_map * noise_mask
+                    fft_2d = np.fft.fft2(masked_map)
+                    psd_2d = np.abs(fft_2d)**2 / effective_area
+                    all_psds_QU_flat_linear.append(psd_2d.flatten())
+
+        X_QU_linear = np.array(all_psds_QU_flat_linear)
+        X_QU_log = np.log(X_QU_linear)
+        print("Performing PCA on Q,U log-transformed PSDs...")
+        mean_log_psd_QU = np.mean(X_QU_log, axis=0)
+        X_QU_log_centered = X_QU_log - mean_log_psd_QU
+        pca_QU = PCA(n_components=self.N_COMPONENTS_QU, svd_solver='randomized')
+        pca_QU.fit(X_QU_log_centered)
+        print(f"Q,U PCA explained variance ratio: {pca_QU.explained_variance_ratio_}")
+
+        print("Reconstructing denoised Q,U PSDs...")
+        coeffs_QU = pca_QU.transform(X_QU_log_centered)
+        X_QU_reconstructed_log_centered = pca_QU.inverse_transform(coeffs_QU)
+        X_QU_reconstructed_log = X_QU_reconstructed_log_centered + mean_log_psd_QU
+        X_QU_reconstructed_linear = np.exp(X_QU_reconstructed_log)
+
+        # Fill Q,U components in output array
+        map_idx = 0
+        for i in range(n_src):
+            for band_idx in range(n_bands):
+                for stokes_idx in [1, 2]:  # Q and U components
+                    per_source_psd_array[i, :, :, band_idx, stokes_idx] = X_QU_reconstructed_linear[map_idx].reshape(map_shape)
+                    map_idx += 1
+
+        print("Separate T and Q,U PCA-based PSD calculation complete.")
+        return per_source_psd_array
+
+
 class WhiteNoiseCalculator(NoisePSDCalculator):
     """
     Calculate simple white noise PSD with constant values.
@@ -581,8 +693,10 @@ def create_noise_psd_calculator(config, map_shape):
         return EnsembleAsdMeanCalculator(config, map_shape)
     elif config.noise_psd_method == "multiband_covariance":
         return MultiBandCovarianceCalculator(config, map_shape)
-    elif config.noise_psd_method == "pink_noise":
-        return PinkNoisePSDCalculator(config, map_shape)
+    elif config.noise_psd_method == "pca_psd":
+        return PcaPsdCalculator(config, map_shape)
+    elif config.noise_psd_method == "pca_psd_separate_tqu":
+        return PcaPsdSeparateTQUCalculator(config, map_shape)
     elif config.noise_psd_method == "white_noise":
         return WhiteNoiseCalculator(config, map_shape)
     else:

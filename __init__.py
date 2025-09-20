@@ -23,6 +23,10 @@ from .noise_psd import (
     EnsembleAsdMeanCalculator,
     KxAveragedCalculator,
     NoisePSDCalculator,
+    PcaPsdCalculator,
+    PcaPsdSeparateTQUCalculator,
+    MultiBandCovarianceCalculator,
+    WhiteNoiseCalculator,
     create_noise_psd_calculator,
 )
 from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
@@ -71,4 +75,8 @@ __all__ = [
     "create_noise_psd_calculator",
     "create_nuts_plots",
     "create_mclmc_plots",
+    "PcaPsdCalculator",
+    "PcaPsdSeparateTQUCalculator",
+    "MultiBandCovarianceCalculator",
+    "WhiteNoiseCalculator",
 ]

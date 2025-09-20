@@ -22,8 +22,8 @@ class BeamFittingConfig:
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
         "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
-        "/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
-        "/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3",
+        #"/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
+        #"/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3", # these targeted sources are sus
     ]
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
@@ -77,8 +77,11 @@ class BeamFittingConfig:
     #  'kx_averaged': Calculate individual noise PSDs using k_x averaging with max heuristic
     #  'white_noise': Simple white noise assumption with constant PSD values
     #  'ensemble_asd_mean': Average amplitude spectral densities across sources then convert to PSD
+    #  'pca_psd': PCA-based noise modeling on all Stokes parameters together
+    #  'pca_psd_separate_tqu': Separate PCA models for T and for (Q,U) polarization
+    #  'multiband_covariance': Multi-band covariance matrix (band-band and stokes-stokes correlations)
     # This is ignored if chi2_method = "real_space"
-    noise_psd_method = "white_noise"
+    noise_psd_method = "pca_psd_separate_tqu"
 
     # Data-driven Noise PSD parameters (used when noise_psd_method = 'data_driven')
     # Calculates PSD directly from regions of the map away from the source
@@ -90,7 +93,6 @@ class BeamFittingConfig:
     n_steps = 8000
 
     # Bootstrap resampling parameters
-    enable_bootstrap = False  # Enable/disable bootstrap uncertainty estimation
     n_bootstrap_samples = 100  # Number of bootstrap iterations
     bootstrap_seed = 42  # Random seed for reproducibility (None for random)
     bootstrap_confidence_levels = [68, 95]  # Confidence levels to report (percentiles)

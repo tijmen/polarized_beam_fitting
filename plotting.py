@@ -710,7 +710,7 @@ class BeamPlotter:
             d_map, m_map, r_map = stokes_data[stokes]
             asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
 
-            noise_psd = np.array(self.base_fitter.state.noise_psd_jax)[:, :, band_idx, i]
+            noise_psd = np.array(self.base_fitter.state.noise_psd_jax)[source_idx, :, :, band_idx, i]
             noise_asd = np.sqrt(noise_psd)
             asd_ratio = asd_residual / noise_asd
 
