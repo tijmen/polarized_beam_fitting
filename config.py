@@ -83,6 +83,8 @@ class BeamFittingConfig:
     # This is ignored if chi2_method = "real_space"
     noise_psd_method = "pca_psd_separate_tqu"
 
+    n_pca_components = 4
+
     # Data-driven Noise PSD parameters (used when noise_psd_method = 'data_driven')
     # Calculates PSD directly from regions of the map away from the source
     # We start by creating a modified apodization mask with a configurable
@@ -170,8 +172,8 @@ class BeamFittingConfig:
     # MCMC controls
     mcmc_num_warmup = 1000
     mcmc_num_samples = 1000
-    mcmc_target_accept = 0.8
-    mcmc_max_tree_depth = 10  # increase to 12–14 if many divergences
+    mcmc_target_accept = 0.8  # For NUTS, only
+    mcmc_max_tree_depth = 10  # For NUTS, only
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)

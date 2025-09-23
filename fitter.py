@@ -380,9 +380,6 @@ class PolarizedBeamFitter:
         else:
             raise ValueError(f"Unknown solver: {self.config.solver}")
 
-        # Calculate and report final chi2
-        self._report_final_chi2()
-
         return self.params_physical
 
     def _run_bfgs(self):
@@ -412,7 +409,7 @@ class PolarizedBeamFitter:
         opt_state = optimizer.init(self.params_logit)
 
         # Initialize convergence tracking
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
+        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1, "best_params": None}
         _, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
         initial_grad_norm = optax.global_norm(initial_grads)
 
@@ -420,8 +417,10 @@ class PolarizedBeamFitter:
             loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
             grad_norm = optax.global_norm(grads)
 
-            # Check convergence using the new unified criterion
-            converged, message, best_loss = check_convergence(loss, grad_norm, i, self.config, convergence_state, initial_grad_norm)
+            # Check convergence and track best parameters
+            converged, message, best_loss, best_params = check_convergence(
+                loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, self.params_logit
+            )
 
             if converged:
                 print(f"Converged at step {i}: {message}")
@@ -434,14 +433,18 @@ class PolarizedBeamFitter:
             if i % 10 == 0:  # Print every 10 steps
                 print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2f}")
 
+        # Use best parameters if available, otherwise use current parameters
+        if convergence_state["best_params"] is not None:
+            self.params_logit = convergence_state["best_params"]
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
     def sample_with_mclmc(self) -> Dict:
         """
-        Runs MCMC sampling using the dynamically-adjusted MCLMC algorithm.
+        Runs MCMC sampling using the MCLMC algorithm with a whitening transform.
 
-        This implementation uses a pmapped manual warmup loop with dual-averaging
-        step size adaptation for each chain.
+        This implementation uses a pmapped warmup with an energy variance criterion
+        for tuning L, step size, and the inverse mass matrix in the whitened space,
+        before running the sampling phase.
         """
         devices = jax.devices()
         num_devices = len(devices)
@@ -451,95 +454,82 @@ class PolarizedBeamFitter:
         def logdensity_fn(params_white, objective_data):
             """
             Computes the unnormalized log posterior density in the whitened space.
-
-            The function includes a failsafe to return -inf for non-finite values
-            of chi-squared, preventing numerical errors from halting the sampler.
+            Includes a failsafe to return -inf for non-finite chi-squared values.
             """
             params_phys = self.from_whitened(params_white)
             params_logit = params_to_logit(params_phys, self.config)
             chi2 = self.objective_function(params_logit, objective_data)
 
-            # Failsafe for numerical instability
             log_prob = -0.5 * self.config.chi2_normalization * chi2 + self.log_det_jacobian
             return jnp.where(jnp.isfinite(chi2), log_prob, -jnp.inf)
 
-        # Generate physically-jittered initial positions for each chain
+        # Generate physically-jittered initial positions and transform to whitened space
         rng_key = jax.random.PRNGKey(0)
         print(f"Generating {num_devices} physically-jittered initial positions...")
         jittered_params_logit = self._make_jittered_inits(rng_key, num_devices)
         jittered_params_phys = jax.vmap(params_from_logit, in_axes=(0, None))(jittered_params_logit, self.config)
-        init_positions = jax.vmap(self.to_whitened)(jittered_params_phys)
+        init_positions_white = jax.vmap(self.to_whitened)(jittered_params_phys)
 
-        # Replicate data for each device to be used in pmap
+        # Replicate data for each device
         replicated_data = jax.tree.map(lambda x: jnp.array([x] * num_devices), self.objective_data)
 
         @jax.pmap
         def run_chain(initial_position, rng_key, data):
             """
-            Performs warmup and sampling for a single chain on a single device.
+            Tunes (L, step_size, inverse_mass_matrix) and samples on a single device.
             """
-
             def sampler_logdensity(p):
                 return logdensity_fn(p, data)
 
-            # -- WARMUP: Dual-averaging adaptation for step size --
-            warmup_rng, sample_rng = jax.random.split(rng_key)
-            target_accept = 0.9
-            da_init, da_update, _ = blackjax.dual_averaging.dual_averaging()
-            default_step_size = 5.0
-            adapt_state = da_init(default_step_size)  # Initial step size
-            kernel = blackjax.mcmc.adjusted_mclmc_dynamic.build_kernel(
-                integration_steps_fn=lambda _: 10  # Fixed integration steps during warmup
+            tune_key, sample_key = jax.random.split(rng_key)
+
+            state = blackjax.mcmc.mclmc.init(initial_position, sampler_logdensity, tune_key)
+
+            def mclmc_kernel_factory(inverse_mass_matrix):
+                return blackjax.mcmc.mclmc.build_kernel(
+                    logdensity_fn=sampler_logdensity,
+                    integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
+                    inverse_mass_matrix=inverse_mass_matrix,
+                )
+
+            # Tune with energy variance criterion in the whitened space
+            (tuned_state, tuned_params, _) = blackjax.adaptation.mclmc_adaptation.mclmc_find_L_and_step_size(
+                mclmc_kernel=mclmc_kernel_factory,
+                num_steps=self.config.mcmc_num_warmup,
+                state=state,
+                rng_key=tune_key,
+                diagonal_preconditioning=True,
+                desired_energy_var=1e-3,
             )
 
-            def warmup_step(carry, rng_key):
-                state, adapt_state = carry
-                step_size = jnp.exp(adapt_state.log_x)
-
-                next_state, info = kernel(rng_key, state, sampler_logdensity, step_size, L_proposal_factor=0.1)
-
-                # Robustly calculate acceptance rate to update step size
-                error_signal = target_accept - jnp.nan_to_num(info.acceptance_rate)
-                new_adapt_state = da_update(adapt_state, error_signal)
-
-                return (next_state, new_adapt_state), None
-
-            initial_state = blackjax.mcmc.adjusted_mclmc_dynamic.init(initial_position, sampler_logdensity, warmup_rng)
-
-            (final_state, final_adapt_state), _ = jax.lax.scan(
-                warmup_step, (initial_state, adapt_state), jax.random.split(warmup_rng, self.config.mcmc_num_warmup)
+            # Build the tuned kernel
+            kernel = blackjax.mcmc.mclmc.build_kernel(
+                logdensity_fn=sampler_logdensity,
+                integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
+                inverse_mass_matrix=tuned_params.inverse_mass_matrix,
             )
 
-            adapted_step_size = jnp.exp(final_adapt_state.log_x_avg)
-
-            # Fall back to default step size if adapted value is outside reasonable bounds
-            adapted_step_size = jnp.where((adapted_step_size < 0.1) | (adapted_step_size > 100.0), default_step_size, adapted_step_size)
-
-            # -- SAMPLING --
             def sample_step(state, key):
-                # just re-use the fixed integration step kernel, but alternatively could use e.g.
-                #  dynamic_kernel = blackjax.mcmc.adjusted_mclmc_dynamic.build_kernel(integration_steps_fn=lambda key: jax.random.randint(key, (), 10, 25))
-                next_state, info = kernel(key, state, sampler_logdensity, adapted_step_size, L_proposal_factor=0.1)
-                return next_state, (next_state.position, info.acceptance_rate)
+                new_state, _ = kernel(rng_key=key, state=state, L=tuned_params.L, step_size=tuned_params.step_size)
+                return new_state, new_state.position
 
-            _, (samples, acceptance_rates) = jax.lax.scan(
-                sample_step, final_state, jax.random.split(sample_rng, self.config.mcmc_num_samples)
+            _, samples = jax.lax.scan(
+                sample_step,
+                tuned_state,
+                jax.random.split(sample_key, self.config.mcmc_num_samples),
             )
 
-            return samples, acceptance_rates, adapted_step_size
+            return samples, tuned_params.step_size
 
         # Distribute keys to devices and run the pmapped function
         keys = jax.random.split(rng_key, num_devices)
         print(f"Starting warmup and sampling with {num_devices} chains...")
-        samples_pmap, acceptance_pmap, step_size_pmap = run_chain(init_positions, keys, replicated_data)
+        samples_pmap, step_size_pmap = run_chain(init_positions_white, keys, replicated_data)
 
-        mean_acceptance = jnp.mean(acceptance_pmap)
-        mean_step_size = jnp.mean(step_size_pmap)
         print("\nSampling complete.")
-        print(f"  Mean acceptance rate: {mean_acceptance:.3f}")
-        print(f"  Mean adapted step size: {mean_step_size:.4f}")
+        print(f"Adapted step sizes per chain: {step_size_pmap}")
 
-        # Combine results from all chains
+        # Combine results from all chains and transform back to physical space
         samples_white = samples_pmap.reshape(-1, samples_pmap.shape[-1])
         samples_phys = jax.vmap(self.from_whitened)(samples_white)
         summary = self._calculate_summary_stats(samples_phys)
@@ -550,16 +540,8 @@ class PolarizedBeamFitter:
             "summary": summary,
             "adapted_params": {
                 "step_size_per_chain": np.array(step_size_pmap),
-                "mean_acceptance_rate": float(mean_acceptance),
             },
         }
-
-    def _report_final_chi2(self):
-        """Calculate and report final chi2 values."""
-        chi2s = self.calculate_individual_chi2s(self.params_physical)
-        self._latest_chi2s = np.array(chi2s)
-        print(f"Final total chi2: {np.sum(self._latest_chi2s):.2f}")
-        print(f"Mean chi2 per source: {np.mean(self._latest_chi2s):.2f}")
 
     def calculate_individual_chi2s(self, params_phys: Dict) -> jnp.ndarray:
         """Calculate chi2 for each source individually."""

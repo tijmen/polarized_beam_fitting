@@ -535,7 +535,7 @@ class BeamModelBetaPol(BeamModelBase):
         try:
             beam_data = np.load(data_path)
         except FileNotFoundError:
-            raise FileNotFoundError(f"Could not find the betapol data file at {data_path}. Run create_betapol_data.py to generate it.")
+            raise FileNotFoundError(f"Could not find the betapol data file at {data_path}.")
 
         # Check if the requested band is available
         bt_key = f"BT_r_norm_{self.band_GHz}"
@@ -623,7 +623,7 @@ class BeamModelBetaTest(BeamModelBase):
         try:
             beam_data = np.load(data_path)
         except FileNotFoundError:
-            raise FileNotFoundError(f"Could not find the betapol data file at {data_path}. Run create_betapol_data.py to generate it.")
+            raise FileNotFoundError(f"Could not find the betapol data file at {data_path}.")
 
         # Check if the requested band is available
         bt_key = f"BT_r_norm_{self.band_GHz}"

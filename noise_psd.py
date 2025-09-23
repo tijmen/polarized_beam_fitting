@@ -450,8 +450,6 @@ class PcaPsdCalculator(NoisePSDCalculator):
     log of that will have Gaussian noise.
     """
 
-    N_COMPONENTS = 4
-
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
         """
         Calculates noise PSDs using a log-space PCA model built from the data.
@@ -466,7 +464,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
         np.ndarray
             Array of the same shape containing the reconstructed 2D noise PSDs.
         """
-        print(f"Calculating noise PSDs with log-space PCA model ({self.N_COMPONENTS} components)...")
+        print(f"Calculating noise PSDs with log-space PCA model ({self.config.n_pca_components} components)...")
         n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
         map_shape = (ny, nx)
 
@@ -493,7 +491,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
         print("Performing PCA on log-transformed PSDs...")
         mean_log_psd = np.mean(X_log, axis=0)
         X_log_centered = X_log - mean_log_psd
-        pca = PCA(n_components=self.N_COMPONENTS, svd_solver="randomized")
+        pca = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
         pca.fit(X_log_centered)
         print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
 
@@ -524,9 +522,6 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
     measurements, which can be important for cosmic microwave background observations.
     """
 
-    N_COMPONENTS_T = 4  # Number of PCA components for temperature
-    N_COMPONENTS_QU = 4  # Number of PCA components for Q,U polarization
-
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
         """
         Calculates noise PSDs using separate log-space PCA models for T and for (Q,U).
@@ -541,7 +536,9 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         np.ndarray
             Array of the same shape containing the reconstructed 2D noise PSDs.
         """
-        print(f"Calculating noise PSDs with separate PCA models (T: {self.N_COMPONENTS_T}, Q,U: {self.N_COMPONENTS_QU} components)...")
+        print(
+            f"Calculating noise PSDs with separate PCA models (T: {self.config.n_pca_components}, Q,U: {self.config.n_pca_components} components)..."
+        )
         n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
         map_shape = (ny, nx)
 
@@ -572,7 +569,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         print("Performing PCA on T log-transformed PSDs...")
         mean_log_psd_T = np.mean(X_T_log, axis=0)
         X_T_log_centered = X_T_log - mean_log_psd_T
-        pca_T = PCA(n_components=self.N_COMPONENTS_T, svd_solver="randomized")
+        pca_T = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
         pca_T.fit(X_T_log_centered)
         print(f"T PCA explained variance ratio: {pca_T.explained_variance_ratio_}")
 
@@ -606,7 +603,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         print("Performing PCA on Q,U log-transformed PSDs...")
         mean_log_psd_QU = np.mean(X_QU_log, axis=0)
         X_QU_log_centered = X_QU_log - mean_log_psd_QU
-        pca_QU = PCA(n_components=self.N_COMPONENTS_QU, svd_solver="randomized")
+        pca_QU = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
         pca_QU.fit(X_QU_log_centered)
         print(f"Q,U PCA explained variance ratio: {pca_QU.explained_variance_ratio_}")
 

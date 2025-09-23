@@ -4,7 +4,6 @@ Utility functions for polarized beam fitting.
 Contains helper functions for data processing, apodization, and coordinate transformations.
 """
 
-import os
 import re
 
 import jax
@@ -337,129 +336,6 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
     return B_r
 
 
-def load_fieldlevel_data():
-    """
-    Load field-level beam data from the data files.
-
-    Returns:
-    --------
-    dict
-        Dictionary containing ell and beam data for all bands
-    """
-    # Get the path to the fieldlevelbeam data directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(script_dir, "..", "fieldlevelbeam", "data")
-
-    main_beam_file = os.path.join(data_dir, "B_ell_main_beam.npz")
-    rc4_beam_file = os.path.join(data_dir, "B_ell_rc4.npz")
-
-    if not os.path.exists(main_beam_file):
-        raise FileNotFoundError(f"Main beam file not found: {main_beam_file}")
-    if not os.path.exists(rc4_beam_file):
-        raise FileNotFoundError(f"RC4 beam file not found: {rc4_beam_file}")
-
-    print("Loading field-level beam data...")
-    print(f"  Main beam: {main_beam_file}")
-    print(f"  RC4 beam: {rc4_beam_file}")
-
-    # Load main beam data (Bmain)
-    main_data = np.load(main_beam_file)
-    ell = main_data["ell"]
-
-    # Load RC4 beam data (BT)
-    rc4_data = np.load(rc4_beam_file)
-
-    # Verify ell arrays match
-    if not np.array_equal(ell, rc4_data["ell"]):
-        raise ValueError("ell arrays don't match between main and RC4 beam files")
-
-    data = {"ell": ell, "bands": ["90", "150", "220"], "Bmain": {}, "BT": {}}
-
-    # Extract beam data for each band
-    for band in data["bands"]:
-        # Main beam uses format B_ell_{band}
-        main_key = f"B_ell_{band}"
-        if main_key in main_data:
-            data["Bmain"][band] = main_data[main_key]
-        else:
-            raise KeyError(f"Main beam data for {band} GHz not found (key: {main_key})")
-
-        # RC4 beam uses band as key directly
-        if band in rc4_data:
-            data["BT"][band] = rc4_data[band]
-        else:
-            raise KeyError(f"RC4 beam data for {band} GHz not found (key: {band})")
-
-    print(f"Loaded data for bands: {data['bands']}")
-    print(f"ell range: {ell.min()} to {ell.max()} ({len(ell)} points)")
-
-    return data
-
-
-def create_betapol_data():
-    """
-    Create the betapol.npz file containing real-space beam profiles for all bands.
-    """
-    print("=" * 60)
-    print("Creating betapol.npz from field-level beam data")
-    print("=" * 60)
-
-    # Load field-level data
-    data = load_fieldlevel_data()
-    ell = data["ell"]
-    bands = data["bands"]
-
-    # Define radial grid for real-space profiles
-    # Use a fine grid from 0 to 10 arcmin
-    r_arcmin = np.linspace(0, 10, 1000)
-    print(f"\nReal-space grid: {len(r_arcmin)} points from 0 to {r_arcmin.max()} arcmin")
-
-    # Initialize output arrays
-    output_data = {"r_fine_arcmin": r_arcmin, "bands": bands}
-
-    # Process each band
-    for band in bands:
-        print("\n" + "=" * 40)
-        print(f"Processing {band} GHz")
-        print("=" * 40)
-
-        # Get multipole-space data
-        Bmain_ell = data["Bmain"][band]
-        BT_ell = data["BT"][band]
-
-        print(f"Bmain_ell range: {Bmain_ell.min():.6f} to {Bmain_ell.max():.6f}")
-        print(f"BT_ell range: {BT_ell.min():.6f} to {BT_ell.max():.6f}")
-
-        # Perform Hankel transforms
-        print("\nTransforming Bmain...")
-        Bmain_r = hankel_transform_beam(ell, Bmain_ell, r_arcmin, normalize=True)
-
-        print("\nTransforming BT...")
-        BT_r = hankel_transform_beam(ell, BT_ell, r_arcmin, normalize=True)
-
-        # Store results
-        output_data[f"Bmain_r_norm_{band}"] = Bmain_r
-        output_data[f"BT_r_norm_{band}"] = BT_r
-
-        print(f"\nCompleted {band} GHz:")
-        print(f"  Bmain(r): min={Bmain_r.min():.6f}, max={Bmain_r.max():.6f}")
-        print(f"  BT(r): min={BT_r.min():.6f}, max={BT_r.max():.6f}")
-
-    # Save output file
-    output_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, "betapol.npz")
-
-    print("\n" + "=" * 60)
-    print(f"Saving betapol data to: {output_file}")
-    np.savez(output_file, **output_data)
-
-    print(f"File saved with keys: {list(output_data.keys())}")
-    print(f"File size: {os.path.getsize(output_file) / 1024:.1f} KB")
-
-    return output_file
-
-
 def get_stokes_name(index):
     """
     Get the Stokes parameter name from index.
@@ -731,9 +607,9 @@ def build_whitening_transform(map_params, curvature):
 
 
 # Convergence criteria utilities
-def check_convergence(loss, grad_norm, step, config, convergence_state=None, initial_grad_norm=None):
+def check_convergence(loss, grad_norm, step, config, convergence_state=None, initial_grad_norm=None, current_params=None):
     """
-    Check if convergence criterion is met.
+    Check if convergence criterion is met and optionally track best parameters.
 
     Parameters:
     -----------
@@ -749,22 +625,24 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
         State dictionary for tracking convergence (modified in-place)
     initial_grad_norm : float, optional
         Initial gradient norm (required for relative_gtol)
+    current_params : pytree, optional
+        Current parameters to track alongside best loss
 
     Returns:
     --------
     tuple
-        (converged: bool, message: str, best_loss: float)
+        (converged: bool, message: str, best_loss: float, best_params: pytree or None)
     """
     # Initialize convergence state if not provided
     if convergence_state is None:
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1}
+        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1, "best_params": None}
 
     criterion_type = config.convergence_criterion
 
     if criterion_type == "absolute_gtol":
         converged = grad_norm < config.absolute_gtol
         message = f"gradient norm {grad_norm:.2e} < {config.absolute_gtol:.2e}" if converged else ""
-        return converged, message, convergence_state.get("best_loss", loss)
+        return converged, message, convergence_state.get("best_loss", loss), convergence_state.get("best_params")
 
     elif criterion_type == "relative_gtol":
         if initial_grad_norm is None:
@@ -772,13 +650,15 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
         relative_grad = grad_norm / initial_grad_norm
         converged = relative_grad < config.relative_gtol
         message = f"relative gradient {relative_grad:.2e} < {config.relative_gtol:.2e}" if converged else ""
-        return converged, message, convergence_state.get("best_loss", loss)
+        return converged, message, convergence_state.get("best_loss", loss), convergence_state.get("best_params")
 
     elif criterion_type == "loss_history":
-        # Update best loss if current loss is better
+        # Update best loss and params if current loss is better
         if loss < convergence_state["best_loss"]:
             convergence_state["best_loss"] = loss
             convergence_state["best_step"] = step
+            if current_params is not None:
+                convergence_state["best_params"] = jax.tree.map(lambda x: x, current_params)
 
         # Add current loss to history
         convergence_state["loss_history"].append(loss)
@@ -793,10 +673,10 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
             steps_since_best = step - convergence_state["best_step"]
             converged = steps_since_best >= history_length
             message = f"no improvement for {steps_since_best} steps" if converged else ""
-            return converged, message, convergence_state["best_loss"]
+            return converged, message, convergence_state["best_loss"], convergence_state["best_params"]
 
         # Not enough history yet
-        return False, "", convergence_state["best_loss"]
+        return False, "", convergence_state["best_loss"], convergence_state["best_params"]
 
     else:
         raise ValueError(f"Unknown convergence criterion: {criterion_type}")
