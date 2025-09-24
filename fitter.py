@@ -499,7 +499,7 @@ class PolarizedBeamFitter:
                 state=state,
                 rng_key=tune_key,
                 diagonal_preconditioning=True,
-                desired_energy_var=1e-3,
+                desired_energy_var=0.1,
             )
 
             # Build the tuned kernel

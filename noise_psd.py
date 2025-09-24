@@ -515,16 +515,16 @@ class PcaPsdCalculator(NoisePSDCalculator):
 
 class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
     """
-    PcaPsdSeparateTQUCalculator performs separate PCA analyses: one on temperature (T) only,
-    and another on the combination of polarization (Q,U) maps.
+    PcaPsdSeparateTQUCalculator performs separate PCA analyses for each Stokes parameter:
+    one for temperature (T), one for Q polarization, and one for U polarization.
 
-    This approach allows for different noise structures between temperature and polarization
-    measurements, which can be important for cosmic microwave background observations.
+    This approach allows for different noise structures between temperature and each
+    polarization component, which can be important for cosmic microwave background observations.
     """
 
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
         """
-        Calculates noise PSDs using separate log-space PCA models for T and for (Q,U).
+        Calculates noise PSDs using separate log-space PCA models for T, Q, and U.
 
         Parameters:
         -----------
@@ -537,7 +537,7 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
             Array of the same shape containing the reconstructed 2D noise PSDs.
         """
         print(
-            f"Calculating noise PSDs with separate PCA models (T: {self.config.n_pca_components}, Q,U: {self.config.n_pca_components} components)..."
+            f"Calculating noise PSDs with separate PCA models (T: {self.config.n_pca_components}, Q: {self.config.n_pca_components}, U: {self.config.n_pca_components} components)..."
         )
         n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
         map_shape = (ny, nx)
@@ -553,75 +553,42 @@ class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
         # Initialize output array
         per_source_psd_array = np.zeros_like(maps_numpy, dtype=self.config.dtype_np_real)
 
-        # Process T maps (stokes_idx = 0) separately
-        print("Collating T (temperature) map PSDs...")
-        all_psds_T_flat_linear = []
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                real_map = maps_numpy[i, :, :, band_idx, 0]  # T component
-                masked_map = real_map * noise_mask
-                fft_2d = np.fft.fft2(masked_map)
-                psd_2d = np.abs(fft_2d) ** 2 / effective_area
-                all_psds_T_flat_linear.append(psd_2d.flatten())
-
-        X_T_linear = np.array(all_psds_T_flat_linear)
-        X_T_log = np.log(X_T_linear)
-        print("Performing PCA on T log-transformed PSDs...")
-        mean_log_psd_T = np.mean(X_T_log, axis=0)
-        X_T_log_centered = X_T_log - mean_log_psd_T
-        pca_T = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
-        pca_T.fit(X_T_log_centered)
-        print(f"T PCA explained variance ratio: {pca_T.explained_variance_ratio_}")
-
-        print("Reconstructing denoised T PSDs...")
-        coeffs_T = pca_T.transform(X_T_log_centered)
-        X_T_reconstructed_log_centered = pca_T.inverse_transform(coeffs_T)
-        X_T_reconstructed_log = X_T_reconstructed_log_centered + mean_log_psd_T
-        X_T_reconstructed_linear = np.exp(X_T_reconstructed_log)
-
-        # Fill T component in output array
-        map_idx = 0
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                per_source_psd_array[i, :, :, band_idx, 0] = X_T_reconstructed_linear[map_idx].reshape(map_shape)
-                map_idx += 1
-
-        # Process Q,U maps (stokes_idx = 1,2) together
-        print("Collating Q,U (polarization) map PSDs...")
-        all_psds_QU_flat_linear = []
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                for stokes_idx in [1, 2]:  # Q and U components
+        # Process each Stokes parameter separately (T, Q, U)
+        stokes_names = ["T", "Q", "U"]
+        for stokes_idx, stokes_name in enumerate(stokes_names):
+            print(f"Collating {stokes_name} map PSDs...")
+            all_psds_flat_linear = []
+            for i in range(n_src):
+                for band_idx in range(n_bands):
                     real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
                     masked_map = real_map * noise_mask
                     fft_2d = np.fft.fft2(masked_map)
                     psd_2d = np.abs(fft_2d) ** 2 / effective_area
-                    all_psds_QU_flat_linear.append(psd_2d.flatten())
+                    all_psds_flat_linear.append(psd_2d.flatten())
 
-        X_QU_linear = np.array(all_psds_QU_flat_linear)
-        X_QU_log = np.log(X_QU_linear)
-        print("Performing PCA on Q,U log-transformed PSDs...")
-        mean_log_psd_QU = np.mean(X_QU_log, axis=0)
-        X_QU_log_centered = X_QU_log - mean_log_psd_QU
-        pca_QU = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
-        pca_QU.fit(X_QU_log_centered)
-        print(f"Q,U PCA explained variance ratio: {pca_QU.explained_variance_ratio_}")
+            X_linear = np.array(all_psds_flat_linear)
+            X_log = np.log(X_linear)
+            print(f"Performing PCA on {stokes_name} log-transformed PSDs...")
+            mean_log_psd = np.mean(X_log, axis=0)
+            X_log_centered = X_log - mean_log_psd
+            pca = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
+            pca.fit(X_log_centered)
+            print(f"{stokes_name} PCA explained variance ratio: {pca.explained_variance_ratio_}")
 
-        print("Reconstructing denoised Q,U PSDs...")
-        coeffs_QU = pca_QU.transform(X_QU_log_centered)
-        X_QU_reconstructed_log_centered = pca_QU.inverse_transform(coeffs_QU)
-        X_QU_reconstructed_log = X_QU_reconstructed_log_centered + mean_log_psd_QU
-        X_QU_reconstructed_linear = np.exp(X_QU_reconstructed_log)
+            print(f"Reconstructing denoised {stokes_name} PSDs...")
+            coeffs = pca.transform(X_log_centered)
+            X_reconstructed_log_centered = pca.inverse_transform(coeffs)
+            X_reconstructed_log = X_reconstructed_log_centered + mean_log_psd
+            X_reconstructed_linear = np.exp(X_reconstructed_log)
 
-        # Fill Q,U components in output array
-        map_idx = 0
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                for stokes_idx in [1, 2]:  # Q and U components
-                    per_source_psd_array[i, :, :, band_idx, stokes_idx] = X_QU_reconstructed_linear[map_idx].reshape(map_shape)
+            # Fill this Stokes component in output array
+            map_idx = 0
+            for i in range(n_src):
+                for band_idx in range(n_bands):
+                    per_source_psd_array[i, :, :, band_idx, stokes_idx] = X_reconstructed_linear[map_idx].reshape(map_shape)
                     map_idx += 1
 
-        print("Separate T and Q,U PCA-based PSD calculation complete.")
+        print("Separate T, Q, and U PCA-based PSD calculation complete.")
         return per_source_psd_array
 
 
