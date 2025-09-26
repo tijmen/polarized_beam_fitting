@@ -6,6 +6,7 @@ and NUTS sampling, supports single and multi-band configurations, and provides
 efficient parallelization across devices.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -438,107 +439,87 @@ class PolarizedBeamFitter:
             self.params_logit = convergence_state["best_params"]
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
-    def sample_with_mclmc(self) -> Dict:
+    def sample_with_mclmc(self):
         """
-        Run MCLMC sampling in the whitened parameter space.
+        Single-chain MCLMC
         """
-        devices = jax.devices()
-        num_chains = len(devices)
-
         self._prepare_nuts_transform()
+        chi2_norm = jnp.asarray(self.config.chi2_normalization, dtype=self.config.dtype_jax_real)
+        log_det = jnp.asarray(self.log_det_jacobian, dtype=self.config.dtype_jax_real)
 
-        # Treat as Python/static scalars where possible (smaller HLO, fewer recompiles)
-        num_samples = int(self.config.mclmc_num_samples)
-        step_size: float = float(self.config.mclmc_fixed_step_size)
-        L_value: int = int(self.config.mclmc_fixed_L)
-
-        # Hoist scalars as JAX constants; avoid capturing Python in logdensity
-        chi2_norm = jnp.asarray(self.config.chi2_normalization, self.config.dtype_jax_real)
-        log_det = jnp.asarray(self.log_det_jacobian, self.config.dtype_jax_real)
-
-        def logdensity_fn(params_white, objective_data):
-            # Keep this path pure-JAX; ensure self.from_whitened/params_to_logit/objective_function are jit-friendly
+        def logdensity_fn(params_white):
             params_phys = self.from_whitened(params_white)
             params_logit = params_to_logit(params_phys, self.config)
-            chi2 = self.objective_function(params_logit, objective_data)
+            chi2 = self.objective_function(params_logit, self.objective_data)
             return -0.5 * chi2_norm * chi2 + log_det
 
-        # === Initialization on device; avoid manual device_put_sharded ===
-        rng_key = jax.random.PRNGKey(0)
-        print(f"Generating {num_chains} physically-jittered initial positions...")
-        jittered_params_logit = self._make_jittered_inits(rng_key, num_chains)  # (C, …)
-        jittered_params_phys = jax.vmap(params_from_logit, in_axes=(0, None))(jittered_params_logit, self.config)
-        init_positions_white = jax.vmap(self.to_whitened)(jittered_params_phys)  # (C, D)
+        rng_key = jax.random.PRNGKey(42)
+        init_key, tune_key, run_key = jax.random.split(rng_key, 3)
 
-        inverse_mass = jnp.ones_like(init_positions_white[0])  # (D,) - broadcast later
+        print("Generating physically-jittered initial position...")
+        init_params_logit = self.params_logit
+        init_params_phys = params_from_logit(init_params_logit, self.config)
+        init_white = self.to_whitened(init_params_phys)
 
-        # Build a chain kernel with minimal capture. Don’t prealloc sample_keys; fold RNG in-scan.
-        def _run_chain(initial_position, chain_key, data, step_size, L_value, inverse_mass):
-            def logdensity_single(p):
-                return logdensity_fn(p, data)  # binds 'data' per device
+        initial_state = blackjax.mcmc.mclmc.init(position=init_white, logdensity_fn=logdensity_fn, rng_key=init_key)
 
-            init_key, key = jax.random.split(chain_key)
-            state = blackjax.mcmc.mclmc.init(initial_position, logdensity_single, init_key)
-            kernel = blackjax.mcmc.mclmc.build_kernel(
-                logdensity_fn=logdensity_single,
+        def kernel_factory(inverse_mass_matrix):
+            return blackjax.mcmc.mclmc.build_kernel(
+                logdensity_fn=logdensity_fn,
                 integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
-                inverse_mass_matrix=inverse_mass,
+                inverse_mass_matrix=inverse_mass_matrix,
             )
 
-            def step(carry, _):
-                state, key, reject_count = carry
-                key, subkey = jax.random.split(key)
-                next_state, info = kernel(rng_key=subkey, state=state, L=L_value, step_size=step_size)
+        print(
+            f"\nTuning MCLMC hyperparameters (single chain): num_steps={self.config.mclmc_num_warmup}, "
+            f"desired_energy_var={self.config.mclmc_desired_energy_var} ..."
+        )
+        t0 = time.time()
+        tuned_state, tuned_params, _ = blackjax.mclmc_find_L_and_step_size(
+            mclmc_kernel=kernel_factory,
+            num_steps=self.config.mclmc_num_warmup,
+            state=initial_state,
+            rng_key=tune_key,
+            diagonal_preconditioning=False,
+            desired_energy_var=self.config.mclmc_desired_energy_var,
+        )
+        t_tune = time.time() - t0
+        print(f"  Tuning done in {t_tune:0.2f}s")
+        print(f"  Tuned L       : {float(tuned_params.L):.6g}")
+        print(f"  Tuned step_size: {float(tuned_params.step_size):.6g}")
 
-                # Keep branch short; avoid big treemaps each step
-                is_finite = jnp.all(jnp.isfinite(next_state.position))
-                state_out = jax.lax.select(is_finite, next_state, state)
-                reject_out = reject_count + jnp.int32(1) * (1 - is_finite.astype(jnp.int32))
-                return (state_out, key, reject_out), state_out.position
-
-            (_, _, total_rejects), samples = jax.lax.scan(step, (state, key, jnp.int32(0)), xs=None, length=num_samples)
-            return samples, total_rejects  # (T, D), ()
-
-        # Compile once, broadcast constants instead of manual replication/sharding.
-        run_chain = jax.pmap(
-            _run_chain,
-            in_axes=(0, 0, None, None, None, None),  # data/step_size/L/inv_mass broadcast to all devices
-            static_broadcasted_argnums=(3, 4),  # step_size, L_value are true compile-time constants
-            donate_argnums=(0, 1),  # donate initial_position and chain_key buffers
+        sampling_alg = blackjax.mclmc(
+            logdensity_fn,
+            L=tuned_params.L,
+            step_size=tuned_params.step_size,
         )
 
-        chain_keys = jax.random.split(rng_key, num_chains)
+        def transform(state, info):
+            return state.position
 
-        print(f"Starting sampling with {num_chains} chains...")
-        samples_white_pmap, reject_counts = run_chain(
-            init_positions_white, chain_keys, self.objective_data, step_size, L_value, inverse_mass
-        )  # shapes: (C, T, D), (C,)
+        print(f"\nRunning MCLMC chain for {self.config.mclmc_num_samples} steps ...")
+        t0 = time.time()
+        _, samples_white = blackjax.util.run_inference_algorithm(
+            rng_key=run_key,
+            initial_state=tuned_state,
+            inference_algorithm=sampling_alg,
+            num_steps=self.config.mclmc_num_samples,
+            transform=transform,
+            progress_bar=True,  # prints progress like the docs demo
+        )
+        t_run = time.time() - t0
+        print(f"Sampling complete in {t_run:0.2f}s.")
 
-        # Transform on device to avoid big host/device transfers mid-pipeline
-        samples_phys_pmap = jax.pmap(jax.vmap(self.from_whitened))(samples_white_pmap)  # (C, T, ...)
-
-        # Move to host once
-        samples_white = np.asarray(jax.device_get(samples_white_pmap)).reshape(-1, samples_white_pmap.shape[-1])
-        samples_phys = np.asarray(jax.device_get(samples_phys_pmap)).reshape(-1, samples_phys_pmap.shape[-1])
-
-        # Lightweight reporting; pull small things only
-        print("\nSampling complete.")
-        step_sizes_host = np.full((num_chains,), step_size, dtype=float)
-        L_values_host = np.full((num_chains,), L_value, dtype=int)
-        reject_counts_host = np.asarray(jax.device_get(reject_counts))
-        if reject_counts_host.any():
-            print(f"  Non-finite proposal rejections per chain: {reject_counts_host}")
-
-        summary = self._calculate_summary_stats(samples_phys)
+        samples_white = np.asarray(samples_white)  # (T, D)
+        samples_phys = jax.vmap(self.from_whitened)(samples_white)  # PyTree of arrays with leading dim T
+        samples_phys = jax.device_get(samples_phys)
 
         return {
             "samples_white": samples_white,
-            "samples_phys": samples_phys,
-            "summary": summary,
-            "adapted_params": {
-                "step_size_per_chain": step_sizes_host,
-                "L_per_chain": L_values_host,
-                "rejects_per_chain": reject_counts_host,
+            "samples_phys": samples_phys,  # may be None if mapping fails; keep it simple
+            "tuned_params": {
+                "L": float(tuned_params.L),
+                "step_size": float(tuned_params.step_size),
             },
         }
 

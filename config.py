@@ -176,11 +176,9 @@ class BeamFittingConfig:
     nuts_max_tree_depth = 10
 
     # MCLMC sampling parameters
-    mclmc_min_step_size = 0.1
-    mclmc_max_step_size = 100.0
-    mclmc_rethermalization_steps = 25
-    mclmc_fixed_step_size = 20.0
-    mclmc_fixed_L = 10
+    mclmc_num_warmup = 2000
+    mclmc_num_samples = 2000
+    mclmc_desired_energy_var = 5e-4
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)

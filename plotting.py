@@ -8,7 +8,6 @@ import os
 
 import arviz as az
 import corner
-import jax
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -760,11 +759,13 @@ class BeamPlotter:
             (az_data, samples_flat, n_chains) for use in plotting methods
         """
         if sampler_type == "nuts":
-            mcmc = sampling_output["mcmc"]
-            n_chains = mcmc.num_chains
+            mcmc = sampling_output.get("mcmc")
+            if mcmc is None:
+                raise ValueError("Expected NUTS output to include an 'mcmc' object with metadata")
+            n_chains = int(getattr(mcmc, "num_chains", 1))
         elif sampler_type == "mclmc":
-            # For MCLMC, estimate chains from device count
-            n_chains = max(1, jax.local_device_count())
+            # Default to a single chain unless the caller provided explicit metadata
+            n_chains = int(sampling_output.get("num_chains", 1))
         else:
             raise ValueError(f"Unknown sampler type: {sampler_type}")
 
@@ -773,8 +774,22 @@ class BeamPlotter:
         # Helper: reshape leading axis into (chain, draw, …)
         def _reshape_chain_draw(arr, n_chains):
             arr = np.asarray(arr)
-            n_draws = arr.shape[0] // n_chains
-            return arr.reshape(n_chains, n_draws, *arr.shape[1:])
+
+            if arr.ndim >= 2 and arr.shape[0] == n_chains:
+                return arr
+
+            total_draws = arr.shape[0]
+            if n_chains <= 0:
+                raise ValueError(f"Invalid number of chains: {n_chains}")
+
+            n_draws, remainder = divmod(total_draws, n_chains)
+            if remainder != 0:
+                raise ValueError(
+                    f"Cannot reshape samples into {n_chains} chains: leading axis {total_draws} is not divisible by {n_chains}"
+                )
+
+            new_shape = (n_chains, n_draws) + arr.shape[1:]
+            return arr.reshape(new_shape)
 
         # Helper: flatten nested dict for ArviZ
         def _flatten_for_arviz(samples_phys):
