@@ -440,98 +440,95 @@ class PolarizedBeamFitter:
 
     def sample_with_mclmc(self) -> Dict:
         """
-        Runs MCMC sampling using the MCLMC algorithm with a whitening transform.
-
-        This implementation uses a pmapped warmup with an energy variance criterion
-        for tuning L, step size, and the inverse mass matrix in the whitened space,
-        before running the sampling phase.
+        Run MCLMC sampling in the whitened parameter space.
         """
         devices = jax.devices()
-        num_devices = len(devices)
+        num_chains = len(devices)
 
         self._prepare_nuts_transform()
 
+        # Treat as Python/static scalars where possible (smaller HLO, fewer recompiles)
+        num_samples = int(self.config.mclmc_num_samples)
+        step_size: float = float(self.config.mclmc_fixed_step_size)
+        L_value: int = int(self.config.mclmc_fixed_L)
+
+        # Hoist scalars as JAX constants; avoid capturing Python in logdensity
+        chi2_norm = jnp.asarray(self.config.chi2_normalization, self.config.dtype_jax_real)
+        log_det = jnp.asarray(self.log_det_jacobian, self.config.dtype_jax_real)
+
         def logdensity_fn(params_white, objective_data):
-            """
-            Computes the unnormalized log posterior density in the whitened space.
-            Includes a failsafe to return -inf for non-finite chi-squared values.
-            """
+            # Keep this path pure-JAX; ensure self.from_whitened/params_to_logit/objective_function are jit-friendly
             params_phys = self.from_whitened(params_white)
             params_logit = params_to_logit(params_phys, self.config)
             chi2 = self.objective_function(params_logit, objective_data)
+            return -0.5 * chi2_norm * chi2 + log_det
 
-            log_prob = -0.5 * self.config.chi2_normalization * chi2 + self.log_det_jacobian
-            return jnp.where(jnp.isfinite(chi2), log_prob, -jnp.inf)
-
-        # Generate physically-jittered initial positions and transform to whitened space
+        # === Initialization on device; avoid manual device_put_sharded ===
         rng_key = jax.random.PRNGKey(0)
-        print(f"Generating {num_devices} physically-jittered initial positions...")
-        jittered_params_logit = self._make_jittered_inits(rng_key, num_devices)
+        print(f"Generating {num_chains} physically-jittered initial positions...")
+        jittered_params_logit = self._make_jittered_inits(rng_key, num_chains)  # (C, …)
         jittered_params_phys = jax.vmap(params_from_logit, in_axes=(0, None))(jittered_params_logit, self.config)
-        init_positions_white = jax.vmap(self.to_whitened)(jittered_params_phys)
+        init_positions_white = jax.vmap(self.to_whitened)(jittered_params_phys)  # (C, D)
 
-        # Replicate data for each device
-        replicated_data = jax.tree.map(lambda x: jnp.array([x] * num_devices), self.objective_data)
+        inverse_mass = jnp.ones_like(init_positions_white[0])  # (D,) - broadcast later
 
-        @jax.pmap
-        def run_chain(initial_position, rng_key, data):
-            """
-            Tunes (L, step_size, inverse_mass_matrix) and samples on a single device.
-            """
-            def sampler_logdensity(p):
-                return logdensity_fn(p, data)
+        # Build a chain kernel with minimal capture. Don’t prealloc sample_keys; fold RNG in-scan.
+        def _run_chain(initial_position, chain_key, data, step_size, L_value, inverse_mass):
+            def logdensity_single(p):
+                return logdensity_fn(p, data)  # binds 'data' per device
 
-            tune_key, sample_key = jax.random.split(rng_key)
-
-            state = blackjax.mcmc.mclmc.init(initial_position, sampler_logdensity, tune_key)
-
-            def mclmc_kernel_factory(inverse_mass_matrix):
-                return blackjax.mcmc.mclmc.build_kernel(
-                    logdensity_fn=sampler_logdensity,
-                    integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
-                    inverse_mass_matrix=inverse_mass_matrix,
-                )
-
-            # Tune with energy variance criterion in the whitened space
-            (tuned_state, tuned_params, _) = blackjax.adaptation.mclmc_adaptation.mclmc_find_L_and_step_size(
-                mclmc_kernel=mclmc_kernel_factory,
-                num_steps=self.config.mcmc_num_warmup,
-                state=state,
-                rng_key=tune_key,
-                diagonal_preconditioning=True,
-                desired_energy_var=0.1,
-            )
-
-            # Build the tuned kernel
+            init_key, key = jax.random.split(chain_key)
+            state = blackjax.mcmc.mclmc.init(initial_position, logdensity_single, init_key)
             kernel = blackjax.mcmc.mclmc.build_kernel(
-                logdensity_fn=sampler_logdensity,
+                logdensity_fn=logdensity_single,
                 integrator=blackjax.mcmc.integrators.isokinetic_mclachlan,
-                inverse_mass_matrix=tuned_params.inverse_mass_matrix,
+                inverse_mass_matrix=inverse_mass,
             )
 
-            def sample_step(state, key):
-                new_state, _ = kernel(rng_key=key, state=state, L=tuned_params.L, step_size=tuned_params.step_size)
-                return new_state, new_state.position
+            def step(carry, _):
+                state, key, reject_count = carry
+                key, subkey = jax.random.split(key)
+                next_state, info = kernel(rng_key=subkey, state=state, L=L_value, step_size=step_size)
 
-            _, samples = jax.lax.scan(
-                sample_step,
-                tuned_state,
-                jax.random.split(sample_key, self.config.mcmc_num_samples),
-            )
+                # Keep branch short; avoid big treemaps each step
+                is_finite = jnp.all(jnp.isfinite(next_state.position))
+                state_out = jax.lax.select(is_finite, next_state, state)
+                reject_out = reject_count + jnp.int32(1) * (1 - is_finite.astype(jnp.int32))
+                return (state_out, key, reject_out), state_out.position
 
-            return samples, tuned_params.step_size
+            (_, _, total_rejects), samples = jax.lax.scan(step, (state, key, jnp.int32(0)), xs=None, length=num_samples)
+            return samples, total_rejects  # (T, D), ()
 
-        # Distribute keys to devices and run the pmapped function
-        keys = jax.random.split(rng_key, num_devices)
-        print(f"Starting warmup and sampling with {num_devices} chains...")
-        samples_pmap, step_size_pmap = run_chain(init_positions_white, keys, replicated_data)
+        # Compile once, broadcast constants instead of manual replication/sharding.
+        run_chain = jax.pmap(
+            _run_chain,
+            in_axes=(0, 0, None, None, None, None),  # data/step_size/L/inv_mass broadcast to all devices
+            static_broadcasted_argnums=(3, 4),  # step_size, L_value are true compile-time constants
+            donate_argnums=(0, 1),  # donate initial_position and chain_key buffers
+        )
 
+        chain_keys = jax.random.split(rng_key, num_chains)
+
+        print(f"Starting sampling with {num_chains} chains...")
+        samples_white_pmap, reject_counts = run_chain(
+            init_positions_white, chain_keys, self.objective_data, step_size, L_value, inverse_mass
+        )  # shapes: (C, T, D), (C,)
+
+        # Transform on device to avoid big host/device transfers mid-pipeline
+        samples_phys_pmap = jax.pmap(jax.vmap(self.from_whitened))(samples_white_pmap)  # (C, T, ...)
+
+        # Move to host once
+        samples_white = np.asarray(jax.device_get(samples_white_pmap)).reshape(-1, samples_white_pmap.shape[-1])
+        samples_phys = np.asarray(jax.device_get(samples_phys_pmap)).reshape(-1, samples_phys_pmap.shape[-1])
+
+        # Lightweight reporting; pull small things only
         print("\nSampling complete.")
-        print(f"Adapted step sizes per chain: {step_size_pmap}")
+        step_sizes_host = np.full((num_chains,), step_size, dtype=float)
+        L_values_host = np.full((num_chains,), L_value, dtype=int)
+        reject_counts_host = np.asarray(jax.device_get(reject_counts))
+        if reject_counts_host.any():
+            print(f"  Non-finite proposal rejections per chain: {reject_counts_host}")
 
-        # Combine results from all chains and transform back to physical space
-        samples_white = samples_pmap.reshape(-1, samples_pmap.shape[-1])
-        samples_phys = jax.vmap(self.from_whitened)(samples_white)
         summary = self._calculate_summary_stats(samples_phys)
 
         return {
@@ -539,7 +536,9 @@ class PolarizedBeamFitter:
             "samples_phys": samples_phys,
             "summary": summary,
             "adapted_params": {
-                "step_size_per_chain": np.array(step_size_pmap),
+                "step_size_per_chain": step_sizes_host,
+                "L_per_chain": L_values_host,
+                "rejects_per_chain": reject_counts_host,
             },
         }
 
@@ -654,7 +653,7 @@ class PolarizedBeamFitter:
         # Prepare for NUTS sampling by calculating the Hessian for the whitening transform
         self._prepare_nuts_transform()
 
-        print(f"Starting NUTS sampling: {num_chains} chains, {self.config.mcmc_num_warmup} warmup, {self.config.mcmc_num_samples} samples")
+        print(f"Starting NUTS sampling: {num_chains} chains, {self.config.nuts_num_warmup} warmup, {self.config.nuts_num_samples} samples")
 
         # Define potential energy in the whitened space
         def potential_fn_whitened(params_white):
@@ -669,14 +668,14 @@ class PolarizedBeamFitter:
         # Setup MCMC
         kernel = NUTS(
             potential_fn=potential_fn_whitened,
-            target_accept_prob=self.config.mcmc_target_accept,
-            max_tree_depth=self.config.mcmc_max_tree_depth,
+            target_accept_prob=self.config.nuts_target_accept,
+            max_tree_depth=self.config.nuts_max_tree_depth,
         )
 
         mcmc = MCMC(
             kernel,
-            num_warmup=self.config.mcmc_num_warmup,
-            num_samples=self.config.mcmc_num_samples,
+            num_warmup=self.config.nuts_num_warmup,
+            num_samples=self.config.nuts_num_samples,
             num_chains=num_chains,
             chain_method="parallel" if num_chains > 1 else "sequential",
         )

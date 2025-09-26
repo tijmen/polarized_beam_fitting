@@ -43,6 +43,7 @@ def get_test_config(**kwargs):
     config.apodization_width_pix = 8
     config.n_steps = 20000
     config.bands = ["150GHz"]
+    config.noise_psd_method = "white_noise"
     config.min_t_amplitude = 0
     config.cache_dir = tempfile.mkdtemp()
     config.coadd_filenames = ["mock_file.g3"]

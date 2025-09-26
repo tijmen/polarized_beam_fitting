@@ -169,11 +169,18 @@ class BeamFittingConfig:
     # Chi-squared normalization for sampling
     chi2_normalization = 1.0
 
-    # MCMC controls
-    mcmc_num_warmup = 1000
-    mcmc_num_samples = 1000
-    mcmc_target_accept = 0.8  # For NUTS, only
-    mcmc_max_tree_depth = 10  # For NUTS, only
+    # NUTS sampling parameters
+    nuts_num_warmup = 1000
+    nuts_num_samples = 1000
+    nuts_target_accept = 0.8
+    nuts_max_tree_depth = 10
+
+    # MCLMC sampling parameters
+    mclmc_min_step_size = 0.1
+    mclmc_max_step_size = 100.0
+    mclmc_rethermalization_steps = 25
+    mclmc_fixed_step_size = 20.0
+    mclmc_fixed_L = 10
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
