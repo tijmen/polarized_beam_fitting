@@ -491,7 +491,7 @@ class PcaPsdCalculator(NoisePSDCalculator):
         print("Performing PCA on log-transformed PSDs...")
         mean_log_psd = np.mean(X_log, axis=0)
         X_log_centered = X_log - mean_log_psd
-        pca = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42)
+        pca = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42, n_oversamples=100)
         pca.fit(X_log_centered)
         print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
 

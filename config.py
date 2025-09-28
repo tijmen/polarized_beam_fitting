@@ -29,6 +29,7 @@ class BeamFittingConfig:
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
     cache_dir = "/home/tijmen/cmb_analysis/beam_analysis/cache"
     betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
+    leakage_template_dir = os.path.join(output_dir, "leakage_templates")
 
     # Analysis parameters
     bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
@@ -66,7 +67,8 @@ class BeamFittingConfig:
     exclude_from_leakage_template = None
 
     # Processing options
-    leakage_weighting = "linear"  # "flat", "linear", "squared", or "median"
+    leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
+    use_precomputed_leakage_templates = True  # Use offline templates stored on disk
 
     # Chi-squared calculation method
     chi2_method = "fourier"  # "fourier" or "real_space"

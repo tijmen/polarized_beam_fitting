@@ -1,7 +1,7 @@
-"""
-Data loading and preprocessing for the polarized beam fitter.
-"""
+"""Data loading and preprocessing for the polarized beam fitter."""
 
+import os
+import pickle
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -27,12 +27,13 @@ class DataLoader:
 
         # Extract consistent sources across bands
         source_data = self._extract_consistent_sources(gaussfit_results)
+        source_fields = source_data["fields"]
 
         # Create leakage template
-        qu_templates = self._create_leakage_template(source_data["gaussfit_amp"], source_data["raw_maps"])
+        qu_templates = self._create_leakage_template(source_data["gaussfit_amp"], source_data["raw_maps"], source_fields)
 
         # Clean maps
-        maps_clean, maps_fft = self._prepare_clean_maps(source_data["gaussfit_amp"], source_data["raw_maps"], qu_templates)
+        maps_clean, maps_fft = self._prepare_clean_maps(source_data["gaussfit_amp"], source_data["raw_maps"], qu_templates, source_fields)
 
         return (
             source_data["gaussfit_yoff"],
@@ -86,6 +87,8 @@ class DataLoader:
             print(f"Warning: Could not open {filename}. Skipping.")
             return
 
+        field_name = self._infer_field_from_filename(filename)
+
         for frame in g3_file:
             if frame.type != core.G3FrameType.Map or "Id" not in frame:
                 continue
@@ -98,7 +101,23 @@ class DataLoader:
 
             fit_result = self._fit_single_source(frame)
             if fit_result is not None:
+                fit_result["field"] = field_name
                 results[band][source_id] = fit_result
+
+    def _infer_field_from_filename(self, filename: str) -> str:
+        """Infer observing field (winter/summer_a/...) from the input filename."""
+        basename = os.path.basename(filename).lower()
+        if "winter" in basename:
+            return "winter"
+        if "summera" in basename:
+            return "summer_a"
+        if "summerb" in basename:
+            return "summer_b"
+        if "summerc" in basename:
+            return "summer_c"
+        else:
+            print(f"Warning, could not infer field from filename: {filename}, assuming winter field.")
+            return "winter"
 
     def _get_band_from_id(self, source_id: str) -> Optional[str]:
         """Extract band from source ID."""
@@ -150,6 +169,7 @@ class DataLoader:
             "weights": np.zeros((n_src, ny, nx, n_bands, 3, 3), dtype=self.config.dtype_np_real),
             "source_ids": source_ids,
             "n_src": n_src,
+            "fields": np.empty(n_src, dtype=object),
         }
 
         self._fill_source_arrays(arrays, gaussfit_results, source_ids)
@@ -184,6 +204,10 @@ class DataLoader:
             pos_result = results[band_for_pos][f"{sid}-{band_for_pos}"]
             arrays["gaussfit_yoff"][i] = pos_result["yoff"]
             arrays["gaussfit_xoff"][i] = pos_result["xoff"]
+            field_value = pos_result.get("field")
+            if field_value is None:
+                raise ValueError(f"Missing field metadata for source '{sid}'.")
+            arrays["fields"][i] = field_value
 
             for j, band in enumerate(self.config.bands):
                 result = results[band][f"{sid}-{band}"]
@@ -210,8 +234,11 @@ class DataLoader:
         arrays["weights"][src_idx, :, :, band_idx, 1, 2] = w.QU
         arrays["weights"][src_idx, :, :, band_idx, 2, 1] = w.QU
 
-    def _create_leakage_template(self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray) -> np.ndarray:
-        """Create T->QU leakage correction template."""
+    def _create_leakage_template(self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, source_fields: np.ndarray):
+        """Create or load the T->QU leakage correction template(s)."""
+        if self.config.use_precomputed_leakage_templates:
+            return self._load_precomputed_leakage_templates(source_fields)
+
         print(f"Creating T->P leakage template ({self.config.leakage_weighting} weighting)...")
 
         qu_maps = raw_maps[:, :, :, :, 1:3]
@@ -220,7 +247,7 @@ class DataLoader:
         if self.config.leakage_weighting == "median":
             return np.median(qu_maps / t_amps[:, None, None, :, None], axis=0)
 
-        weight_map = {"flat": 1.0, "linear": t_amps, "squared": t_amps**2}
+        weight_map = {"flat": 1.0, "linear": t_amps, "quadratic": t_amps**2}
         weights_base = weight_map[self.config.leakage_weighting]
 
         # Handle flat weighting case (scalar) vs array weighting cases
@@ -235,18 +262,73 @@ class DataLoader:
 
         return weighted_sum / weight_sum
 
+    def _load_precomputed_leakage_templates(self, source_fields: np.ndarray) -> Dict[str, np.ndarray]:
+        """Load precomputed leakage templates for each observed field from disk."""
+        unique_fields = {field for field in source_fields if field is not None}
+        if not unique_fields:
+            raise ValueError("No source fields available to match precomputed leakage templates.")
+
+        templates = {}
+        ny, nx = self.map_shape
+        n_bands = len(self.config.bands)
+
+        for field in unique_fields:
+            field_templates = np.zeros((ny, nx, n_bands, 2), dtype=self.config.dtype_np_real)
+
+            for band_idx, band in enumerate(self.config.bands):
+                filename = os.path.join(
+                    self.config.leakage_template_dir,
+                    f"leakage_template_{field}_{band}_{self.config.leakage_weighting}.pkl",
+                )
+
+                if not os.path.exists(filename):
+                    raise FileNotFoundError(
+                        f"Missing leakage template for field '{field}', band '{band}', weighting '{self.config.leakage_weighting}': {filename}"
+                    )
+
+                with open(filename, "rb") as f:
+                    template_data = pickle.load(f)
+
+                try:
+                    q_map = np.asarray(template_data["Q"], dtype=self.config.dtype_np_real)
+                    u_map = np.asarray(template_data["U"], dtype=self.config.dtype_np_real)
+                except (TypeError, KeyError) as err:
+                    raise ValueError(f"Template file {filename} does not contain Q/U maps.") from err
+
+                if q_map.shape != (ny, nx) or u_map.shape != (ny, nx):
+                    raise ValueError(f"Template shape mismatch in {filename}: expected {(ny, nx)}, got {q_map.shape}/{u_map.shape}")
+
+                field_templates[:, :, band_idx, 0] = q_map
+                field_templates[:, :, band_idx, 1] = u_map
+
+            templates[field] = field_templates
+
+        return templates
+
     def _prepare_clean_maps(
-        self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, qu_templates: np.ndarray
+        self,
+        gaussfit_amp: np.ndarray,
+        raw_maps: np.ndarray,
+        qu_templates,
+        source_fields: np.ndarray,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Apply leakage correction and prepare final maps."""
         n_src, ny, nx, n_bands, _ = raw_maps.shape
         maps_clean = raw_maps.copy()
 
         for i in range(n_src):
+            if self.config.use_precomputed_leakage_templates:
+                field = source_fields[i]
+                if field not in qu_templates:
+                    raise ValueError(f"No precomputed leakage template available for field '{field}'.")
+                field_template = qu_templates[field]
+            else:
+                field_template = qu_templates
+
             for j in range(n_bands):
                 t_amp = gaussfit_amp[i, j, 0]
-                maps_clean[i, :, :, j, 1] -= qu_templates[:, :, j, 0] * t_amp
-                maps_clean[i, :, :, j, 2] -= qu_templates[:, :, j, 1] * t_amp
+                maps_clean[i, :, :, j, 1] -= field_template[:, :, j, 0] * t_amp
+                maps_clean[i, :, :, j, 2] -= field_template[:, :, j, 1] * t_amp
 
         maps_fft = None
         if self.config.chi2_method == "fourier":
