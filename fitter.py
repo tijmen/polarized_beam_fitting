@@ -29,6 +29,7 @@ from .utils import (
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
+    calculate_tod_nyquist_radial_mask,
 )
 
 
@@ -48,11 +49,13 @@ class FitterState:
     maps_jax: jnp.ndarray
     weights_jax: Optional[jnp.ndarray] = None
     maps_fft_jax: Optional[jnp.ndarray] = None
-    noise_psd_jax: Optional[jnp.ndarray] = None
+    precision_jax: Optional[jnp.ndarray] = None
+    k_mask_jax: Optional[jnp.ndarray] = None
 
     # Source information
     source_ids: np.ndarray = None
     n_src: int = 0
+    fields: np.ndarray = None
     n_bands: int = 0
 
     # Initial guesses
@@ -84,7 +87,7 @@ class ObjectiveFunctions:
         vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
 
         def objective(params_logit, data, extra_args=None):
-            maps_fft, noise_psd = data
+            maps_fft, precision = data
             params_phys = params_from_logit(params_logit, self.config)
 
             chi2_total = vmap_chi2(
@@ -93,7 +96,7 @@ class ObjectiveFunctions:
                 params_phys["sources"]["xoff"],
                 params_phys["sources"]["flux"],
                 maps_fft,
-                noise_psd,
+                precision,
             ).sum()
             return chi2_total
 
@@ -126,21 +129,33 @@ class ObjectiveFunctions:
         chi2 = jnp.einsum("...i,...ij,...j->...", residual, weight, residual)
         return jnp.sum(chi2)
 
-    def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, noise_psd):
+    def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, precision):
         """Chi2 for single source in Fourier space."""
         model = self._build_model(beam_params_list, yoff, xoff, flux)
         model_apod = model * self.state.apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
         residual_fft = data_fft - model_fft
-        chi2 = (jnp.abs(residual_fft) ** 2) / noise_psd
-        return jnp.sum(jnp.mean(chi2, axis=(0, 1)))
+        if precision.ndim == 4:
+            chi2 = (jnp.abs(residual_fft) ** 2) * precision
+            chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
+            return jnp.mean(chi2_per_mode)
+
+        # Multi-band precision matrices: precision has shape (ny, nx, n_b, n_s, n_b, n_s)
+        ny, nx = residual_fft.shape[:2]
+        n_bands = residual_fft.shape[-2]
+        n_stokes = residual_fft.shape[-1]
+        residual_vec = residual_fft.reshape(ny, nx, n_bands * n_stokes)
+        precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
+        weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)
+        chi2_per_k = jnp.einsum("yxv,yxv->yx", jnp.conj(residual_vec), weighted_vec)
+        return jnp.mean(jnp.real(chi2_per_k))
 
     def _build_model(self, beam_params_list, yoff, xoff, flux):
         """Build beam model for all bands."""
         maps_per_band = []
         for i, band in enumerate(self.config.bands):
             beam_model = self.beam_models[band]
-            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff, xoff)
+            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff[i], xoff[i])
             maps_per_band.append((T_map, P_map))
 
         # Stack T and P maps for all bands
@@ -152,7 +167,7 @@ class ObjectiveFunctions:
         templates = jnp.stack([T_stack, P_stack, P_stack], axis=-1)
 
         # Multiply by flux: (n_bands, 3) -> (1, 1, n_bands, 3)
-        flux_reshaped = flux[None, None, :, :]  # This line has been corrected from flux[:, None, None, :] to flux[None, None, :, :]
+        flux_reshaped = flux[None, None, :, :]
 
         # Final model shape: (ny, nx, n_bands, 3)
         model = templates * flux_reshaped
@@ -185,7 +200,9 @@ class PolarizedBeamFitter:
         self.objective_function = obj_builder.build_objective()
 
         # Compile optimization functions
-        self._loss_and_grad = jax.jit(jax.value_and_grad(lambda p, d: self.objective_function(p, d, None)))
+        self._loss_and_grad = jax.jit(
+            jax.value_and_grad(lambda params_logit, data: self.objective_function(params_logit, data, None))
+        )
 
         # Initialize parameters
         self.params_physical = self._initialize_parameters()
@@ -258,6 +275,7 @@ class PolarizedBeamFitter:
             weights,
             maps_fft,
             source_ids,
+            source_fields,
             n_src,
         ) = data
 
@@ -267,6 +285,7 @@ class PolarizedBeamFitter:
         self.state.gaussfit_yoff_numpy = gaussfit_yoff
         self.state.gaussfit_xoff_numpy = gaussfit_xoff
         self.state.gaussfit_initial_amp_numpy = gaussfit_amp
+        self.state.fields = source_fields
 
         # Convert to JAX arrays
         self.state.gaussfit_initial_amp_jax = jnp.asarray(gaussfit_amp, dtype=self.config.dtype_jax_real)
@@ -282,62 +301,109 @@ class PolarizedBeamFitter:
         """Setup data for Fourier-space analysis."""
         self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
 
-        # Calculate original noise PSD
         psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
-        original_noise_psd = psd_calc.calculate_noise_psd(maps)
+        nyquist_mask = self._calculate_nyquist_mask(self.state.source_ids)
+        self.state.k_mask_jax = jnp.asarray(nyquist_mask, dtype=self.config.dtype_jax_real)
 
-        # Apply the Nyquist mask to the PSD ---
-        modified_noise_psd = self._apply_nyquist_mask_to_psd(original_noise_psd, self.state.source_ids)
+        if self.config.noise_psd_method == "multiband_covariance":
+            n_src = self.state.n_src
+            ny, nx = self.state.apod_mask.shape
+            n_bands = len(self.config.bands)
+            n_stokes = 3
+            precision_per_source = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
 
-        self.state.noise_psd_jax = jnp.asarray(modified_noise_psd, dtype=self.config.dtype_jax_real)
+            unique_fields = np.unique(self.state.fields)
+            for field in unique_fields:
+                field_indices = np.where(self.state.fields == field)[0]
+                field_maps = maps[field_indices]
+                covariance_psd = psd_calc.calculate_noise_psd(field_maps)
+                precision_matrix = self._prepare_precision_from_covariance(covariance_psd)
+                repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
+                precision_per_source[field_indices] = repeated_precision
 
-        # The objective data is now simpler
-        self.objective_data = (self.state.maps_fft_jax, self.state.noise_psd_jax)
+            self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
+        elif self.config.noise_psd_method == "pca_multiband_covariance":
+            n_src = self.state.n_src
+            ny, nx = self.state.apod_mask.shape
+            n_bands = len(self.config.bands)
+            n_stokes = 3
+            precision_per_source = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+
+            unique_fields = np.unique(self.state.fields)
+            for field in unique_fields:
+                field_indices = np.where(self.state.fields == field)[0]
+                field_maps = maps[field_indices]
+                precision_matrix = psd_calc.calculate_noise_psd(field_maps)
+                repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
+                precision_per_source[field_indices] = repeated_precision
+
+            self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
+        else:
+            original_noise_psd = psd_calc.calculate_noise_psd(maps)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                precision_diag = np.reciprocal(original_noise_psd)
+            precision_diag = np.where(np.isfinite(precision_diag), precision_diag, 0.0)
+            if precision_diag.ndim == 4:
+                precision_diag = np.broadcast_to(precision_diag, (self.state.n_src,) + precision_diag.shape)
+            dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_diag) else self.config.dtype_jax_real
+            self.state.precision_jax = jnp.asarray(precision_diag, dtype=dtype)
+
+        self._apply_fourier_mask()
+        self.objective_data = (self.state.maps_fft_jax, self.state.precision_jax)
 
     def _setup_real_space_data(self, weights):
         """Setup data for real-space analysis."""
         self.state.weights_jax = jnp.asarray(weights, dtype=self.config.dtype_jax_real)
         self.objective_data = (self.state.maps_jax, self.state.weights_jax)
 
-    def _apply_nyquist_mask_to_psd(self, noise_psd, source_ids):
-        """
-        Applies the TOD Nyquist kx mask to the noise PSD.
-
-        This modifies the noise PSD by setting values for kx modes above the
-        0.85 * Nyquist threshold to infinity for each source. This effectively
-        removes them from the chi-squared calculation.
-
-        Returns a per-source noise PSD array.
-        """
-        print("Applying source-specific TOD Nyquist masks to noise PSD...")
-        from .utils import calculate_tod_nyquist_kx_mask
-
+    def _calculate_nyquist_mask(self, source_ids):
+        """Return radial Fourier mask per source (values in [0, 1])."""
         map_shape = (self.config.map_size_pix, self.config.map_size_pix)
+        masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
+        return np.stack(masks)  # (n_src, ny, nx)
 
-        # Calculate boolean masks (True = keep)
-        kx_masks = []
-        for sid in source_ids:
-            kx_masks.append(calculate_tod_nyquist_kx_mask(sid, map_shape, self.config))
-        kx_masks_numpy = np.stack(kx_masks)  # Shape: (n_src, ny, nx)
+    def _apply_fourier_mask(self):
+        """Multiply precision weights by the source-specific Fourier mask."""
+        if self.state.k_mask_jax is None or self.state.precision_jax is None:
+            return
 
-        # Check if original PSD is global or per-source
-        is_global_psd = noise_psd.ndim == 4  # Shape (ny, nx, n_bands, 3)
+        mask = self.state.k_mask_jax
+        precision = self.state.precision_jax
 
-        if is_global_psd:
-            # Broadcast global PSD to per-source shape
-            n_src = len(source_ids)
-            noise_psd_per_source = np.broadcast_to(noise_psd, (n_src,) + noise_psd.shape)
+        if precision.ndim == 5:  # (n_src, ny, nx, n_bands, 3)
+            mask_broadcast = mask[..., None, None]
+        elif precision.ndim == 7:  # (n_src, ny, nx, n_bands, 3, n_bands, 3)
+            mask_broadcast = mask[..., None, None, None, None]
         else:
-            noise_psd_per_source = noise_psd
+            raise ValueError(f"Unexpected precision tensor rank: {precision.ndim}")
 
-        # Apply mask using np.where. We need to broadcast the mask shape.
-        # kx_masks_numpy: (n_src, ny, nx) -> (n_src, ny, nx, 1, 1)
-        # noise_psd_per_source: (n_src, ny, nx, n_bands, 3)
-        mask_broadcast = kx_masks_numpy[:, :, :, np.newaxis, np.newaxis]
+        self.state.precision_jax = precision * mask_broadcast
 
-        modified_psd = np.where(mask_broadcast, noise_psd_per_source, np.inf)
+    def _prepare_precision_from_covariance(self, covariance_psd):
+        """Invert covariance matrices for multi-band chi^2 weighting."""
+        print("Preparing inverse covariance matrices for multi-band chi^2...")
 
-        return modified_psd
+        cov = np.asarray(covariance_psd, dtype=self.config.dtype_np_complex)
+        ny, nx, n_bands, _, n_stokes, _ = cov.shape
+        n_dim = n_bands * n_stokes
+
+        cov_matrix = cov.reshape(ny, nx, n_dim, n_dim)
+        cov_matrix = 0.5 * (cov_matrix + np.swapaxes(cov_matrix, -1, -2).conj())
+
+        reg = getattr(self.config, "multiband_covariance_regularization", 1e-3)
+        eye = np.eye(n_dim, dtype=self.config.dtype_np_real)
+        cov_matrix += reg * eye[None, None, :, :]
+
+        try:
+            inv_cov = np.linalg.inv(cov_matrix)
+        except np.linalg.LinAlgError as exc:
+            raise np.linalg.LinAlgError(
+                "Failed to invert multi-band covariance matrices; consider increasing multiband_covariance_regularization."
+            ) from exc
+
+        inv_cov = inv_cov.reshape(ny, nx, n_bands, n_stokes, n_bands, n_stokes)
+        inv_cov = 0.5 * (inv_cov + np.swapaxes(inv_cov, 2, 4).swapaxes(3, 5).conj())
+        return inv_cov.astype(self.config.dtype_np_complex)
 
     def _initialize_parameters(self) -> Dict:
         """Initialize fitting parameters."""
@@ -357,9 +423,12 @@ class PolarizedBeamFitter:
         yoff = self.state.gaussfit_yoff_numpy - 0.5
         xoff = self.state.gaussfit_xoff_numpy - 0.5
 
+        yoff_per_band = np.repeat(yoff[:, None], self.state.n_bands, axis=1)
+        xoff_per_band = np.repeat(xoff[:, None], self.state.n_bands, axis=1)
+
         params["sources"] = {
-            "yoff": jnp.asarray(yoff, dtype=self.config.dtype_jax_real),
-            "xoff": jnp.asarray(xoff, dtype=self.config.dtype_jax_real),
+            "yoff": jnp.asarray(yoff_per_band, dtype=self.config.dtype_jax_real),
+            "xoff": jnp.asarray(xoff_per_band, dtype=self.config.dtype_jax_real),
             "flux": self.state.gaussfit_initial_amp_jax,
         }
 
@@ -537,7 +606,7 @@ class PolarizedBeamFitter:
                 params_phys["sources"]["xoff"],
                 params_phys["sources"]["flux"],
                 self.state.maps_fft_jax,
-                self.state.noise_psd_jax,  # per-source PSD
+                self.state.precision_jax,
             )
         else:
 

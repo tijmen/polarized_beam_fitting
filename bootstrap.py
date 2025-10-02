@@ -81,12 +81,23 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
 
         # Calculate chi2 with support for diagonal or full covariance weighting
         residual_fft = data_fft - model_fft
-        chi2 = (jnp.abs(residual_fft) ** 2) / noise_psd
-        return jnp.sum(jnp.mean(chi2, axis=(0, 1)))
+        if precision.ndim == 4:
+            chi2 = (jnp.abs(residual_fft) ** 2) * precision
+            chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
+            return jnp.mean(chi2_per_mode)
 
-    def bootstrap_objective(params_logit, data_and_masks, weight_array):
+        ny, nx = residual_fft.shape[:2]
+        n_bands = residual_fft.shape[-2]
+        n_stokes = residual_fft.shape[-1]
+        residual_vec = residual_fft.reshape(ny, nx, n_bands * n_stokes)
+        precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
+        weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)
+        chi2_per_k = jnp.einsum("yxv,yxv->yx", jnp.conj(residual_vec), weighted_vec)
+        return jnp.mean(jnp.real(chi2_per_k))
+
+    def bootstrap_objective(params_logit, data, weight_array):
         """Bootstrap objective for Fourier space."""
-        maps_fft, noise_psd = data_and_masks
+        maps_fft, precision = data
         params_phys = params_from_logit(params_logit, config)
 
         # Use vmap for efficiency
@@ -98,7 +109,7 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
             params_phys["sources"]["xoff"],
             params_phys["sources"]["flux"],
             maps_fft,
-            noise_psd,
+            precision,
         )
 
         return jnp.sum(individual_chi2s * weight_array)
@@ -119,7 +130,7 @@ def build_bootstrap_chi2_real(config, beam_models, y_grid, x_grid):
         maps_per_band = []
         for i, band in enumerate(config.bands):
             beam_model = beam_models[band]
-            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff, xoff)
+            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff[i], xoff[i])
             maps_per_band.append((T_map, P_map))
 
         # Stack T and P maps for all bands
@@ -285,7 +296,6 @@ class BootstrapBeamFitter:
 
         # Get data from base fitter
         objective_data = self.base_fitter.objective_data
-
         for i, weight_array in enumerate(bootstrap_weights):
             print(f"Bootstrap iteration {i + 1}/{self.config.n_bootstrap_samples}")
 
@@ -378,8 +388,18 @@ class BootstrapBeamFitter:
         return self.base_fitter.beam_models
 
     @property
+    def precision_numpy(self):
+        return np.array(self.base_fitter.state.precision_jax) if self.base_fitter.state.precision_jax is not None else None
+
+    @property
     def noise_psd_numpy(self):
-        return np.array(self.base_fitter.state.noise_psd_jax) if self.base_fitter.state.noise_psd_jax is not None else None
+        precision = self.precision_numpy
+        if precision is None:
+            return None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            psd = np.reciprocal(precision)
+        psd = np.where(np.isfinite(psd), psd, np.inf)
+        return psd
 
     @property
     def maps_numpy(self):
