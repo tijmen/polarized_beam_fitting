@@ -709,8 +709,25 @@ class BeamPlotter:
             d_map, m_map, r_map = stokes_data[stokes]
             asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
 
-            noise_psd = np.array(self.base_fitter.state.noise_psd_jax)[source_idx, :, :, band_idx, i]
-            noise_asd = np.sqrt(noise_psd)
+            precision_all = np.array(self.base_fitter.state.precision_jax)
+            if precision_all.ndim == 5:
+                precision = precision_all[source_idx, :, :, band_idx, i]
+            elif precision_all.ndim == 7:
+                precision = precision_all[source_idx, :, :, band_idx, i, band_idx, i]
+            else:
+                raise ValueError(f"Unexpected precision array shape for ASD plotting: {precision_all.shape}")
+
+            precision = np.asarray(precision)
+            if np.iscomplexobj(precision):
+                precision = np.real(precision)
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                noise_psd = np.reciprocal(precision)
+
+            finite_mask = np.isfinite(noise_psd) & (noise_psd > 0)
+            noise_psd = np.where(finite_mask, noise_psd, np.inf)
+            noise_psd_shifted = np.fft.fftshift(noise_psd)
+            noise_asd = np.sqrt(noise_psd_shifted)
             asd_ratio = asd_residual / noise_asd
 
             # Plotting ASDs
@@ -945,7 +962,7 @@ class BeamPlotter:
                     pretty = (
                         rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$"
                         if "beta" in param_name
-                        else f"{param_name} ({band_suffix})"
+                        else f"{param_name.replace('_', ' ')} ({band_suffix})"
                     )
                     label_map[key_flat] = pretty
                     corner_data[key_flat] = var_flat
@@ -967,6 +984,7 @@ class BeamPlotter:
                 labels=all_labels,
                 quantiles=[0.16, 0.5, 0.84],
                 show_titles=True,
+                title_kwargs={"fontsize": 10},
             )
             fig.suptitle(f"{sampler_name} Corner Plot", y=1.02)
         else:
@@ -979,12 +997,18 @@ class BeamPlotter:
                 color=colors[0],
                 hist_kwargs={"alpha": 0.6},
                 contour_kwargs={"alpha": 0.6},
+                title_kwargs={"fontsize": 10},
             )
 
             # Overlay additional chains
             for i in range(1, len(all_corner_arrays)):
                 fig = corner.corner(
-                    all_corner_arrays[i], fig=fig, color=colors[i % len(colors)], hist_kwargs={"alpha": 0.6}, contour_kwargs={"alpha": 0.6}
+                    all_corner_arrays[i],
+                    fig=fig,
+                    color=colors[i % len(colors)],
+                    hist_kwargs={"alpha": 0.6},
+                    contour_kwargs={"alpha": 0.6},
+                    title_kwargs={"fontsize": 10},
                 )
 
             # Add legend in upper right corner

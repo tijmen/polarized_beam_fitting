@@ -55,13 +55,13 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
     Returns a function that takes (params, data, weight_array) as arguments.
     """
 
-    def chi2_fourier_single(beam_params_list, yoff, xoff, flux, data_fft, noise_psd):
+    def chi2_fourier_single(beam_params_list, yoff, xoff, flux, data_fft, precision):
         """Chi2 for single source in Fourier space."""
         # Build model for all bands
         maps_per_band = []
         for i, band in enumerate(config.bands):
             beam_model = beam_models[band]
-            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff, xoff)
+            T_map, P_map = beam_model.evaluate_beam_maps(beam_params_list[i], yoff[i], xoff[i])
             maps_per_band.append((T_map, P_map))
 
         # Stack T and P maps for all bands
@@ -79,7 +79,7 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
         model_apod = model * apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
 
-        # Calculate chi2
+        # Calculate chi2 with support for diagonal or full covariance weighting
         residual_fft = data_fft - model_fft
         chi2 = (jnp.abs(residual_fft) ** 2) / noise_psd
         return jnp.sum(jnp.mean(chi2, axis=(0, 1)))

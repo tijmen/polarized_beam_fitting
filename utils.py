@@ -43,34 +43,75 @@ def predict_nyquist_kx(declination_deg):
     return nyquist_hz / on_sky_scan_speed_deg_s
 
 
-def calculate_tod_nyquist_kx_mask(source_id, map_shape, config):
-    """
-    Calculates a Fourier-space mask to exclude modes above 0.85 * TOD Nyquist in kx.
+def build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd):
+    """Construct a cosine-tapered radial low-pass mask."""
+    mask = np.ones_like(k_radius, dtype=float)
 
-    Returns a boolean mask that is True for modes that should be *included*.
+    if not np.isfinite(k_max_cpd):
+        return mask
+
+    if taper_width_cpd <= 0:
+        mask = mask.copy()
+        mask[k_radius > k_max_cpd] = 0.0
+        return mask
+
+    start = max(k_max_cpd - taper_width_cpd, 0.0)
+    mask = mask.copy()
+    mask[k_radius > k_max_cpd] = 0.0
+
+    transition = (k_radius >= start) & (k_radius <= k_max_cpd)
+    if np.any(transition):
+        mask[transition] = 0.5 * (1.0 + np.cos(np.pi * (k_radius[transition] - start) / taper_width_cpd))
+
+    return mask
+
+
+def apply_radial_lowpass(map_2d, apod_mask, k_radius, k_max_cpd, taper_width_cpd):
     """
+    Apply a radial low-pass filter with cosine taper in Fourier space.
+    
+    Note that this effectively applied the mask, and doesn't unapply it. Therefore,
+    this should only be used for building a leakage template.
+    """
+    if not np.isfinite(k_max_cpd):
+        return map_2d
+
+    tapered_map = map_2d * apod_mask
+    fourier_map = np.fft.fft2(tapered_map)
+    lowpass_mask = build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd)
+    filtered = np.fft.ifft2(fourier_map * lowpass_mask)
+    return np.real(filtered)
+
+
+def calculate_tod_nyquist_radial_mask(source_id, map_shape, config, taper_width_pixels=5):
+    """Return a radial low-pass mask based on the TOD Nyquist prediction."""
     ny, nx = map_shape
     reso_deg = config.reso_arcmin / 60.0
 
-    # Calculate kx frequency grid in cycles/degree.
-    # We use fftfreq which corresponds to the unshifted output of jnp.fft.fft2.
-    kx_cycles_per_pixel = np.fft.fftfreq(nx)
-    kx_cycles_per_deg = kx_cycles_per_pixel / reso_deg
+    ky_freq = np.fft.fftfreq(ny, d=reso_deg)
+    kx_freq = np.fft.fftfreq(nx, d=reso_deg)
+    ky_grid, kx_grid = np.meshgrid(ky_freq, kx_freq, indexing="ij")
+    k_radius = np.sqrt(kx_grid**2 + ky_grid**2)
 
-    # Calculate the Nyquist threshold for this source
+    freq_steps = []
+    if ny > 1:
+        freq_steps.append(abs(ky_freq[1] - ky_freq[0]))
+    if nx > 1:
+        freq_steps.append(abs(kx_freq[1] - kx_freq[0]))
+    taper_width_cpd = taper_width_pixels * min(freq_steps) if freq_steps else 0.0
+
     declination = parse_declination(source_id)
     nyquist_kx_cpd = predict_nyquist_kx(declination)
-    kx_threshold = 0.85 * nyquist_kx_cpd
+    k_max_cpd = 0.85 * nyquist_kx_cpd if np.isfinite(nyquist_kx_cpd) else np.inf
 
-    # If threshold is infinite (e.g., failed parsing), include all modes
-    if np.isinf(kx_threshold):
-        return np.ones((ny, nx), dtype=bool)
+    mask = build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd)
+    return mask.astype(config.dtype_np_real)
 
-    # Create a 1D mask for kx
-    kx_mask_1d = np.abs(kx_cycles_per_deg) <= kx_threshold
 
-    # Expand to a 2D mask (same mask for all ky)
-    return np.tile(kx_mask_1d, (ny, 1))
+def calculate_tod_nyquist_kx_mask(source_id, map_shape, config):
+    """Backward-compatible wrapper returning a boolean Nyquist mask."""
+    mask = calculate_tod_nyquist_radial_mask(source_id, map_shape, config)
+    return mask > 0.0
 
 
 def make_apodization_mask(map_shape, width):

@@ -8,7 +8,7 @@ import numpy as np
 from spt3g import core, maps
 
 from .source_fitting import gaussfit_source
-from .utils import check_zero_fraction, make_apodization_mask
+from .utils import check_zero_fraction, make_apodization_mask, shift_map_bilinear
 
 
 class DataLoader:
@@ -30,10 +30,20 @@ class DataLoader:
         source_fields = source_data["fields"]
 
         # Create leakage template
-        qu_templates = self._create_leakage_template(source_data["gaussfit_amp"], source_data["raw_maps"], source_fields)
+        qu_templates, template_offsets = self._create_leakage_template(source_data["gaussfit_amp"], source_data["raw_maps"], source_fields)
+
+        if template_offsets is not None:
+            self._apply_template_offsets(source_data, template_offsets)
 
         # Clean maps
-        maps_clean, maps_fft = self._prepare_clean_maps(source_data["gaussfit_amp"], source_data["raw_maps"], qu_templates, source_fields)
+        maps_clean, maps_fft = self._prepare_clean_maps(
+            source_data["gaussfit_amp"],
+            source_data["raw_maps"],
+            qu_templates,
+            source_fields,
+            source_data["gaussfit_yoff"],
+            source_data["gaussfit_xoff"],
+        )
 
         return (
             source_data["gaussfit_yoff"],
@@ -45,6 +55,7 @@ class DataLoader:
             source_data["weights"],
             maps_fft,
             source_data["source_ids"],
+            source_data["fields"],
             source_data["n_src"],
         )
 
@@ -245,35 +256,39 @@ class DataLoader:
         t_amps = gaussfit_amp[:, :, 0]
 
         if self.config.leakage_weighting == "median":
-            return np.median(qu_maps / t_amps[:, None, None, :, None], axis=0)
-
-        weight_map = {"flat": 1.0, "linear": t_amps, "quadratic": t_amps**2}
-        weights_base = weight_map[self.config.leakage_weighting]
-
-        # Handle flat weighting case (scalar) vs array weighting cases
-        if self.config.leakage_weighting == "flat":
-            weights = np.ones_like(t_amps)[:, None, None, :, None]
+            template = np.median(qu_maps / t_amps[:, None, None, :, None], axis=0)
         else:
-            weights = weights_base[:, None, None, :, None]
+            weight_map = {"flat": 1.0, "linear": t_amps, "quadratic": t_amps**2}
+            weights_base = weight_map[self.config.leakage_weighting]
 
-        normalized_qu = qu_maps / t_amps[:, None, None, :, None]
-        weighted_sum = np.sum(normalized_qu * weights, axis=0)
-        weight_sum = np.sum(weights, axis=0)
+            if self.config.leakage_weighting == "flat":
+                weights = np.ones_like(t_amps)[:, None, None, :, None]
+            else:
+                weights = weights_base[:, None, None, :, None]
 
-        return weighted_sum / weight_sum
+            normalized_qu = qu_maps / t_amps[:, None, None, :, None]
+            weighted_sum = np.sum(normalized_qu * weights, axis=0)
+            weight_sum = np.sum(weights, axis=0)
+            template = weighted_sum / weight_sum
 
-    def _load_precomputed_leakage_templates(self, source_fields: np.ndarray) -> Dict[str, np.ndarray]:
-        """Load precomputed leakage templates for each observed field from disk."""
+        return template, None
+
+    def _load_precomputed_leakage_templates(
+        self, source_fields: np.ndarray
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, Tuple[float, float]]]]:
+        """Load precomputed leakage templates and stored source offsets."""
         unique_fields = {field for field in source_fields if field is not None}
         if not unique_fields:
             raise ValueError("No source fields available to match precomputed leakage templates.")
 
         templates = {}
+        template_offsets: Dict[str, Dict[str, Tuple[float, float]]] = {}
         ny, nx = self.map_shape
         n_bands = len(self.config.bands)
 
         for field in unique_fields:
             field_templates = np.zeros((ny, nx, n_bands, 2), dtype=self.config.dtype_np_real)
+            field_offsets: Dict[str, Tuple[float, float]] = template_offsets.setdefault(field, {})
 
             for band_idx, band in enumerate(self.config.bands):
                 filename = os.path.join(
@@ -301,9 +316,41 @@ class DataLoader:
                 field_templates[:, :, band_idx, 0] = q_map
                 field_templates[:, :, band_idx, 1] = u_map
 
+                offsets_payload = template_data.get("source_offsets")
+                if offsets_payload is None:
+                    raise ValueError(f"Template file {filename} does not contain 'source_offsets'.")
+
+                for source_id, offsets in offsets_payload.items():
+                    try:
+                        y_offset = float(offsets["y_offset"])
+                        x_offset = float(offsets["x_offset"])
+                    except (KeyError, TypeError) as err:
+                        raise ValueError(f"Invalid source offset format in {filename} for source '{source_id}'.") from err
+
+                    # Always trust the offsets stored with each template; they supersede gaussfit positions.
+                    field_offsets[source_id] = (y_offset, x_offset)
+
             templates[field] = field_templates
 
-        return templates
+        return templates, template_offsets
+
+    def _apply_template_offsets(self, source_data: Dict, template_offsets: Dict[str, Dict[str, Tuple[float, float]]]):
+        """Overwrite initial offsets with the values stored alongside precomputed templates."""
+        gaussfit_yoff = source_data["gaussfit_yoff"]
+        gaussfit_xoff = source_data["gaussfit_xoff"]
+        source_ids = source_data["source_ids"]
+        source_fields = source_data["fields"]
+
+        for idx, raw_source_id in enumerate(source_ids):
+            sid = str(raw_source_id)
+            field = source_fields[idx]
+            field_offsets = template_offsets.get(field)
+            if field_offsets is None or sid not in field_offsets:
+                raise ValueError(f"Missing stored offset for source '{sid}' in field '{field}' while using precomputed templates.")
+
+            y_offset, x_offset = field_offsets[sid]
+            gaussfit_yoff[idx] = y_offset
+            gaussfit_xoff[idx] = x_offset
 
     def _prepare_clean_maps(
         self,
@@ -311,12 +358,17 @@ class DataLoader:
         raw_maps: np.ndarray,
         qu_templates,
         source_fields: np.ndarray,
+        gaussfit_yoff: np.ndarray,
+        gaussfit_xoff: np.ndarray,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """Apply leakage correction and prepare final maps."""
+        """Apply leakage correction, subtract shifted templates, and prepare final maps."""
         n_src, ny, nx, n_bands, _ = raw_maps.shape
         maps_clean = raw_maps.copy()
 
         for i in range(n_src):
+            y_offset = float(gaussfit_yoff[i]) if gaussfit_yoff is not None else 0.0
+            x_offset = float(gaussfit_xoff[i]) if gaussfit_xoff is not None else 0.0
+
             if self.config.use_precomputed_leakage_templates:
                 field = source_fields[i]
                 if field not in qu_templates:
@@ -326,9 +378,23 @@ class DataLoader:
                 field_template = qu_templates
 
             for j in range(n_bands):
+                template_q = field_template[:, :, j, 0]
+                template_u = field_template[:, :, j, 1]
+
+                if self.config.use_precomputed_leakage_templates:
+                    if abs(y_offset) > 1e-6 or abs(x_offset) > 1e-6:
+                        template_q_shifted = shift_map_bilinear(template_q, y_offset, x_offset)
+                        template_u_shifted = shift_map_bilinear(template_u, y_offset, x_offset)
+                    else:
+                        template_q_shifted = template_q
+                        template_u_shifted = template_u
+                else:
+                    template_q_shifted = template_q
+                    template_u_shifted = template_u
+
                 t_amp = gaussfit_amp[i, j, 0]
-                maps_clean[i, :, :, j, 1] -= field_template[:, :, j, 0] * t_amp
-                maps_clean[i, :, :, j, 2] -= field_template[:, :, j, 1] * t_amp
+                maps_clean[i, :, :, j, 1] -= template_q_shifted * t_amp
+                maps_clean[i, :, :, j, 2] -= template_u_shifted * t_amp
 
         maps_fft = None
         if self.config.chi2_method == "fourier":

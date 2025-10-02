@@ -25,9 +25,14 @@ from astropy.io import fits
 
 from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
+from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
-from polarized_beam_fitting.noise_psd import ClusterfinderPSDCalculator
-from polarized_beam_fitting.utils import make_apodization_mask
+from polarized_beam_fitting.noise_psd import (
+    ClusterfinderPSDCalculator,
+    EnsembleAsdMeanCalculator,
+    PcaMultiBandCalculator,
+)
+from polarized_beam_fitting.utils import make_apodization_mask, shift_map_bilinear
 
 
 def get_test_config(**kwargs):
@@ -134,6 +139,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     raw_maps = np.zeros_like(maps_numpy)
     qu_templates = np.zeros((ny, nx, n_bands, 2))
     source_ids = np.array([f"mock_source_{i}" for i in range(n_sources)])
+    source_fields = np.array(["mock_field" for _ in range(n_sources)], dtype=object)
 
     return (
         gaussfit_yoff,
@@ -145,8 +151,58 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
         weights_numpy,
         maps_fft_numpy,
         source_ids,
+        source_fields,
         n_sources,
     )
+
+
+class TestTemplateHandling(unittest.TestCase):
+    """Unit tests for handling of precomputed templates."""
+
+    def test_precomputed_template_shift(self):
+        config = get_test_config()
+        config.use_precomputed_leakage_templates = True
+        ny = nx = 7
+        config.map_size_pix = ny
+        config.apodization_width_pix = 2
+
+        loader = DataLoader(config)
+        n_src = 1
+        n_bands = len(config.bands)
+
+        gaussfit_amp = np.zeros((n_src, n_bands, 3), dtype=config.dtype_np_real)
+        gaussfit_amp[0, 0, 0] = 2.0
+
+        raw_maps = np.zeros((n_src, ny, nx, n_bands, 3), dtype=config.dtype_np_real)
+        raw_maps[0, :, :, 0, 1] = 5.0
+        raw_maps[0, :, :, 0, 2] = -4.0
+
+        template = np.zeros((ny, nx, n_bands, 2), dtype=config.dtype_np_real)
+        template[ny // 2, nx // 2, 0, 0] = 1.0
+        template[ny // 2, nx // 2, 0, 1] = 0.3
+        qu_templates = {"mock_field": template}
+
+        source_fields = np.array(["mock_field"], dtype=object)
+        gaussfit_yoff = np.array([0.4], dtype=config.dtype_np_real)
+        gaussfit_xoff = np.array([-0.6], dtype=config.dtype_np_real)
+
+        maps_clean, _ = loader._prepare_clean_maps(
+            gaussfit_amp,
+            raw_maps,
+            qu_templates,
+            source_fields,
+            gaussfit_yoff,
+            gaussfit_xoff,
+        )
+
+        shifted_q = shift_map_bilinear(template[:, :, 0, 0], gaussfit_yoff[0], gaussfit_xoff[0])
+        shifted_u = shift_map_bilinear(template[:, :, 0, 1], gaussfit_yoff[0], gaussfit_xoff[0])
+
+        expected_q = raw_maps[0, :, :, 0, 1] - shifted_q * gaussfit_amp[0, 0, 0]
+        expected_u = raw_maps[0, :, :, 0, 2] - shifted_u * gaussfit_amp[0, 0, 0]
+
+        np.testing.assert_allclose(maps_clean[0, :, :, 0, 1], expected_q, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(maps_clean[0, :, :, 0, 2], expected_u, rtol=0, atol=1e-6)
 
 
 @patch("polarized_beam_fitting.fitter.DataLoader")
@@ -266,6 +322,49 @@ class TestUnitNoisePSD(unittest.TestCase):
         rebinned = calc._rebin_psd_with_averaging(psd_array, (2, 2))
         np.testing.assert_allclose(rebinned, expected)
         print("✓ Rebinning test successful.")
+
+    def test_pca_multiband_matches_diagonal_psd(self):
+        print("\n--- Unit Testing: PCA multi-band precision vs diagonal PSD estimators ---")
+        rng = np.random.default_rng(0)
+
+        config = get_test_config(
+            map_size_pix=16,
+            bands=["90GHz", "150GHz"],
+            noise_psd_method="white_noise",
+        )
+        config.n_pca_components = 4
+
+        ny = nx = config.map_size_pix
+        n_bands = len(config.bands)
+        n_stokes = 3
+        n_src = 6
+
+        noise_std = np.array([0.3, 0.3, 0.3], dtype=config.dtype_np_real)
+        maps_numpy = rng.normal(
+            loc=0.0,
+            scale=noise_std.reshape(1, 1, 1, 1, n_stokes),
+            size=(n_src, ny, nx, n_bands, n_stokes),
+        ).astype(config.dtype_np_real)
+
+        ensemble_calc = EnsembleAsdMeanCalculator(config, (ny, nx))
+        pca_multi_calc = PcaMultiBandCalculator(config, (ny, nx))
+
+        psd_ensemble = ensemble_calc.calculate_noise_psd(maps_numpy)
+
+        precision_pca_multi = pca_multi_calc.calculate_noise_psd(maps_numpy)
+        ny_ax, nx_ax = precision_pca_multi.shape[:2]
+        precision_flat = precision_pca_multi.reshape(ny_ax, nx_ax, n_bands * n_stokes, n_bands * n_stokes)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            psd_from_precision = np.reciprocal(precision_flat)
+        psd_from_precision = np.where(np.isfinite(psd_from_precision), psd_from_precision, np.inf)
+
+        np.testing.assert_allclose(psd_from_precision, psd_ensemble, rtol=0.2, atol=1e-6)
+
+        diag_vec = precision_flat.reshape(ny_ax, nx_ax, -1)
+        diag_matrix = np.einsum("yxj,jk->yxjk", diag_vec, np.eye(n_bands * n_stokes))
+        precision_offdiag = precision_flat - diag_matrix
+        self.assertLess(np.max(np.abs(precision_offdiag)), 1e-4)
+        print("✓ PCA multi-band precision matches diagonal estimators for independent noise.")
 
 
 if __name__ == "__main__":

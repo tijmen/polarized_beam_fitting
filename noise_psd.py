@@ -440,77 +440,87 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         return covariance_psd
 
 
-class PcaPsdCalculator(NoisePSDCalculator):
-    """
-
-    PcaPsdCalculator is a per-source PSD calculator holding whatever PSD I'm currently developing. It is the default.
-
-    Calculates noise PSDs using a data-driven, log-space PCA model. Each component is a PSD. Log space is good
-    because the individual PSDs have chi-squared-distributed noise with two degrees of freedom. I believe the
-    log of that will have Gaussian noise.
-    """
+class PcaMultiBandCalculator(NoisePSDCalculator):
+    """PCA-regularized multi-band precision estimator."""
 
     def calculate_noise_psd(self, maps_numpy: np.ndarray) -> np.ndarray:
-        """
-        Calculates noise PSDs using a log-space PCA model built from the data.
+        print(f"Calculating PCA-based multi-band precision ({self.config.n_pca_components} components)...")
 
-        Parameters:
-        -----------
-        maps_numpy : np.ndarray
-            Array with shape (n_src, ny, nx, n_bands, n_stokes) containing the maps.
-
-        Returns:
-        --------
-        np.ndarray
-            Array of the same shape containing the reconstructed 2D noise PSDs.
-        """
-        print(f"Calculating noise PSDs with log-space PCA model ({self.config.n_pca_components} components)...")
         n_src, ny, nx, n_bands, n_stokes = maps_numpy.shape
-        map_shape = (ny, nx)
+        n_dim = n_bands * n_stokes
 
         noise_mask = make_apod_mask_center_excised(
-            map_shape,
+            self.map_shape,
             self.config.apodization_width_pix,
             self.config.noise_hole_radius_arcmin,
             self.config.reso_arcmin,
         )
+
+        masked_maps = maps_numpy * noise_mask[None, :, :, None, None]
+        masked_maps_fft = np.fft.fft2(masked_maps, axes=(1, 2))
+
         effective_area = np.sum(noise_mask**2)
-        print("Collating all map PSDs...")
-        all_psds_flat_linear = []
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                for stokes_idx in range(n_stokes):
-                    real_map = maps_numpy[i, :, :, band_idx, stokes_idx]
-                    masked_map = real_map * noise_mask
-                    fft_2d = np.fft.fft2(masked_map)
-                    psd_2d = np.abs(fft_2d) ** 2 / effective_area
-                    all_psds_flat_linear.append(psd_2d.flatten())
+        if effective_area <= 0:
+            raise ValueError("Effective area of noise mask must be positive.")
+        masked_maps_fft = masked_maps_fft / np.sqrt(effective_area)
 
-        X_linear = np.array(all_psds_flat_linear)
-        X_log = np.log(X_linear)
-        print("Performing PCA on log-transformed PSDs...")
-        mean_log_psd = np.mean(X_log, axis=0)
-        X_log_centered = X_log - mean_log_psd
-        pca = PCA(n_components=self.config.n_pca_components, svd_solver="randomized", random_state=42, n_oversamples=100)
-        pca.fit(X_log_centered)
-        print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+        fft_reshaped = masked_maps_fft.reshape(n_src, -1)
+        n_features = fft_reshaped.shape[1]
 
-        print("Reconstructing denoised PSDs...")
-        coeffs = pca.transform(X_log_centered)
-        X_reconstructed_log_centered = pca.inverse_transform(coeffs)
-        X_reconstructed_log = X_reconstructed_log_centered + mean_log_psd
-        X_reconstructed_linear = np.exp(X_reconstructed_log)
+        X_real = np.hstack([fft_reshaped.real, fft_reshaped.imag])
 
-        per_source_psd_array = np.zeros_like(maps_numpy, dtype=self.config.dtype_np_real)
-        map_idx = 0
-        for i in range(n_src):
-            for band_idx in range(n_bands):
-                for stokes_idx in range(n_stokes):
-                    per_source_psd_array[i, :, :, band_idx, stokes_idx] = X_reconstructed_linear[map_idx].reshape(map_shape)
-                    map_idx += 1
+        n_components = min(self.config.n_pca_components, n_src - 1)
+        if n_components <= 0:
+            raise ValueError("n_pca_components must be positive and strictly less than the number of sources for PCA precision estimation.")
 
-        print("PCA-based PSD calculation complete.")
-        return per_source_psd_array
+        print(f"  Performing PCA with {n_components} components...")
+        pca = PCA(n_components=n_components, svd_solver="randomized", random_state=42)
+        pca.fit(X_real)
+
+        print(f"  PCA explained variance ratio: {pca.explained_variance_ratio_}")
+        total_var_top = np.sum(pca.explained_variance_)
+        print(f"  Total variance captured: {total_var_top:.4g}")
+
+        total_data_variance = np.var(X_real)
+        dof_total = X_real.shape[1]
+        dof_residual = max(dof_total - n_components, 1)
+        variance_floor = (total_data_variance * dof_total - total_var_top) / dof_residual
+
+        if variance_floor <= 0:
+            variance_floor = 1e-9 * max(total_data_variance, 1.0)
+            print(f"  Warning: variance floor non-positive; using fallback {variance_floor:.2e}")
+        else:
+            print(f"  Estimated variance floor: {variance_floor:.4g}")
+
+        components_real = pca.components_[:, :n_features]
+        components_imag = pca.components_[:, n_features:]
+        components_complex = (
+            (components_real + 1j * components_imag).reshape(n_components, ny, nx, n_bands, n_stokes).astype(self.config.dtype_np_complex)
+        )
+
+        eigenvalues = pca.explained_variance_ * n_src
+        max_eig = np.max(eigenvalues) if eigenvalues.size else 0.0
+        denom_clip = 1e-12 * max(max_eig, 1.0)
+        precision_eigs = 1.0 / np.maximum(eigenvalues, denom_clip)
+        precision_floor = 1.0 / (variance_floor * n_src)
+        weights = precision_eigs - precision_floor
+
+        precision_low_rank = np.einsum(
+            "c,cyxbs,cyxBT->yxbsBT",
+            weights,
+            components_complex,
+            np.conj(components_complex),
+        )
+
+        identity = np.eye(n_dim, dtype=self.config.dtype_np_complex).reshape(n_bands, n_stokes, n_bands, n_stokes)
+        precision_matrix = precision_low_rank + precision_floor * identity[None, None, :, :, :, :]
+        precision_matrix = 0.5 * (precision_matrix + np.swapaxes(precision_matrix, 2, 4).swapaxes(3, 5).conj())
+
+        print("PCA-based multi-band precision calculation complete.")
+        return precision_matrix
+
+
+
 
 
 class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
@@ -654,8 +664,8 @@ def create_noise_psd_calculator(config, map_shape):
         return EnsembleAsdMeanCalculator(config, map_shape)
     elif config.noise_psd_method == "multiband_covariance":
         return MultiBandCovarianceCalculator(config, map_shape)
-    elif config.noise_psd_method == "pca_psd":
-        return PcaPsdCalculator(config, map_shape)
+    elif config.noise_psd_method == "pca_multiband_covariance":
+        return PcaMultiBandCalculator(config, map_shape)
     elif config.noise_psd_method == "pca_psd_separate_tqu":
         return PcaPsdSeparateTQUCalculator(config, map_shape)
     elif config.noise_psd_method == "white_noise":
