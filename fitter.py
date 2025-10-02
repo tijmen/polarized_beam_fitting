@@ -140,10 +140,11 @@ class ObjectiveFunctions:
             chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
             return jnp.mean(chi2_per_mode)
 
-        # Multi-band precision matrices: precision has shape (ny, nx, n_b, n_s, n_b, n_s)
+        # Multi-band precision matrices arrive per source with axes (ny, nx, n_bands, n_stokes, n_bands, n_stokes)
         ny, nx = residual_fft.shape[:2]
         n_bands = residual_fft.shape[-2]
         n_stokes = residual_fft.shape[-1]
+
         residual_vec = residual_fft.reshape(ny, nx, n_bands * n_stokes)
         precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
         weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)
@@ -382,7 +383,14 @@ class PolarizedBeamFitter:
         print("Preparing inverse covariance matrices for multi-band chi^2...")
 
         cov = np.asarray(covariance_psd, dtype=self.config.dtype_np_complex)
-        ny, nx, n_bands, _, n_stokes, _ = cov.shape
+
+        if cov.ndim != 6:
+            raise ValueError(f"Expected 6D covariance tensor, received shape {cov.shape}")
+
+        ny, nx, n_bands, n_stokes, cov_band, cov_stokes = cov.shape
+        if cov_band != n_bands or cov_stokes != n_stokes:
+            raise ValueError(f"Covariance tensor axes must follow (n_bands, n_stokes, n_bands, n_stokes); received shape {cov.shape}")
+
         n_dim = n_bands * n_stokes
 
         cov_matrix = cov.reshape(ny, nx, n_dim, n_dim)

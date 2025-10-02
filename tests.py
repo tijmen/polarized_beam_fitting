@@ -30,9 +30,14 @@ from polarized_beam_fitting.fitter import PolarizedBeamFitter
 from polarized_beam_fitting.noise_psd import (
     ClusterfinderPSDCalculator,
     EnsembleAsdMeanCalculator,
+    MultiBandCovarianceCalculator,
     PcaMultiBandCalculator,
 )
-from polarized_beam_fitting.utils import make_apodization_mask, shift_map_bilinear
+from polarized_beam_fitting.utils import (
+    make_apod_mask_center_excised,
+    make_apodization_mask,
+    shift_map_bilinear,
+)
 
 
 def get_test_config(**kwargs):
@@ -365,6 +370,44 @@ class TestUnitNoisePSD(unittest.TestCase):
         precision_offdiag = precision_flat - diag_matrix
         self.assertLess(np.max(np.abs(precision_offdiag)), 1e-4)
         print("✓ PCA multi-band precision matches diagonal estimators for independent noise.")
+
+    def test_multiband_covariance_axis_order(self):
+        print("\n--- Unit Testing: Multi-band covariance axis order ---")
+        rng = np.random.default_rng(1)
+
+        config = get_test_config(
+            map_size_pix=8,
+            bands=["90GHz", "150GHz"],
+            noise_psd_method="multiband_covariance",
+        )
+
+        ny = nx = config.map_size_pix
+        n_bands = len(config.bands)
+        n_stokes = 3
+        n_src = 3
+
+        maps_numpy = rng.normal(size=(n_src, ny, nx, n_bands, n_stokes)).astype(config.dtype_np_real)
+
+        calc = MultiBandCovarianceCalculator(config, (ny, nx))
+        covariance_psd = calc.calculate_noise_psd(maps_numpy)
+
+        self.assertEqual(covariance_psd.shape, (ny, nx, n_bands, n_stokes, n_bands, n_stokes))
+
+        noise_mask = make_apod_mask_center_excised(
+            (ny, nx),
+            config.apodization_width_pix,
+            config.noise_hole_radius_arcmin,
+            config.reso_arcmin,
+        )
+        masked_maps = maps_numpy * noise_mask[None, :, :, None, None]
+        masked_maps_fft = np.fft.fft2(masked_maps, axes=(1, 2))
+        covariance_sum = np.einsum("nyxbs,nyxct->yxbcst", masked_maps_fft, np.conj(masked_maps_fft))
+        effective_area = np.sum(noise_mask**2)
+        covariance_expected = covariance_sum / (n_src * effective_area)
+        covariance_expected = np.transpose(covariance_expected, (0, 1, 2, 4, 3, 5))
+
+        np.testing.assert_allclose(covariance_psd, covariance_expected)
+        print("✓ Multi-band covariance axes interleave band and Stokes indices.")
 
 
 if __name__ == "__main__":

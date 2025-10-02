@@ -89,6 +89,7 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
         ny, nx = residual_fft.shape[:2]
         n_bands = residual_fft.shape[-2]
         n_stokes = residual_fft.shape[-1]
+
         residual_vec = residual_fft.reshape(ny, nx, n_bands * n_stokes)
         precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
         weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)

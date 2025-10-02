@@ -436,6 +436,9 @@ class MultiBandCovarianceCalculator(NoisePSDCalculator):
         effective_area = np.sum(noise_mask**2)
         covariance_psd = covariance_sum / (n_src * effective_area)
 
+        # Reorder to interleave band and Stokes axes for downstream reshapes
+        covariance_psd = np.transpose(covariance_psd, (0, 1, 2, 4, 3, 5))
+
         print(f"Multi-band covariance calculation complete using {n_src} sources.")
         return covariance_psd
 
