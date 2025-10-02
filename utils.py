@@ -70,7 +70,7 @@ def build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd):
 def apply_radial_lowpass(map_2d, apod_mask, k_radius, k_max_cpd, taper_width_cpd):
     """
     Apply a radial low-pass filter with cosine taper in Fourier space.
-    
+
     Note that this effectively applied the mask, and doesn't unapply it. Therefore,
     this should only be used for building a leakage template.
     """

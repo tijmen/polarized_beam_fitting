@@ -520,9 +520,6 @@ class PcaMultiBandCalculator(NoisePSDCalculator):
         return precision_matrix
 
 
-
-
-
 class PcaPsdSeparateTQUCalculator(NoisePSDCalculator):
     """
     PcaPsdSeparateTQUCalculator performs separate PCA analyses for each Stokes parameter:

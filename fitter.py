@@ -25,11 +25,11 @@ from .data_loader import DataLoader
 from .noise_psd import create_noise_psd_calculator
 from .utils import (
     build_whitening_transform,
+    calculate_tod_nyquist_radial_mask_smooth,
     check_convergence,
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
-    calculate_tod_nyquist_radial_mask,
 )
 
 
@@ -200,9 +200,7 @@ class PolarizedBeamFitter:
         self.objective_function = obj_builder.build_objective()
 
         # Compile optimization functions
-        self._loss_and_grad = jax.jit(
-            jax.value_and_grad(lambda params_logit, data: self.objective_function(params_logit, data, None))
-        )
+        self._loss_and_grad = jax.jit(jax.value_and_grad(lambda params_logit, data: self.objective_function(params_logit, data, None)))
 
         # Initialize parameters
         self.params_physical = self._initialize_parameters()
