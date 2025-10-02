@@ -9,6 +9,7 @@ import re
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.ndimage import shift as nd_shift
 from scipy.special import j0  # pylint: disable=no-name-in-module
 
 
@@ -83,7 +84,7 @@ def apply_radial_lowpass(map_2d, apod_mask, k_radius, k_max_cpd, taper_width_cpd
     return np.real(filtered)
 
 
-def calculate_tod_nyquist_radial_mask(source_id, map_shape, config, taper_width_pixels=5):
+def calculate_tod_nyquist_radial_mask_smooth(source_id, map_shape, config, taper_width_pixels=5):
     """Return a radial low-pass mask based on the TOD Nyquist prediction."""
     ny, nx = map_shape
     reso_deg = config.reso_arcmin / 60.0
@@ -108,8 +109,11 @@ def calculate_tod_nyquist_radial_mask(source_id, map_shape, config, taper_width_
     return mask.astype(config.dtype_np_real)
 
 
-def calculate_tod_nyquist_kx_mask(source_id, map_shape, config):
-    """Backward-compatible wrapper returning a boolean Nyquist mask."""
+def calculate_tod_nyquist_radial_mask(source_id, map_shape, config):
+    """
+    Same as calculate_tod_nyquist_radial_mask_smooth, but returns a hard
+    boolean mask instead of a cosine tapered-mask.
+    """
     mask = calculate_tod_nyquist_radial_mask(source_id, map_shape, config)
     return mask > 0.0
 
@@ -173,7 +177,11 @@ def make_apod_mask_center_excised(map_shape, apod_width, hole_radius_arcmin, res
     y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing="ij")
     r_arcmin = np.sqrt(x_grid**2 + y_grid**2) * reso_arcmin
 
-    # Create smooth hole using cosine taper
+    # Create smooth hole using cosine taper. If requested hole exceeds the map, return the edge apodization mask.
+    max_radius_arcmin = float(np.max(np.sqrt(x_grid**2 + y_grid**2)) * reso_arcmin)
+    if hole_radius_arcmin <= 0.0 or hole_radius_arcmin >= max_radius_arcmin:
+        return mask
+
     hole_radius_pix = hole_radius_arcmin / reso_arcmin
     taper_width_pix = hole_radius_pix * 0.2  # 20% of radius for smooth transition
 
@@ -223,6 +231,11 @@ def check_zero_fraction(t_map, source_id, max_zero_fraction=0.05):
         print(f"Skipping source {source_id} because it has {zero_pixels}/{total_pixels} ({zero_fraction:.3f}) zero pixels")
         return False
     return True
+
+
+def shift_map_bilinear(map_2d, y_shift, x_shift, mode="nearest"):
+    """Shift a 2D map using bilinear interpolation."""
+    return nd_shift(map_2d, shift=(y_shift, x_shift), order=1, mode=mode, prefilter=False)
 
 
 def compute_2d_asd(map_2d):
