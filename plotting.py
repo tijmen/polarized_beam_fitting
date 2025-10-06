@@ -61,6 +61,24 @@ class BeamPlotter:
             band = self.primary_band
         return band.replace("GHz", "")
 
+    def _apply_ell_cut_indices(self, array_2d):
+        """Apply fitter's ell truncation indices to a 2D Fourier array if needed."""
+        idx_y = getattr(self.base_fitter.state, "k_indices_y", None)
+        idx_x = getattr(self.base_fitter.state, "k_indices_x", None)
+        if idx_y is None or idx_x is None:
+            return array_2d
+        if array_2d.shape[0] != len(idx_y) or array_2d.shape[1] != len(idx_x):
+            array_2d = np.take(array_2d, idx_y, axis=0)
+            array_2d = np.take(array_2d, idx_x, axis=1)
+        return array_2d
+
+    def _compute_asd_with_ell_cut(self, map_2d):
+        """Compute ASD matching the fitter's ell truncation."""
+        fft_map = np.fft.fft2(map_2d)
+        fft_map = self._apply_ell_cut_indices(fft_map)
+        asd = np.abs(fft_map)
+        return np.fft.fftshift(asd)
+
     def _get_fit_params_for_band(self, best_fit_params, band=None):
         """Extract fit parameters for a specific band from multi-band results."""
         if band is None:
@@ -707,7 +725,9 @@ class BeamPlotter:
 
         for i, stokes in enumerate(["T", "Q", "U"]):
             d_map, m_map, r_map = stokes_data[stokes]
-            asd_data, asd_model, asd_residual = compute_2d_asd(d_map), compute_2d_asd(m_map), compute_2d_asd(r_map)
+            asd_data = self._compute_asd_with_ell_cut(d_map)
+            asd_model = self._compute_asd_with_ell_cut(m_map)
+            asd_residual = self._compute_asd_with_ell_cut(r_map)
 
             precision_all = np.array(self.base_fitter.state.precision_jax)
             if precision_all.ndim == 5:

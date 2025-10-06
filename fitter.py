@@ -51,6 +51,8 @@ class FitterState:
     maps_fft_jax: Optional[jnp.ndarray] = None
     precision_jax: Optional[jnp.ndarray] = None
     k_mask_jax: Optional[jnp.ndarray] = None
+    k_indices_y: Optional[jnp.ndarray] = None
+    k_indices_x: Optional[jnp.ndarray] = None
 
     # Source information
     source_ids: np.ndarray = None
@@ -134,6 +136,9 @@ class ObjectiveFunctions:
         model = self._build_model(beam_params_list, yoff, xoff, flux)
         model_apod = model * self.state.apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
+        if self.state.k_indices_y is not None and self.state.k_indices_x is not None:
+            model_fft = jnp.take(model_fft, self.state.k_indices_y, axis=0)
+            model_fft = jnp.take(model_fft, self.state.k_indices_x, axis=1)
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
             chi2 = (jnp.abs(residual_fft) ** 2) * precision
@@ -298,18 +303,33 @@ class PolarizedBeamFitter:
 
     def _setup_fourier_data(self, maps, maps_fft):
         """Setup data for Fourier-space analysis."""
-        self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
+        ny, nx = self.state.apod_mask.shape
+        idx_y_np, idx_x_np = self._compute_ell_cut_indices((ny, nx))
+
+        if idx_y_np is None or idx_x_np is None:
+            self.state.k_indices_y = None
+            self.state.k_indices_x = None
+            maps_fft_cut = maps_fft
+            ny_fft, nx_fft = ny, nx
+        else:
+            self.state.k_indices_y = jnp.asarray(idx_y_np, dtype=jnp.int32)
+            self.state.k_indices_x = jnp.asarray(idx_x_np, dtype=jnp.int32)
+            maps_fft_cut = self._truncate_fourier_numpy(maps_fft, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
+            ny_fft, nx_fft = maps_fft_cut.shape[1:3]
+
+        self.state.maps_fft_jax = jnp.asarray(maps_fft_cut, dtype=self.config.dtype_jax_complex)
 
         psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
         nyquist_mask = self._calculate_nyquist_mask(self.state.source_ids)
+        if idx_y_np is not None and idx_x_np is not None:
+            nyquist_mask = self._truncate_fourier_numpy(nyquist_mask, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
         self.state.k_mask_jax = jnp.asarray(nyquist_mask, dtype=self.config.dtype_jax_real)
 
         if self.config.noise_psd_method == "multiband_covariance":
             n_src = self.state.n_src
-            ny, nx = self.state.apod_mask.shape
             n_bands = len(self.config.bands)
             n_stokes = 3
-            precision_per_source = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+            precision_per_source = np.zeros((n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
 
             unique_fields = np.unique(self.state.fields)
             for field in unique_fields:
@@ -317,22 +337,25 @@ class PolarizedBeamFitter:
                 field_maps = maps[field_indices]
                 covariance_psd = psd_calc.calculate_noise_psd(field_maps)
                 precision_matrix = self._prepare_precision_from_covariance(covariance_psd)
+                if idx_y_np is not None and idx_x_np is not None:
+                    precision_matrix = self._truncate_fourier_numpy(precision_matrix, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
                 repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
                 precision_per_source[field_indices] = repeated_precision
 
             self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
-        elif self.config.noise_psd_method == "pca_multiband_covariance":
+        elif self.config.noise_psd_method in {"pca_multiband_covariance", "parametric_prefit"}:
             n_src = self.state.n_src
-            ny, nx = self.state.apod_mask.shape
             n_bands = len(self.config.bands)
             n_stokes = 3
-            precision_per_source = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+            precision_per_source = np.zeros((n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
 
             unique_fields = np.unique(self.state.fields)
             for field in unique_fields:
                 field_indices = np.where(self.state.fields == field)[0]
                 field_maps = maps[field_indices]
                 precision_matrix = psd_calc.calculate_noise_psd(field_maps)
+                if idx_y_np is not None and idx_x_np is not None:
+                    precision_matrix = self._truncate_fourier_numpy(precision_matrix, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
                 repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
                 precision_per_source[field_indices] = repeated_precision
 
@@ -344,6 +367,17 @@ class PolarizedBeamFitter:
             precision_diag = np.where(np.isfinite(precision_diag), precision_diag, 0.0)
             if precision_diag.ndim == 4:
                 precision_diag = np.broadcast_to(precision_diag, (self.state.n_src,) + precision_diag.shape)
+            if idx_y_np is not None and idx_x_np is not None:
+                if precision_diag.ndim == 4:
+                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
+                elif precision_diag.ndim == 5:
+                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
+                elif precision_diag.ndim == 6:
+                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
+                elif precision_diag.ndim == 7:
+                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
+                else:
+                    raise ValueError(f"Unexpected precision tensor rank: {precision_diag.ndim}")
             dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_diag) else self.config.dtype_jax_real
             self.state.precision_jax = jnp.asarray(precision_diag, dtype=dtype)
 
@@ -360,6 +394,39 @@ class PolarizedBeamFitter:
         map_shape = (self.config.map_size_pix, self.config.map_size_pix)
         masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
         return np.stack(masks)  # (n_src, ny, nx)
+
+    def _compute_ell_cut_indices(self, map_shape):
+        """Return ky/kx indices obeying ell <= ellmax; None if no cutoff requested."""
+        ellmax = getattr(self.config, "ellmax", None)
+        if ellmax is None or not np.isfinite(ellmax) or ellmax <= 0:
+            return None, None
+
+        ny, nx = map_shape
+        reso_deg = self.config.reso_arcmin / 60.0
+        ky = np.fft.fftfreq(ny, d=reso_deg)
+        kx = np.fft.fftfreq(nx, d=reso_deg)
+        k_radius_y = np.abs(ky)
+        k_radius_x = np.abs(kx)
+        k_max_cpd = ellmax / 360.0
+
+        idx_y = np.where(k_radius_y <= k_max_cpd)[0]
+        idx_x = np.where(k_radius_x <= k_max_cpd)[0]
+
+        if idx_y.size == 0 or idx_x.size == 0:
+            raise ValueError(
+                "ellmax is too small for the current map geometry; increase ellmax or decrease map resolution."
+            )
+        if idx_y.size == ny and idx_x.size == nx:
+            return None, None
+        return idx_y, idx_x
+
+    def _truncate_fourier_numpy(self, array, idx_y, idx_x, axis_y, axis_x):
+        """Return array truncated along specified Fourier axes if indices are provided."""
+        if idx_y is None or idx_x is None:
+            return array
+        truncated = np.take(array, idx_y, axis=axis_y)
+        truncated = np.take(truncated, idx_x, axis=axis_x)
+        return truncated
 
     def _apply_fourier_mask(self):
         """Multiply precision weights by the source-specific Fourier mask."""

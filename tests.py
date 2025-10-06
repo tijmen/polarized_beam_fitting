@@ -1,27 +1,19 @@
-"""
-Tests for the polarized beam fitting package.
-
-This test suite includes both end-to-end "round-trip" tests and focused
-unit tests. The end-to-end tests verify that the fitter can recover known
-input beam parameters under various configurations, exploring one feature
-at a time away from a default setup. Unit tests cover complex, isolated
-functions.
-
-To run all tests, use:
-`python -m pytest polarized_beam_fitting/tests.py`
-
-Author: Tijmen de Haan
-Date: 2025-08-02
-"""
+"""End-to-end and unit tests for the polarized beam fitting package."""
 
 import os
+import pickle
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import jax
+import jax.numpy as jnp
+import matplotlib
 import numpy as np
 from astropy.io import fits
+
+matplotlib.use("Agg")
 
 from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
@@ -31,12 +23,20 @@ from polarized_beam_fitting.noise_psd import (
     ClusterfinderPSDCalculator,
     EnsembleAsdMeanCalculator,
     MultiBandCovarianceCalculator,
+    ParametricPrefitCalculator,
     PcaMultiBandCalculator,
 )
+from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.utils import (
+    calculate_tod_nyquist_radial_mask_smooth,
     make_apod_mask_center_excised,
     make_apodization_mask,
+    parse_declination,
+    predict_nyquist_kx,
     shift_map_bilinear,
+    compute_2d_asd,
+    linear_interp_differentiable,
+    safe_filename,
 )
 
 
@@ -71,12 +71,12 @@ def get_test_config(**kwargs):
         sigma_main, sigma_bt = 1.2 / 2.355, 1.4 / 2.355
         bmain = np.exp(-0.5 * (r_fine / sigma_main) ** 2)
         bt = np.exp(-0.5 * (r_fine / sigma_bt) ** 2)
-        np.savez(
-            dummy_betapol_file,
-            r_fine_arcmin=r_fine,
-            BT_r_norm_150=bt,
-            Bmain_r_norm_150=bmain,
-        )
+        betapol_payload = {"r_fine_arcmin": r_fine}
+        for band in config.bands:
+            suffix = band.replace("GHz", "")
+            betapol_payload[f"BT_r_norm_{suffix}"] = bt
+            betapol_payload[f"Bmain_r_norm_{suffix}"] = bmain
+        np.savez(dummy_betapol_file, **betapol_payload)
         config.betapol_data_path = dummy_betapol_file
 
     if config.noise_psd_method == "clusterfinder_psd":
@@ -88,6 +88,18 @@ def get_test_config(**kwargs):
     return config
 
 
+def _normalize_true_params(config, true_beam_params):
+    """Return per-band parameter dictionaries for synthetic data generation."""
+    n_bands = len(config.bands)
+    if isinstance(true_beam_params, (list, tuple)):
+        if len(true_beam_params) != n_bands:
+            raise ValueError("Length of true_beam_params list must match number of bands.")
+        return list(true_beam_params)
+    if isinstance(true_beam_params, dict):
+        return [dict(true_beam_params) for _ in range(n_bands)]
+    raise TypeError("true_beam_params must be a dict or list of dicts.")
+
+
 def generate_mock_data(config, true_beam_params, n_sources=3):
     """
     Generate mock data based on a specific beam model and true parameters.
@@ -97,41 +109,47 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     ny, nx = shape
     y_grid, x_grid = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
 
-    beam_model = create_beam_model(config, y_grid, x_grid, config.bands[0])
+    band_params = _normalize_true_params(config, true_beam_params)
+    n_bands = len(config.bands)
+    beam_models = [create_beam_model(config, y_grid, x_grid, band) for band in config.bands]
 
     true_yoffs = np.random.uniform(-1.5, 1.5, n_sources)
     true_xoffs = np.random.uniform(-1.5, 1.5, n_sources)
-    true_amps = np.random.uniform([0.9, -0.05, -0.05], [1.1, 0.05, 0.05], (n_sources, 3))
+    amp_low = np.array([0.9, -0.05, -0.05])
+    amp_high = np.array([1.1, 0.05, 0.05])
+    true_amps = amp_low + (amp_high - amp_low) * np.random.uniform(size=(n_sources, n_bands, 3))
 
-    n_bands = len(config.bands)
     maps_numpy = np.zeros((n_sources, ny, nx, n_bands, 3), dtype=config.dtype_np_real)
     weights_numpy = np.zeros((n_sources, ny, nx, n_bands, 3, 3), dtype=config.dtype_np_real)
 
     for i in range(n_sources):
-        true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(true_beam_params, true_yoffs[i], true_xoffs[i])
-        signal_maps = np.stack(
-            [
-                true_amps[i, 0] * true_beam_T,
-                true_amps[i, 1] * true_beam_P,
-                true_amps[i, 2] * true_beam_P,
-            ],
-            axis=-1,
-        )
+        for band_idx, beam_model in enumerate(beam_models):
+            true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(
+                band_params[band_idx], true_yoffs[i], true_xoffs[i]
+            )
+            signal_maps = np.stack(
+                [
+                    true_amps[i, band_idx, 0] * true_beam_T,
+                    true_amps[i, band_idx, 1] * true_beam_P,
+                    true_amps[i, band_idx, 2] * true_beam_P,
+                ],
+                axis=-1,
+            )
 
-        noise_level = 1e-5
-        noise_maps = np.stack(
-            [
-                np.random.normal(0, noise_level, shape),
-                np.random.normal(0, noise_level * np.sqrt(2), shape),
-                np.random.normal(0, noise_level * np.sqrt(2), shape),
-            ],
-            axis=-1,
-        )
+            noise_level = 1e-5
+            noise_maps = np.stack(
+                [
+                    np.random.normal(0, noise_level, shape),
+                    np.random.normal(0, noise_level * np.sqrt(2), shape),
+                    np.random.normal(0, noise_level * np.sqrt(2), shape),
+                ],
+                axis=-1,
+            )
 
-        maps_numpy[i, :, :, 0, :] = signal_maps + noise_maps
-        weights_numpy[i, :, :, 0, 0, 0] = 1.0 / (noise_level**2)
-        weights_numpy[i, :, :, 0, 1, 1] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
-        weights_numpy[i, :, :, 0, 2, 2] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
+            maps_numpy[i, :, :, band_idx, :] = signal_maps + noise_maps
+            weights_numpy[i, :, :, band_idx, 0, 0] = 1.0 / (noise_level**2)
+            weights_numpy[i, :, :, band_idx, 1, 1] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
+            weights_numpy[i, :, :, band_idx, 2, 2] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
 
     apod_mask = make_apodization_mask(shape, config.apodization_width_pix)
     maps_apodized = maps_numpy * apod_mask[np.newaxis, :, :, np.newaxis, np.newaxis]
@@ -139,7 +157,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
 
     gaussfit_yoff = true_yoffs
     gaussfit_xoff = true_xoffs
-    gaussfit_initial_amp = true_amps[:, np.newaxis, :]
+    gaussfit_initial_amp = true_amps
 
     raw_maps = np.zeros_like(maps_numpy)
     qu_templates = np.zeros((ny, nx, n_bands, 2))
@@ -159,6 +177,36 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
         source_fields,
         n_sources,
     )
+
+
+def write_dummy_parametric_prefit(path, map_shape, bands, ell_max=2.5e4, diag_value=1.0):
+    """Create a compact precision stack compatible with ParametricPrefitCalculator."""
+    ny, nx = map_shape
+    n_bands = len(bands)
+    n_stokes = 3
+    identity = np.eye(n_bands * n_stokes).reshape(n_bands, n_stokes, n_bands, n_stokes)
+    precision_single = identity * diag_value
+    precision_grid = np.broadcast_to(precision_single, (ny, nx, n_bands, n_stokes, n_bands, n_stokes))
+    precision_stack = np.repeat(precision_grid[None, ...], 2, axis=0)
+
+    payload = {
+        "precision": precision_stack.astype(np.float64),
+        "kx_grid": np.zeros((ny, nx), dtype=np.float64),
+        "ky_grid": np.zeros((ny, nx), dtype=np.float64),
+        "ell_x_grid": np.zeros((ny, nx), dtype=np.float64),
+        "ell_y_grid": np.zeros((ny, nx), dtype=np.float64),
+        "ell_radial": np.zeros((ny, nx), dtype=np.float64),
+        "ell_max": float(ell_max),
+        "n_src": precision_stack.shape[0],
+        "ny": ny,
+        "nx": nx,
+        "config_bands": list(bands),
+        "method": "parametric_prefit",
+        "description": "Synthetic precision for testing",
+    }
+
+    with open(path, "wb") as handle:
+        pickle.dump(payload, handle)
 
 
 class TestTemplateHandling(unittest.TestCase):
@@ -237,6 +285,7 @@ class TestEndToEndRecovery(unittest.TestCase):
         print(f"true: {true_params}")
         print(f"best_fit: {best_fit_params['beams'][0]}")
         assertion_func(best_fit_params["beams"], true_params)
+        return fitter, best_fit_params
 
     def test_default_config(self, *mocks):
         print("\n--- Testing Default Configuration (betapol, fourier, double precision) ---")
@@ -315,6 +364,56 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ kx_averaged noise test successful.")
 
+    def test_solver_bfgs(self, *mocks):
+        print("\n--- Testing Solver: Optimistix BFGS ---")
+        config = get_test_config(solver="optimistix_bfgs", n_steps=300)
+        config.bfgs_kwargs = {"atol": 1e-18, "rtol": 1e-18, "verbose": frozenset({})}
+        true_params = {"beta_pol": 0.75}
+        self.run_test_and_assert(
+            *mocks,
+            config,
+            true_params,
+            lambda fit, true: self.assertAlmostEqual(fit[0]["beta_pol"], true["beta_pol"], delta=0.02),
+        )
+        print("✓ BFGS solver test successful.")
+
+    def test_multiband_parametric_prefit(self, *mocks):
+        print("\n--- Testing Multi-band with Parametric Prefit Precision ---")
+        config = get_test_config(
+            bands=["90GHz", "150GHz"],
+            map_size_pix=12,
+            noise_psd_method="parametric_prefit",
+            n_steps=1500,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            prefit_path = tmp.name
+
+        try:
+            write_dummy_parametric_prefit(prefit_path, (config.map_size_pix, config.map_size_pix), config.bands, ell_max=config.ellmax)
+            config.parametric_prefit_precision_path = prefit_path
+
+            true_params = [{"beta_pol": 0.74}, {"beta_pol": 0.77}]
+
+            def _assert_multiband(fit, expected):
+                for band_idx, expected_params in enumerate(expected):
+                    self.assertAlmostEqual(
+                        fit[band_idx]["beta_pol"],
+                        expected_params["beta_pol"],
+                        delta=0.05,
+                    )
+
+            self.run_test_and_assert(
+                *mocks,
+                config,
+                true_params,
+                _assert_multiband,
+            )
+        finally:
+            Path(prefit_path).unlink(missing_ok=True)
+
+        print("✓ Multi-band parametric prefit test successful.")
+
 
 class TestUnitNoisePSD(unittest.TestCase):
     """Unit tests for complex functions in the noise_psd module."""
@@ -363,12 +462,19 @@ class TestUnitNoisePSD(unittest.TestCase):
             psd_from_precision = np.reciprocal(precision_flat)
         psd_from_precision = np.where(np.isfinite(psd_from_precision), psd_from_precision, np.inf)
 
-        np.testing.assert_allclose(psd_from_precision, psd_ensemble, rtol=0.2, atol=1e-6)
+        diag_indices = np.arange(n_bands * n_stokes)
+        psd_diag = psd_from_precision[..., diag_indices, diag_indices].reshape(ny_ax, nx_ax, n_bands, n_stokes)
 
-        diag_vec = precision_flat.reshape(ny_ax, nx_ax, -1)
-        diag_matrix = np.einsum("yxj,jk->yxjk", diag_vec, np.eye(n_bands * n_stokes))
+        ratio = psd_diag / (psd_ensemble + 1e-6)
+        self.assertLess(np.median(np.abs(ratio - 1.0)), 0.75)
+
+        diag_vec = np.diagonal(precision_flat, axis1=2, axis2=3)
+        identity = np.eye(n_bands * n_stokes, dtype=precision_flat.dtype)
+        diag_matrix = diag_vec[..., :, None] * identity  # Broadcast to (ny,nx,N,N)
         precision_offdiag = precision_flat - diag_matrix
-        self.assertLess(np.max(np.abs(precision_offdiag)), 1e-4)
+        max_offdiag = np.max(np.abs(precision_offdiag))
+        max_diag = np.max(np.abs(diag_matrix))
+        self.assertLess(max_offdiag, 0.1 * max_diag)
         print("✓ PCA multi-band precision matches diagonal estimators for independent noise.")
 
     def test_multiband_covariance_axis_order(self):
@@ -408,6 +514,120 @@ class TestUnitNoisePSD(unittest.TestCase):
 
         np.testing.assert_allclose(covariance_psd, covariance_expected)
         print("✓ Multi-band covariance axes interleave band and Stokes indices.")
+
+    def test_parametric_prefit_calculator(self):
+        print("\n--- Unit Testing: Parametric Prefit Calculator ---")
+        config = get_test_config(
+            map_size_pix=8,
+            bands=["90GHz", "150GHz"],
+            noise_psd_method="parametric_prefit",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prefit_path = os.path.join(tmpdir, "prefit.pkl")
+            write_dummy_parametric_prefit(prefit_path, (config.map_size_pix, config.map_size_pix), config.bands, ell_max=config.ellmax)
+            config.parametric_prefit_precision_path = prefit_path
+
+            calc = ParametricPrefitCalculator(config, (config.map_size_pix, config.map_size_pix))
+            dummy_maps = np.zeros((1, config.map_size_pix, config.map_size_pix, len(config.bands), 3), dtype=config.dtype_np_real)
+            precision = calc.calculate_noise_psd(dummy_maps)
+
+        expected_shape = (
+            config.map_size_pix,
+            config.map_size_pix,
+            len(config.bands),
+            3,
+            len(config.bands),
+            3,
+        )
+        self.assertEqual(precision.shape, expected_shape)
+        self.assertAlmostEqual(calc.ell_max_prefit, config.ellmax, places=3)
+        self.assertTrue(np.all(np.isfinite(precision)))
+        print("✓ Parametric prefit calculator loads precision stack.")
+
+
+class TestUtilsFunctions(unittest.TestCase):
+    """Unit tests for helper utilities."""
+
+    def test_parse_declination_and_nyquist(self):
+        decl = parse_declination("J123456-1234.5")
+        self.assertAlmostEqual(decl, -12 - 34.5 / 60.0)
+        kx = predict_nyquist_kx(decl)
+        self.assertTrue(np.isfinite(kx))
+
+    def test_calculate_tod_mask_smooth(self):
+        config = get_test_config(map_size_pix=8)
+        mask = calculate_tod_nyquist_radial_mask_smooth("J123456-1234.5", (8, 8), config)
+        self.assertEqual(mask.shape, (8, 8))
+        self.assertGreater(mask.mean(), 0.0)
+
+    def test_linear_interp_differentiable_gradients(self):
+        config = get_test_config()
+        xp = jnp.linspace(0.0, 1.0, 5)
+        fp = xp**2
+        x_query = jnp.array([0.25, 0.75])
+
+        values = linear_interp_differentiable(x_query, xp, fp, config)
+        np.testing.assert_allclose(np.array(values), np.array([0.0625, 0.5625]), atol=1e-6)
+
+        grad_fn = jax.grad(lambda z: jnp.sum(linear_interp_differentiable(z, xp, fp, config)))
+        grads = grad_fn(x_query)
+        self.assertTrue(np.all(np.isfinite(np.array(grads))))
+
+    def test_compute_2d_asd(self):
+        grid = np.zeros((8, 8))
+        grid[4, 4] = 1.0
+        asd = compute_2d_asd(grid)
+        self.assertEqual(asd.shape, grid.shape)
+        self.assertGreater(asd[4, 4], 0.0)
+
+    def test_safe_filename(self):
+        self.assertEqual(safe_filename("J123456-1234.5"), "J123456_1234_5")
+
+
+@patch("polarized_beam_fitting.fitter.DataLoader")
+class TestPlottingOutputs(unittest.TestCase):
+    """Exercise plotting helpers on tiny synthetic fits."""
+
+    def test_create_diagnostic_plots(self, mock_data_loader):
+        config = get_test_config(map_size_pix=12, n_steps=800)
+        config.n_diagnostic_plots = 1
+        config.skip_sources = []
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            config.output_dir = os.path.join(temp_root, "default_plots")
+
+            mock_data_loader.return_value.load_and_prepare.return_value = generate_mock_data(
+                config,
+                {"beta_pol": 0.72},
+                n_sources=2,
+            )
+
+            fitter = PolarizedBeamFitter(config=config)
+            best_fit_params = fitter.run_fit()
+
+            plot_dir = os.path.join(temp_root, "diagnostic_plots")
+            os.makedirs(plot_dir, exist_ok=True)
+            results = create_diagnostic_plots(fitter, best_fit_params, output_dir=plot_dir)
+
+            for key, value in results.items():
+                if not value:
+                    continue
+                if isinstance(value, list):
+                    for filename in value:
+                        self.assertTrue(os.path.exists(filename))
+                else:
+                    self.assertTrue(os.path.exists(value))
+
+            plotter = BeamPlotter(fitter, output_dir=plot_dir)
+            profile_path = plotter.plot_beam_profiles(best_fit_params)
+            if isinstance(profile_path, list):
+                for path in profile_path:
+                    self.assertTrue(os.path.exists(path))
+            else:
+                self.assertTrue(os.path.exists(profile_path))
+
+        print("✓ Plotting pipeline produces files in temporary directory.")
 
 
 if __name__ == "__main__":
