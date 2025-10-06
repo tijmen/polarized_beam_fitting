@@ -399,6 +399,7 @@ class DataLoader:
         maps_fft = None
         if self.config.chi2_method == "fourier":
             apod_mask = make_apodization_mask(self.map_shape, self.config.apodization_width_pix)
+            apod_mask = apod_mask.astype(self.config.dtype_np_real)
             maps_fft = np.zeros((n_src, ny, nx, n_bands, 3), dtype=self.config.dtype_np_complex)
 
             for i in range(n_src):

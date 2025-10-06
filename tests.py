@@ -29,14 +29,14 @@ from polarized_beam_fitting.noise_psd import (
 from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.utils import (
     calculate_tod_nyquist_radial_mask_smooth,
+    compute_2d_asd,
+    linear_interp_differentiable,
     make_apod_mask_center_excised,
     make_apodization_mask,
     parse_declination,
     predict_nyquist_kx,
-    shift_map_bilinear,
-    compute_2d_asd,
-    linear_interp_differentiable,
     safe_filename,
+    shift_map_bilinear,
 )
 
 
@@ -124,9 +124,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
 
     for i in range(n_sources):
         for band_idx, beam_model in enumerate(beam_models):
-            true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(
-                band_params[band_idx], true_yoffs[i], true_xoffs[i]
-            )
+            true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(band_params[band_idx], true_yoffs[i], true_xoffs[i])
             signal_maps = np.stack(
                 [
                     true_amps[i, band_idx, 0] * true_beam_T,

@@ -229,6 +229,7 @@ class PolarizedBeamFitter:
     def _initialize_state(self) -> FitterState:
         """Initialize fitter state with coordinate grids."""
         map_shape = (self.config.map_size_pix, self.config.map_size_pix)
+        apod_width = self.config.apodization_width_pix
         ny, nx = map_shape
 
         # Create coordinate grids
@@ -238,7 +239,7 @@ class PolarizedBeamFitter:
         x_grid = x_coords[None, :] * jnp.ones((ny, 1), dtype=self.config.dtype_jax_real)
 
         # Create apodization mask
-        apod_mask = make_apodization_mask(map_shape, self.config.apodization_width_pix)
+        apod_mask = make_apodization_mask(map_shape, apod_width)
         apod_mask_jax = jnp.asarray(apod_mask, dtype=self.config.dtype_jax_real)
 
         return FitterState(
@@ -304,6 +305,7 @@ class PolarizedBeamFitter:
     def _setup_fourier_data(self, maps, maps_fft):
         """Setup data for Fourier-space analysis."""
         ny, nx = self.state.apod_mask.shape
+
         idx_y_np, idx_x_np = self._compute_ell_cut_indices((ny, nx))
 
         if idx_y_np is None or idx_x_np is None:
@@ -320,16 +322,15 @@ class PolarizedBeamFitter:
         self.state.maps_fft_jax = jnp.asarray(maps_fft_cut, dtype=self.config.dtype_jax_complex)
 
         psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
-        nyquist_mask = self._calculate_nyquist_mask(self.state.source_ids)
-        if idx_y_np is not None and idx_x_np is not None:
-            nyquist_mask = self._truncate_fourier_numpy(nyquist_mask, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
-        self.state.k_mask_jax = jnp.asarray(nyquist_mask, dtype=self.config.dtype_jax_real)
+        self.state.k_mask_jax = None
 
         if self.config.noise_psd_method == "multiband_covariance":
             n_src = self.state.n_src
             n_bands = len(self.config.bands)
             n_stokes = 3
-            precision_per_source = np.zeros((n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+            precision_per_source = np.zeros(
+                (n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex
+            )
 
             unique_fields = np.unique(self.state.fields)
             for field in unique_fields:
@@ -347,7 +348,9 @@ class PolarizedBeamFitter:
             n_src = self.state.n_src
             n_bands = len(self.config.bands)
             n_stokes = 3
-            precision_per_source = np.zeros((n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+            precision_per_source = np.zeros(
+                (n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex
+            )
 
             unique_fields = np.unique(self.state.fields)
             for field in unique_fields:
@@ -391,7 +394,7 @@ class PolarizedBeamFitter:
 
     def _calculate_nyquist_mask(self, source_ids):
         """Return radial Fourier mask per source (values in [0, 1])."""
-        map_shape = (self.config.map_size_pix, self.config.map_size_pix)
+        map_shape = tuple(int(dim) for dim in self.state.apod_mask.shape)
         masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
         return np.stack(masks)  # (n_src, ny, nx)
 
@@ -413,9 +416,7 @@ class PolarizedBeamFitter:
         idx_x = np.where(k_radius_x <= k_max_cpd)[0]
 
         if idx_y.size == 0 or idx_x.size == 0:
-            raise ValueError(
-                "ellmax is too small for the current map geometry; increase ellmax or decrease map resolution."
-            )
+            raise ValueError("ellmax is too small for the current map geometry; increase ellmax or decrease map resolution.")
         if idx_y.size == ny and idx_x.size == nx:
             return None, None
         return idx_y, idx_x
@@ -613,8 +614,7 @@ class PolarizedBeamFitter:
             )
 
         print(
-            f"\nTuning MCLMC hyperparameters (single chain): num_steps={self.config.mclmc_num_warmup}, "
-            f"desired_energy_var={self.config.mclmc_desired_energy_var} ..."
+            f"\nTuning MCLMC hyperparameters (single chain): num_steps={self.config.mclmc_num_warmup}, desired_energy_var={self.config.mclmc_desired_energy_var} ..."
         )
         t0 = time.time()
         tuned_state, tuned_params, _ = blackjax.mclmc_find_L_and_step_size(

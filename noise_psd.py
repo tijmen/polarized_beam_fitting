@@ -13,8 +13,8 @@ Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pca_
 and [multiband_covariance] is only diagonal in Fourier space.
 """
 
-from abc import ABC, abstractmethod
 import pickle
+from abc import ABC, abstractmethod
 
 import numpy as np
 from astropy.io import fits
@@ -531,9 +531,7 @@ class ParametricPrefitCalculator(NoisePSDCalculator):
         super().__init__(config, map_shape)
         path = getattr(self.config, "parametric_prefit_precision_path", None)
         if not path:
-            raise ValueError(
-                "parametric_prefit_precision_path must be set to use the 'parametric_prefit' noise PSD method."
-            )
+            raise ValueError("parametric_prefit_precision_path must be set to use the 'parametric_prefit' noise PSD method.")
 
         with open(path, "rb") as handle:
             payload = pickle.load(handle)

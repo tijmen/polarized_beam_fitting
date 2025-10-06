@@ -11,7 +11,7 @@ import corner
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .utils import compute_2d_asd, safe_filename
+from .utils import safe_filename
 
 
 class BeamPlotter:
