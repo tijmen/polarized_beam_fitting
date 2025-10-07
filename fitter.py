@@ -27,6 +27,7 @@ from .utils import (
     build_whitening_transform,
     calculate_tod_nyquist_radial_mask_smooth,
     check_convergence,
+    compute_rectangular_ell_cut_indices,
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
@@ -401,25 +402,7 @@ class PolarizedBeamFitter:
     def _compute_ell_cut_indices(self, map_shape):
         """Return ky/kx indices obeying ell <= ellmax; None if no cutoff requested."""
         ellmax = getattr(self.config, "ellmax", None)
-        if ellmax is None or not np.isfinite(ellmax) or ellmax <= 0:
-            return None, None
-
-        ny, nx = map_shape
-        reso_deg = self.config.reso_arcmin / 60.0
-        ky = np.fft.fftfreq(ny, d=reso_deg)
-        kx = np.fft.fftfreq(nx, d=reso_deg)
-        k_radius_y = np.abs(ky)
-        k_radius_x = np.abs(kx)
-        k_max_cpd = ellmax / 360.0
-
-        idx_y = np.where(k_radius_y <= k_max_cpd)[0]
-        idx_x = np.where(k_radius_x <= k_max_cpd)[0]
-
-        if idx_y.size == 0 or idx_x.size == 0:
-            raise ValueError("ellmax is too small for the current map geometry; increase ellmax or decrease map resolution.")
-        if idx_y.size == ny and idx_x.size == nx:
-            return None, None
-        return idx_y, idx_x
+        return compute_rectangular_ell_cut_indices(map_shape, self.config.reso_arcmin, ellmax)
 
     def _truncate_fourier_numpy(self, array, idx_y, idx_x, axis_y, axis_x):
         """Return array truncated along specified Fourier axes if indices are provided."""

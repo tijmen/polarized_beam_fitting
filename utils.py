@@ -84,6 +84,38 @@ def apply_radial_lowpass(map_2d, apod_mask, k_radius, k_max_cpd, taper_width_cpd
     return np.real(filtered)
 
 
+def compute_fourier_frequency_axes(map_shape, reso_arcmin):
+    """Return Fourier frequency axes (cycles/degree) for the given map geometry."""
+
+    ny, nx = map_shape
+    reso_deg = reso_arcmin / 60.0
+    ky = np.fft.fftfreq(ny, d=reso_deg)
+    kx = np.fft.fftfreq(nx, d=reso_deg)
+    ky_grid, kx_grid = np.meshgrid(ky, kx, indexing="ij")
+    return ky, kx, ky_grid, kx_grid
+
+
+def compute_rectangular_ell_cut_indices(map_shape, reso_arcmin, ellmax):
+    """Return ky/kx indices satisfying |ell_x|, |ell_y| <= ellmax; None if no cutoff."""
+
+    if ellmax is None or not np.isfinite(ellmax) or ellmax <= 0:
+        return None, None
+
+    ky, kx, _, _ = compute_fourier_frequency_axes(map_shape, reso_arcmin)
+    k_max_cpd = ellmax / 360.0
+
+    idx_y = np.where(np.abs(ky) <= k_max_cpd)[0]
+    idx_x = np.where(np.abs(kx) <= k_max_cpd)[0]
+
+    if idx_y.size == 0 or idx_x.size == 0:
+        raise ValueError("ellmax is too small for the current map geometry; increase ellmax or decrease map resolution.")
+
+    if idx_y.size == len(ky) and idx_x.size == len(kx):
+        return None, None
+
+    return idx_y, idx_x
+
+
 def calculate_tod_nyquist_radial_mask_smooth(source_id, map_shape, config, taper_width_pixels=5):
     """Return a radial low-pass mask based on the TOD Nyquist prediction."""
     ny, nx = map_shape
