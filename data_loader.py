@@ -111,7 +111,6 @@ class DataLoader:
             return self._precision_from_pca_multiband(psd_calc, maps_clean, source_fields, idx_y, idx_x)
         if method == "parametric_precision":
             precision = np.asarray(psd_calc.calculate_noise_psd(maps_clean)).astype(self.config.dtype_np_complex)
-            precision = self._truncate_fourier_numpy(precision, idx_y, idx_x, axis_y=1, axis_x=2)
             return precision
 
         psd = np.asarray(psd_calc.calculate_noise_psd(maps_clean)).astype(self.config.dtype_np_real)
