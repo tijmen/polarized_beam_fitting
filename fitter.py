@@ -345,7 +345,7 @@ class PolarizedBeamFitter:
                 precision_per_source[field_indices] = repeated_precision
 
             self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
-        elif self.config.noise_psd_method in {"pca_multiband_covariance", "parametric_prefit"}:
+        elif self.config.noise_psd_method == "pca_multiband_covariance":
             n_src = self.state.n_src
             n_bands = len(self.config.bands)
             n_stokes = 3
@@ -364,6 +364,9 @@ class PolarizedBeamFitter:
                 precision_per_source[field_indices] = repeated_precision
 
             self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
+        elif self.config.noise_psd_method == "parametric_prefit":
+            self.state.precision_jax = jnp.asarray(psd_calc.calculate_noise_psd(maps), dtype=self.config.dtype_jax_complex)
+
         else:
             original_noise_psd = psd_calc.calculate_noise_psd(maps)
             with np.errstate(divide="ignore", invalid="ignore"):

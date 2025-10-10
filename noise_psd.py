@@ -530,42 +530,12 @@ class ParametricPrefitCalculator(NoisePSDCalculator):
     def __init__(self, config, map_shape):
         super().__init__(config, map_shape)
         path = getattr(self.config, "parametric_prefit_precision_path", None)
-        if not path:
-            raise ValueError("parametric_prefit_precision_path must be set to use the 'parametric_prefit' noise PSD method.")
-
         with open(path, "rb") as handle:
+            print(f"Loading pre-fit precision matrix from {path}")
             payload = pickle.load(handle)
-
-        if "precision" not in payload:
-            raise ValueError(f"Prefit precision file '{path}' is missing the 'precision' entry.")
-
-        precision_stack = np.asarray(payload["precision"])
-        if precision_stack.ndim != 7:
-            raise ValueError(
-                f"Expected 7D precision tensor (n_samples, ny, nx, band, stokes, band, stokes); received shape {precision_stack.shape}."
-            )
-
-        ny_file, nx_file = precision_stack.shape[1:3]
-        if (ny_file, nx_file) != map_shape:
-            raise ValueError(
-                f"Prefit precision grid is {ny_file}x{nx_file} but fitter maps use {map_shape[0]}x{map_shape[1]}; resampling is not supported yet."
-            )
-
-        n_stokes = precision_stack.shape[4]
-        if n_stokes != 3:
-            raise ValueError(f"Prefit precision tensor expects 3 Stokes components, found axis length {n_stokes}.")
-
-        if precision_stack.shape[3] != self.n_bands or precision_stack.shape[5] != self.n_bands:
-            raise ValueError(
-                "Prefit precision tensor band axes do not match configuration bands; regenerate the parametric model for the current band list."
-            )
-
-        self._precision = precision_stack.mean(axis=0).astype(self.config.dtype_np_complex)
-        self._metadata = payload
-        self.ell_max_prefit = float(payload.get("ell_max")) if payload.get("ell_max") is not None else None
+        self._precision = np.asarray(payload["precision"]).astype(self.config.dtype_np_complex)
 
     def calculate_noise_psd(self, maps_numpy):
-        _ = maps_numpy  # Unused; all information lives in the pre-fit tensor.
         return self._precision
 
 
