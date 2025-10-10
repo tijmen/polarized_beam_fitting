@@ -308,6 +308,20 @@ class TestEndToEndRecovery(unittest.TestCase):
         assertion_func(best_fit_params["beams"], true_params)
         return fitter, best_fit_params
 
+    def _assert_gaussian_bspline_recovery(self, config, recovered_params, true_params):
+        """Check Gaussian+Bspline recovery by comparing sigma and coefficient norms."""
+        sigma_fit = float(np.asarray(recovered_params["gaussian_sigma_arcmin"]))
+        sigma_true = float(true_params["gaussian_sigma_arcmin"])
+        self.assertAlmostEqual(sigma_fit, sigma_true, delta=1e-3)
+
+        fit_T = np.asarray(recovered_params["bspline_coeffs_T"])
+        fit_P = np.asarray(recovered_params["bspline_coeffs_P"])
+        true_T = np.asarray(true_params["bspline_coeffs_T"])
+        true_P = np.asarray(true_params["bspline_coeffs_P"])
+
+        self.assertLess(np.linalg.norm(fit_T - true_T), 0.1)
+        self.assertLess(np.linalg.norm(fit_P - true_P), 0.1)
+
     def test_default_config(self, *mocks):
         print("\n--- Testing Default Configuration (betapol, fourier, double precision) ---")
         config = get_test_config()
@@ -333,21 +347,26 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ Gaussian model test successful.")
 
-    @unittest.skip("B-spline model is currently known to be broken, skipping test...")
-    def test_beam_model_bspline(self, *mocks):
-        print("\n--- Testing Beam Model: B-spline ---")
-        config = get_test_config(beam_model_type="bsplines")
-        y, x = np.ogrid[-32:32, -32:32]
+    def test_beam_model_bspline_plus_gaussian(self, *mocks):
+        print("\n--- Testing Beam Model: Gaussian + B-splines ---")
+        config = get_test_config(beam_model_type="bsplines_plus_gaussian")
+        ny = nx = config.map_size_pix
+        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
         beam_model = create_beam_model(config, y, x, config.bands[0])
-        true_coeffs = beam_model.fit_gaussian_coefficients(1.3)
-        true_params = {"T_coeffs": true_coeffs, "P_coeffs": true_coeffs}
+        gaussian_sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
+        zero_coeffs = np.zeros(beam_model.n_bspline_coeffs, dtype=config.dtype_np_real)
+        true_params = {
+            "gaussian_sigma_arcmin": gaussian_sigma,
+            "bspline_coeffs_T": zero_coeffs,
+            "bspline_coeffs_P": zero_coeffs,
+        }
         self.run_test_and_assert(
             *mocks,
             config,
             true_params,
-            lambda fit, true: np.testing.assert_allclose(fit["T_coeffs"], true["T_coeffs"], rtol=0.01),
+            lambda fit, true: self._assert_gaussian_bspline_recovery(config, fit[0], true),
         )
-        print("✓ B-spline model test successful.")
+        print("✓ Gaussian + B-splines model test successful.")
 
     def test_chi2_method_real_space(self, *mocks):
         print("\n--- Testing Chi2 Method: Real Space ---")

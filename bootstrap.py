@@ -48,7 +48,7 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
     return masked_grads
 
 
-def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_broadcast):
+def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_broadcast, k_indices_y=None, k_indices_x=None):
     """
     Build a chi2 function for Fourier space that doesn't close over data.
 
@@ -78,13 +78,16 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
         # Apply apodization and FFT
         model_apod = model * apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
+        if k_indices_y is not None and k_indices_x is not None:
+            model_fft = jnp.take(model_fft, k_indices_y, axis=0)
+            model_fft = jnp.take(model_fft, k_indices_x, axis=1)
 
         # Calculate chi2 with support for diagonal or full covariance weighting
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
             chi2 = (jnp.abs(residual_fft) ** 2) * precision
             chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
-            return jnp.mean(chi2_per_mode)
+            return jnp.mean(jnp.real(chi2_per_mode))
 
         ny, nx = residual_fft.shape[:2]
         n_bands = residual_fft.shape[-2]
@@ -284,6 +287,8 @@ class BootstrapBeamFitter:
                 self.base_fitter.state.y_grid,
                 self.base_fitter.state.x_grid,
                 self.base_fitter.state.apod_mask_broadcast,
+                self.base_fitter.state.k_indices_y,
+                self.base_fitter.state.k_indices_x,
             )
         else:
             return build_bootstrap_chi2_real(

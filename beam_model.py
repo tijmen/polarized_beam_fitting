@@ -4,6 +4,7 @@ temperature and polarization beams. They inherit from a base class and
 are intended to present a uniform beam model for use in the fitter and plotter.
 """
 
+import warnings
 from abc import ABC, abstractmethod
 
 import jax
@@ -69,7 +70,9 @@ class BeamModelBspline(BeamModelBase):
     Beam model using orthonormal B-spline basis with boundary conditions.
 
     This class sets up an orthonormal B-spline basis that naturally satisfies
-    boundary conditions for the beam profile.
+    boundary conditions for the beam profile. Known issue: this pure B-spline
+    representation tends to overfit the r = 0 region, producing biased beams.
+    Prefer ``beam_model_type='bsplines_plus_gaussian'`` for production use.
     """
 
     def __init__(
@@ -95,6 +98,12 @@ class BeamModelBspline(BeamModelBase):
             Spacing between knots in arcminutes
         """
         super().__init__(config, y_grid, x_grid, band)
+        warnings.warn(
+            "BeamModelBspline is experimentally biased due to B-spline overfitting near r=0. "
+            "Consider using 'bsplines_plus_gaussian' instead.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         self.spline_k = spline_k
         self.spline_rmax_arcmin = spline_rmax_arcmin
         self.knot_spacing_arcmin = knot_spacing_arcmin

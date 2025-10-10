@@ -146,7 +146,7 @@ def calculate_tod_nyquist_radial_mask(source_id, map_shape, config):
     Same as calculate_tod_nyquist_radial_mask_smooth, but returns a hard
     boolean mask instead of a cosine tapered-mask.
     """
-    mask = calculate_tod_nyquist_radial_mask(source_id, map_shape, config)
+    mask = calculate_tod_nyquist_radial_mask_smooth(source_id, map_shape, config)
     return mask > 0.0
 
 

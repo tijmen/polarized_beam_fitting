@@ -708,6 +708,10 @@ class BeamPlotter:
 
     def _create_asd_plot_for_source(self, source_id, source_idx, band, band_idx, data_maps, model_maps, save):
         """Helper to create a single ASD plot for a given source and band."""
+        if self.base_fitter.state.precision_jax is None:
+            print("ASD analysis requires Fourier precision; skipping.")
+            return None
+
         band_suffix = self._get_band_suffix(band)
 
         data_T, data_Q, data_U = [data_maps[source_idx, :, :, band_idx, i] for i in range(3)]
@@ -979,11 +983,11 @@ class BeamPlotter:
                 for param_name in self.fitter.config.beam_coeff_bounds.keys():
                     key_flat = f"beam_{band_idx}_{param_name}"
                     var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
-                    pretty = (
-                        rf"$\beta_{{{'T' if 'T' in param_name else r'\text{pol}'}, {band_suffix}}}$"
-                        if "beta" in param_name
-                        else f"{param_name.replace('_', ' ')} ({band_suffix})"
-                    )
+                    if "beta" in param_name:
+                        role = "T" if "T" in param_name else r"\mathrm{pol}"
+                        pretty = rf"$\beta_{{{role}, {band_suffix}}}$"
+                    else:
+                        pretty = f"{param_name.replace('_', ' ')} ({band_suffix})"
                     label_map[key_flat] = pretty
                     corner_data[key_flat] = var_flat
 
