@@ -24,10 +24,14 @@ class CacheManager:
             "min_t_amplitude": self.config.min_t_amplitude,  # different sources
             "max_zero_fraction": self.config.max_zero_fraction,  # different sources
             "skip_sources": sorted(self.config.skip_sources) if self.config.skip_sources else [],  # different sources
+            "apodization_width_pix": self.config.apodization_width_pix,  # affects Fourier apodization
+            "noise_hole_radius_arcmin": self.config.noise_hole_radius_arcmin,  # affects noise masking
+            "ellmax": getattr(self.config, "ellmax", None),  # needed for Fourier-space array sizes
             "leakage_weighting": self.config.leakage_weighting,  # different approach to leakage
-            "use_precomputed_leakage_templates": self.config.use_precomputed_leakage_templates,
-            "leakage_template_dir": self.config.leakage_template_dir,
+            "use_precomputed_leakage_templates": self.config.use_precomputed_leakage_templates,  # leakage template subtraction happens before caching
+            "leakage_template_dir": self.config.leakage_template_dir,  # leakage template subtraction detail
             "chi2_method": self.config.chi2_method,  # different chi2 calculation. if this is real_space, we don't need to take FFTs
+            "noise_psd_method": self.config.noise_psd_method,  # different covariances/PSDs/precision matrices
         }
         # Create a stable string representation
         param_string = str(sorted(relevant_params.items()))

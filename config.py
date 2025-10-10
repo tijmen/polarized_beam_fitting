@@ -106,7 +106,6 @@ class BeamFittingConfig:
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
     ellmax = 25_000  # Multipole cutoff used when operating in Fourier space
-    parametric_prefit_precision_path = "output/psd_modeling/precision_parametric_prefit.pkl"
 
     # === Optimization and convergence ===
     solver = "optax_adam"  # "optimistix_bfgs", "optax_adam"

@@ -8,7 +8,7 @@ efficient parallelization across devices.
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import blackjax
 import jax
@@ -22,12 +22,10 @@ from numpyro.infer import MCMC, NUTS
 from .beam_model import create_beam_model
 from .cache import CacheManager
 from .data_loader import DataLoader
-from .noise_psd import create_noise_psd_calculator
 from .utils import (
     build_whitening_transform,
     calculate_tod_nyquist_radial_mask_smooth,
     check_convergence,
-    compute_rectangular_ell_cut_indices,
     make_apodization_mask,
     params_from_logit,
     params_to_logit,
@@ -54,6 +52,8 @@ class FitterState:
     k_mask_jax: Optional[jnp.ndarray] = None
     k_indices_y: Optional[jnp.ndarray] = None
     k_indices_x: Optional[jnp.ndarray] = None
+    raw_maps_numpy: Optional[np.ndarray] = None
+    noise_bundle: Optional[Dict[str, Any]] = None
 
     # Source information
     source_ids: np.ndarray = None
@@ -198,6 +198,8 @@ class PolarizedBeamFitter:
         # Initialize components
         self.state = self._initialize_state()
         self.beam_models = self._create_beam_models()
+        self._cache_manager = None
+        self._prepared_data_cache = None
 
         # Load data
         self._load_data()
@@ -269,8 +271,12 @@ class PolarizedBeamFitter:
         loader = DataLoader(self.config)
 
         data = cache.load_or_create(loader.load_and_prepare)
+        data_list = list(data)
+        if len(data_list) == 11:
+            data_list.append(None)
+        if len(data_list) != 12:
+            raise ValueError(f"Expected cached data with 12 entries, received {len(data_list)}.")
 
-        # Unpack data
         (
             gaussfit_yoff,
             gaussfit_xoff,
@@ -283,7 +289,11 @@ class PolarizedBeamFitter:
             source_ids,
             source_fields,
             n_src,
-        ) = data
+            noise_bundle,
+        ) = data_list
+
+        self._cache_manager = cache
+        self._prepared_data_cache = data_list
 
         # Store in state
         self.state.source_ids = source_ids
@@ -292,6 +302,8 @@ class PolarizedBeamFitter:
         self.state.gaussfit_xoff_numpy = gaussfit_xoff
         self.state.gaussfit_initial_amp_numpy = gaussfit_amp
         self.state.fields = source_fields
+        self.state.raw_maps_numpy = raw_maps
+        self.state.noise_bundle = noise_bundle
 
         # Convert to JAX arrays
         self.state.gaussfit_initial_amp_jax = jnp.asarray(gaussfit_amp, dtype=self.config.dtype_jax_real)
@@ -299,94 +311,28 @@ class PolarizedBeamFitter:
 
         # Setup for specific chi2 method
         if self.config.chi2_method == "fourier":
-            self._setup_fourier_data(maps, maps_fft)
+            self._setup_fourier_data(maps_fft, noise_bundle)
         else:
             self._setup_real_space_data(weights)
 
-    def _setup_fourier_data(self, maps, maps_fft):
-        """Setup data for Fourier-space analysis."""
-        ny, nx = self.state.apod_mask.shape
+    def _setup_fourier_data(self, maps_fft, noise_bundle: Dict[str, Any]):
+        """Setup cached Fourier-space arrays for optimization."""
+        if maps_fft is None:
+            raise ValueError("Fourier-space chi2 requested but cached FFT maps are missing.")
 
-        idx_y_np, idx_x_np = self._compute_ell_cut_indices((ny, nx))
+        self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
 
-        if idx_y_np is None or idx_x_np is None:
-            self.state.k_indices_y = None
-            self.state.k_indices_x = None
-            maps_fft_cut = maps_fft
-            ny_fft, nx_fft = ny, nx
-        else:
-            self.state.k_indices_y = jnp.asarray(idx_y_np, dtype=jnp.int32)
-            self.state.k_indices_x = jnp.asarray(idx_x_np, dtype=jnp.int32)
-            maps_fft_cut = self._truncate_fourier_numpy(maps_fft, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
-            ny_fft, nx_fft = maps_fft_cut.shape[1:3]
+        k_indices_y = noise_bundle.get("k_indices_y")
+        k_indices_x = noise_bundle.get("k_indices_x")
+        self.state.k_indices_y = None if k_indices_y is None else jnp.asarray(k_indices_y, dtype=jnp.int32)
+        self.state.k_indices_x = None if k_indices_x is None else jnp.asarray(k_indices_x, dtype=jnp.int32)
 
-        self.state.maps_fft_jax = jnp.asarray(maps_fft_cut, dtype=self.config.dtype_jax_complex)
-
-        psd_calc = create_noise_psd_calculator(self.config, self.state.apod_mask.shape)
+        precision_np = noise_bundle.get("precision")
+        if precision_np is None:
+            raise ValueError("Cached Fourier precision matrix missing from prepared data.")
+        dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_np) else self.config.dtype_jax_real
+        self.state.precision_jax = jnp.asarray(precision_np, dtype=dtype)
         self.state.k_mask_jax = None
-
-        if self.config.noise_psd_method == "multiband_covariance":
-            n_src = self.state.n_src
-            n_bands = len(self.config.bands)
-            n_stokes = 3
-            precision_per_source = np.zeros(
-                (n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex
-            )
-
-            unique_fields = np.unique(self.state.fields)
-            for field in unique_fields:
-                field_indices = np.where(self.state.fields == field)[0]
-                field_maps = maps[field_indices]
-                covariance_psd = psd_calc.calculate_noise_psd(field_maps)
-                precision_matrix = self._prepare_precision_from_covariance(covariance_psd)
-                if idx_y_np is not None and idx_x_np is not None:
-                    precision_matrix = self._truncate_fourier_numpy(precision_matrix, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
-                repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
-                precision_per_source[field_indices] = repeated_precision
-
-            self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
-        elif self.config.noise_psd_method == "pca_multiband_covariance":
-            n_src = self.state.n_src
-            n_bands = len(self.config.bands)
-            n_stokes = 3
-            precision_per_source = np.zeros(
-                (n_src, ny_fft, nx_fft, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex
-            )
-
-            unique_fields = np.unique(self.state.fields)
-            for field in unique_fields:
-                field_indices = np.where(self.state.fields == field)[0]
-                field_maps = maps[field_indices]
-                precision_matrix = psd_calc.calculate_noise_psd(field_maps)
-                if idx_y_np is not None and idx_x_np is not None:
-                    precision_matrix = self._truncate_fourier_numpy(precision_matrix, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
-                repeated_precision = np.broadcast_to(precision_matrix, (len(field_indices),) + precision_matrix.shape)
-                precision_per_source[field_indices] = repeated_precision
-
-            self.state.precision_jax = jnp.asarray(precision_per_source, dtype=self.config.dtype_jax_complex)
-        elif self.config.noise_psd_method == "parametric_prefit":
-            self.state.precision_jax = jnp.asarray(psd_calc.calculate_noise_psd(maps), dtype=self.config.dtype_jax_complex)
-
-        else:
-            original_noise_psd = psd_calc.calculate_noise_psd(maps)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                precision_diag = np.reciprocal(original_noise_psd)
-            precision_diag = np.where(np.isfinite(precision_diag), precision_diag, 0.0)
-            if precision_diag.ndim == 4:
-                precision_diag = np.broadcast_to(precision_diag, (self.state.n_src,) + precision_diag.shape)
-            if idx_y_np is not None and idx_x_np is not None:
-                if precision_diag.ndim == 4:
-                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
-                elif precision_diag.ndim == 5:
-                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
-                elif precision_diag.ndim == 6:
-                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=0, axis_x=1)
-                elif precision_diag.ndim == 7:
-                    precision_diag = self._truncate_fourier_numpy(precision_diag, idx_y_np, idx_x_np, axis_y=1, axis_x=2)
-                else:
-                    raise ValueError(f"Unexpected precision tensor rank: {precision_diag.ndim}")
-            dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_diag) else self.config.dtype_jax_real
-            self.state.precision_jax = jnp.asarray(precision_diag, dtype=dtype)
 
         self._apply_fourier_mask()
         self.objective_data = (self.state.maps_fft_jax, self.state.precision_jax)
@@ -401,19 +347,6 @@ class PolarizedBeamFitter:
         map_shape = tuple(int(dim) for dim in self.state.apod_mask.shape)
         masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
         return np.stack(masks)  # (n_src, ny, nx)
-
-    def _compute_ell_cut_indices(self, map_shape):
-        """Return ky/kx indices obeying ell <= ellmax; None if no cutoff requested."""
-        ellmax = getattr(self.config, "ellmax", None)
-        return compute_rectangular_ell_cut_indices(map_shape, self.config.reso_arcmin, ellmax)
-
-    def _truncate_fourier_numpy(self, array, idx_y, idx_x, axis_y, axis_x):
-        """Return array truncated along specified Fourier axes if indices are provided."""
-        if idx_y is None or idx_x is None:
-            return array
-        truncated = np.take(array, idx_y, axis=axis_y)
-        truncated = np.take(truncated, idx_x, axis=axis_x)
-        return truncated
 
     def _apply_fourier_mask(self):
         """Multiply precision weights by the source-specific Fourier mask."""
@@ -431,39 +364,6 @@ class PolarizedBeamFitter:
             raise ValueError(f"Unexpected precision tensor rank: {precision.ndim}")
 
         self.state.precision_jax = precision * mask_broadcast
-
-    def _prepare_precision_from_covariance(self, covariance_psd):
-        """Invert covariance matrices for multi-band chi^2 weighting."""
-        print("Preparing inverse covariance matrices for multi-band chi^2...")
-
-        cov = np.asarray(covariance_psd, dtype=self.config.dtype_np_complex)
-
-        if cov.ndim != 6:
-            raise ValueError(f"Expected 6D covariance tensor, received shape {cov.shape}")
-
-        ny, nx, n_bands, n_stokes, cov_band, cov_stokes = cov.shape
-        if cov_band != n_bands or cov_stokes != n_stokes:
-            raise ValueError(f"Covariance tensor axes must follow (n_bands, n_stokes, n_bands, n_stokes); received shape {cov.shape}")
-
-        n_dim = n_bands * n_stokes
-
-        cov_matrix = cov.reshape(ny, nx, n_dim, n_dim)
-        cov_matrix = 0.5 * (cov_matrix + np.swapaxes(cov_matrix, -1, -2).conj())
-
-        reg = getattr(self.config, "multiband_covariance_regularization", 1e-3)
-        eye = np.eye(n_dim, dtype=self.config.dtype_np_real)
-        cov_matrix += reg * eye[None, None, :, :]
-
-        try:
-            inv_cov = np.linalg.inv(cov_matrix)
-        except np.linalg.LinAlgError as exc:
-            raise np.linalg.LinAlgError(
-                "Failed to invert multi-band covariance matrices; consider increasing multiband_covariance_regularization."
-            ) from exc
-
-        inv_cov = inv_cov.reshape(ny, nx, n_bands, n_stokes, n_bands, n_stokes)
-        inv_cov = 0.5 * (inv_cov + np.swapaxes(inv_cov, 2, 4).swapaxes(3, 5).conj())
-        return inv_cov.astype(self.config.dtype_np_complex)
 
     def _initialize_parameters(self) -> Dict:
         """Initialize fitting parameters."""

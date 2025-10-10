@@ -24,7 +24,7 @@ from .noise_psd import (
     KxAveragedCalculator,
     MultiBandCovarianceCalculator,
     NoisePSDCalculator,
-    ParametricPrefitCalculator,
+    ParametricPrecisionCalculator,
     PcaMultiBandCalculator,
     PcaPsdSeparateTQUCalculator,
     WhiteNoiseCalculator,
@@ -78,7 +78,7 @@ __all__ = [
     "create_mclmc_plots",
     "PcaPsdSeparateTQUCalculator",
     "MultiBandCovarianceCalculator",
-    "ParametricPrefitCalculator",
+    "ParametricPrecisionCalculator",
     "PcaMultiBandCalculator",
     "WhiteNoiseCalculator",
 ]

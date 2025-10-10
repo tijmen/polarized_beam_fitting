@@ -1,10 +1,8 @@
 """End-to-end and unit tests for the polarized beam fitting package."""
 
 import os
-import pickle
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import jax
@@ -23,7 +21,7 @@ from polarized_beam_fitting.noise_psd import (
     ClusterfinderPSDCalculator,
     EnsembleAsdMeanCalculator,
     MultiBandCovarianceCalculator,
-    ParametricPrefitCalculator,
+    ParametricPrecisionCalculator,
     PcaMultiBandCalculator,
 )
 from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
@@ -100,7 +98,7 @@ def _normalize_true_params(config, true_beam_params):
     raise TypeError("true_beam_params must be a dict or list of dicts.")
 
 
-def generate_mock_data(config, true_beam_params, n_sources=3):
+def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None):
     """
     Generate mock data based on a specific beam model and true parameters.
     """
@@ -162,6 +160,25 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     source_ids = np.array([f"mock_source_{i}" for i in range(n_sources)])
     source_fields = np.array(["mock_field" for _ in range(n_sources)], dtype=object)
 
+    if noise_payload is None:
+        if config.chi2_method == "fourier":
+            precision_placeholder = np.ones((n_sources, ny, nx, n_bands, 3), dtype=config.dtype_np_real)
+            noise_payload = {
+                "method": config.noise_psd_method,
+                "precision": precision_placeholder,
+                "k_indices_y": None,
+                "k_indices_x": None,
+                "calculator_payload": None,
+            }
+        else:
+            noise_payload = {
+                "method": config.noise_psd_method,
+                "precision": None,
+                "k_indices_y": None,
+                "k_indices_x": None,
+                "calculator_payload": None,
+            }
+
     return (
         gaussfit_yoff,
         gaussfit_xoff,
@@ -174,37 +191,42 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
         source_ids,
         source_fields,
         n_sources,
+        noise_payload,
     )
 
 
-def write_dummy_parametric_prefit(path, map_shape, bands, ell_max=2.5e4, diag_value=1.0):
-    """Create a compact precision stack compatible with ParametricPrefitCalculator."""
+def build_dummy_parametric_precision(map_shape, bands, n_sources=2, ell_max=2.5e4, diag_value=1.0):
+    """Create a compact precision payload compatible with ParametricPrecisionCalculator."""
     ny, nx = map_shape
     n_bands = len(bands)
     n_stokes = 3
     identity = np.eye(n_bands * n_stokes).reshape(n_bands, n_stokes, n_bands, n_stokes)
     precision_single = identity * diag_value
     precision_grid = np.broadcast_to(precision_single, (ny, nx, n_bands, n_stokes, n_bands, n_stokes))
-    precision_stack = np.repeat(precision_grid[None, ...], 2, axis=0)
+    precision_stack = np.repeat(precision_grid[None, ...], n_sources, axis=0)
 
     payload = {
         "precision": precision_stack.astype(np.float64),
-        "kx_grid": np.zeros((ny, nx), dtype=np.float64),
-        "ky_grid": np.zeros((ny, nx), dtype=np.float64),
+        "covariance_model": np.zeros_like(precision_stack.real),
+        "covariance_components": {
+            "cmb": np.zeros_like(precision_grid),
+            "ell_x_model": np.zeros_like(precision_grid),
+            "radial_model": np.zeros_like(precision_grid),
+        },
         "ell_x_grid": np.zeros((ny, nx), dtype=np.float64),
         "ell_y_grid": np.zeros((ny, nx), dtype=np.float64),
         "ell_radial": np.zeros((ny, nx), dtype=np.float64),
         "ell_max": float(ell_max),
-        "n_src": precision_stack.shape[0],
-        "ny": ny,
-        "nx": nx,
-        "config_bands": list(bands),
-        "method": "parametric_prefit",
-        "description": "Synthetic precision for testing",
+        "metadata": {
+            "n_src": precision_stack.shape[0],
+            "ny": ny,
+            "nx": nx,
+            "bands": list(bands),
+            "description": "Synthetic precision for testing",
+        },
     }
 
-    with open(path, "wb") as handle:
-        pickle.dump(payload, handle)
+    return payload
 
 
 class TestTemplateHandling(unittest.TestCase):
@@ -268,13 +290,14 @@ class TestEndToEndRecovery(unittest.TestCase):
         config,
         true_params,
         assertion_func,
+        noise_payload=None,
     ):
         if config.double_precision:
             jax.config.update("jax_enable_x64", True)
         else:
             jax.config.update("jax_enable_x64", False)
 
-        mock_data = generate_mock_data(config, true_params)
+        mock_data = generate_mock_data(config, true_params, noise_payload=noise_payload)
         mock_data_loader.return_value.load_and_prepare.return_value = mock_data
 
         fitter = PolarizedBeamFitter(config=config)
@@ -375,42 +398,49 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ BFGS solver test successful.")
 
-    def test_multiband_parametric_prefit(self, *mocks):
-        print("\n--- Testing Multi-band with Parametric Prefit Precision ---")
+    def test_multiband_parametric_precision(self, *mocks):
+        print("\n--- Testing Multi-band with Parametric Precision ---")
         config = get_test_config(
             bands=["90GHz", "150GHz"],
             map_size_pix=12,
-            noise_psd_method="parametric_prefit",
+            noise_psd_method="parametric_precision",
             n_steps=1500,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
-            prefit_path = tmp.name
+        dummy_payload = build_dummy_parametric_precision(
+            (config.map_size_pix, config.map_size_pix),
+            config.bands,
+            n_sources=3,
+            ell_max=config.ellmax,
+        )
 
-        try:
-            write_dummy_parametric_prefit(prefit_path, (config.map_size_pix, config.map_size_pix), config.bands, ell_max=config.ellmax)
-            config.parametric_prefit_precision_path = prefit_path
+        cached_payload = {
+            "method": "parametric_precision",
+            "precision": dummy_payload["precision"],
+            "k_indices_y": None,
+            "k_indices_x": None,
+            "calculator_payload": dummy_payload,
+        }
 
-            true_params = [{"beta_pol": 0.74}, {"beta_pol": 0.77}]
+        true_params = [{"beta_pol": 0.74}, {"beta_pol": 0.77}]
 
-            def _assert_multiband(fit, expected):
-                for band_idx, expected_params in enumerate(expected):
-                    self.assertAlmostEqual(
-                        fit[band_idx]["beta_pol"],
-                        expected_params["beta_pol"],
-                        delta=0.05,
-                    )
+        def _assert_multiband(fit, expected):
+            for band_idx, expected_params in enumerate(expected):
+                self.assertAlmostEqual(
+                    fit[band_idx]["beta_pol"],
+                    expected_params["beta_pol"],
+                    delta=0.05,
+                )
 
-            self.run_test_and_assert(
-                *mocks,
-                config,
-                true_params,
-                _assert_multiband,
-            )
-        finally:
-            Path(prefit_path).unlink(missing_ok=True)
+        self.run_test_and_assert(
+            *mocks,
+            config,
+            true_params,
+            _assert_multiband,
+            noise_payload=cached_payload,
+        )
 
-        print("✓ Multi-band parametric prefit test successful.")
+        print("✓ Multi-band parametric precision test successful.")
 
 
 class TestUnitNoisePSD(unittest.TestCase):
@@ -513,35 +543,35 @@ class TestUnitNoisePSD(unittest.TestCase):
         np.testing.assert_allclose(covariance_psd, covariance_expected)
         print("✓ Multi-band covariance axes interleave band and Stokes indices.")
 
-    def test_parametric_prefit_calculator(self):
-        print("\n--- Unit Testing: Parametric Prefit Calculator ---")
+    def test_parametric_precision_calculator(self):
+        print("\n--- Unit Testing: Parametric Precision Calculator ---")
         config = get_test_config(
             map_size_pix=8,
             bands=["90GHz", "150GHz"],
-            noise_psd_method="parametric_prefit",
+            noise_psd_method="parametric_precision",
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            prefit_path = os.path.join(tmpdir, "prefit.pkl")
-            write_dummy_parametric_prefit(prefit_path, (config.map_size_pix, config.map_size_pix), config.bands, ell_max=config.ellmax)
-            config.parametric_prefit_precision_path = prefit_path
-
-            calc = ParametricPrefitCalculator(config, (config.map_size_pix, config.map_size_pix))
-            dummy_maps = np.zeros((1, config.map_size_pix, config.map_size_pix, len(config.bands), 3), dtype=config.dtype_np_real)
-            precision = calc.calculate_noise_psd(dummy_maps)
-
-        expected_shape = (
-            config.map_size_pix,
-            config.map_size_pix,
-            len(config.bands),
-            3,
-            len(config.bands),
-            3,
+        payload = build_dummy_parametric_precision(
+            (config.map_size_pix, config.map_size_pix),
+            config.bands,
+            n_sources=1,
+            ell_max=config.ellmax,
         )
+
+        calc = ParametricPrecisionCalculator(
+            config,
+            (config.map_size_pix, config.map_size_pix),
+            precomputed_payload=payload,
+        )
+        dummy_maps = np.zeros((1, config.map_size_pix, config.map_size_pix, len(config.bands), 3), dtype=config.dtype_np_real)
+        precision = calc.calculate_noise_psd(dummy_maps)
+
+        expected_shape = payload["precision"].shape
         self.assertEqual(precision.shape, expected_shape)
-        self.assertAlmostEqual(calc.ell_max_prefit, config.ellmax, places=3)
         self.assertTrue(np.all(np.isfinite(precision)))
-        print("✓ Parametric prefit calculator loads precision stack.")
+        self.assertTrue(calc.payload is not None)
+        self.assertEqual(calc.payload["precision"].shape, precision.shape)
+        print("✓ Parametric precision calculator loads precision stack.")
 
 
 class TestUtilsFunctions(unittest.TestCase):
