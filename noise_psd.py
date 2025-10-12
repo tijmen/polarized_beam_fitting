@@ -376,6 +376,7 @@ def compute_parametric_precision(config, raw_maps: np.ndarray) -> Dict[str, Any]
                 try:
                     prec = np.linalg.inv(cov_spd)
                 except np.linalg.LinAlgError:
+                    logging.warning(f"Singular covariance matrix at src {src}, iy {iy}, ix {ix}. Using pseudo-inverse.")
                     prec = np.linalg.pinv(cov_spd)
                 prec = 0.5 * (prec + prec.T)
                 precision[src, iy, ix] = prec.reshape(n_bands, 3, n_bands, 3)

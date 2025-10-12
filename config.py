@@ -90,10 +90,13 @@ class BeamFittingConfig:
         "J142756-4206.3",  # source with a weird stripe down the middle
         "J053850-4405.1",  # another one with a weird stripe down the middle
         "J061030-6058.6",  # noisy, no appreciable amount of signal
+        "J235935-3133.7",  # too faint at 220
+        "J002430-2928.8",  # too faint at 150
+        "J032046-3837.4",  # too faint at 150
     ]
 
     # === Source selection & leakage handling ===
-    min_t_amplitude = 500 * core.G3Units.uK
+    min_t_amplitude = 300 * core.G3Units.uK
     max_zero_fraction = 0.05
     exclude_from_leakage_template = None
     leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
