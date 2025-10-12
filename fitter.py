@@ -383,12 +383,9 @@ class PolarizedBeamFitter:
         yoff = self.state.gaussfit_yoff_numpy - 0.5
         xoff = self.state.gaussfit_xoff_numpy - 0.5
 
-        yoff_per_band = np.repeat(yoff[:, None], self.state.n_bands, axis=1)
-        xoff_per_band = np.repeat(xoff[:, None], self.state.n_bands, axis=1)
-
         params["sources"] = {
-            "yoff": jnp.asarray(yoff_per_band, dtype=self.config.dtype_jax_real),
-            "xoff": jnp.asarray(xoff_per_band, dtype=self.config.dtype_jax_real),
+            "yoff": jnp.asarray(yoff, dtype=self.config.dtype_jax_real),
+            "xoff": jnp.asarray(xoff, dtype=self.config.dtype_jax_real),
             "flux": self.state.gaussfit_initial_amp_jax,
         }
 

@@ -42,6 +42,7 @@ class DataLoader:
             source_data["raw_maps"],
             qu_templates,
             source_fields,
+            source_data["source_ids"],
             source_data["gaussfit_yoff"],
             source_data["gaussfit_xoff"],
         )
@@ -214,10 +215,7 @@ class DataLoader:
             for ix in range(nx):
                 cov = covariance_psd[iy, ix].reshape(n_dim, n_dim)
                 cov_spd = self._project_to_spd(cov, eps=1e-5)
-                try:
-                    prec = np.linalg.inv(cov_spd)
-                except np.linalg.LinAlgError:
-                    prec = np.linalg.pinv(cov_spd)
+                prec = np.linalg.inv(cov_spd)
                 prec = 0.5 * (prec + prec.T)
                 precision[iy, ix] = prec.reshape(n_bands, n_stokes, n_bands, n_stokes)
 
@@ -228,11 +226,7 @@ class DataLoader:
         all_source_ids = set()
 
         for filename in self.config.coadd_filenames:
-            try:
-                g3_file = core.G3File(filename)
-            except RuntimeError:
-                print(f"Warning: Could not open {filename}. Skipping.")
-                continue
+            g3_file = core.G3File(filename)
 
             for frame in g3_file:
                 if frame.type == core.G3FrameType.Map and "Id" in frame:
@@ -256,11 +250,7 @@ class DataLoader:
 
     def _process_file(self, filename: str, results: Dict):
         """Process a single coadd file."""
-        try:
-            g3_file = core.G3File(filename)
-        except RuntimeError:
-            print(f"Warning: Could not open {filename}. Skipping.")
-            return
+        g3_file = core.G3File(filename)
 
         field_name = self._infer_field_from_filename(filename)
 
@@ -311,12 +301,14 @@ class DataLoader:
         maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
 
         if not check_zero_fraction(t_map, frame["Id"], max_zero_fraction=self.config.max_zero_fraction):
+            print(f"Skipping source {frame['Id']} because of zero fraction is above {self.config.max_zero_fraction}.")
             return None
 
         fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config)
         yoff, xoff, t_amp, meanoff, q_amp, u_amp = fit
 
         if t_amp < self.config.min_t_amplitude:
+            print(f"Skipping source {frame['Id']} because T amplitude is {t_amp}<{self.config.min_t_amplitude}.")
             return None
 
         return {
@@ -337,8 +329,8 @@ class DataLoader:
         ny, nx = self.map_shape
 
         arrays = {
-            "gaussfit_yoff": np.zeros(n_src, dtype=self.config.dtype_np_real),
-            "gaussfit_xoff": np.zeros(n_src, dtype=self.config.dtype_np_real),
+            "gaussfit_yoff": np.zeros((n_src, n_bands), dtype=self.config.dtype_np_real),
+            "gaussfit_xoff": np.zeros((n_src, n_bands), dtype=self.config.dtype_np_real),
             "gaussfit_amp": np.zeros((n_src, n_bands, 3), dtype=self.config.dtype_np_real),
             "raw_maps": np.zeros((n_src, ny, nx, n_bands, 3), dtype=self.config.dtype_np_real),
             "weights": np.zeros((n_src, ny, nx, n_bands, 3, 3), dtype=self.config.dtype_np_real),
@@ -373,23 +365,20 @@ class DataLoader:
 
     def _fill_source_arrays(self, arrays: Dict, results: Dict, source_ids: np.ndarray):
         """Fill numpy arrays with source data."""
-        band_for_pos = "150GHz" if "150GHz" in self.config.bands else self.config.bands[0]
-
         for i, sid in enumerate(source_ids):
-            pos_result = results[band_for_pos][f"{sid}-{band_for_pos}"]
-            arrays["gaussfit_yoff"][i] = pos_result["yoff"]
-            arrays["gaussfit_xoff"][i] = pos_result["xoff"]
-            field_value = pos_result.get("field")
-            if field_value is None:
-                raise ValueError(f"Missing field metadata for source '{sid}'.")
-            arrays["fields"][i] = field_value
-
             for j, band in enumerate(self.config.bands):
                 result = results[band][f"{sid}-{band}"]
                 self._fill_band_data(arrays, i, j, result)
+                if j == 0:
+                    field_value = result.get("field")
+                    if field_value is None:
+                        raise ValueError(f"Missing field metadata for source '{sid}'.")
+                    arrays["fields"][i] = field_value
 
     def _fill_band_data(self, arrays: Dict, src_idx: int, band_idx: int, result: Dict):
         """Fill arrays for a single band of a source."""
+        arrays["gaussfit_yoff"][src_idx, band_idx] = result["yoff"]
+        arrays["gaussfit_xoff"][src_idx, band_idx] = result["xoff"]
         arrays["gaussfit_amp"][src_idx, band_idx, 0] = result["t_amp"]
         arrays["gaussfit_amp"][src_idx, band_idx, 1] = result["q_amp"]
         arrays["gaussfit_amp"][src_idx, band_idx, 2] = result["u_amp"]
@@ -439,20 +428,20 @@ class DataLoader:
 
     def _load_precomputed_leakage_templates(
         self, source_fields: np.ndarray
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, Tuple[float, float]]]]:
-        """Load precomputed leakage templates and stored source offsets."""
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]]:
+        """Load precomputed leakage templates and per-band source offsets."""
         unique_fields = {field for field in source_fields if field is not None}
         if not unique_fields:
             raise ValueError("No source fields available to match precomputed leakage templates.")
 
         templates = {}
-        template_offsets: Dict[str, Dict[str, Tuple[float, float]]] = {}
+        template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]] = {}
         ny, nx = self.map_shape
         n_bands = len(self.config.bands)
 
         for field in unique_fields:
             field_templates = np.zeros((ny, nx, n_bands, 2), dtype=self.config.dtype_np_real)
-            field_offsets: Dict[str, Tuple[float, float]] = template_offsets.setdefault(field, {})
+            field_offsets: Dict[str, Dict[str, Tuple[float, float]]] = template_offsets.setdefault(field, {})
 
             for band_idx, band in enumerate(self.config.bands):
                 filename = os.path.join(
@@ -468,11 +457,8 @@ class DataLoader:
                 with open(filename, "rb") as f:
                     template_data = pickle.load(f)
 
-                try:
-                    q_map = np.asarray(template_data["Q"], dtype=self.config.dtype_np_real)
-                    u_map = np.asarray(template_data["U"], dtype=self.config.dtype_np_real)
-                except (TypeError, KeyError) as err:
-                    raise ValueError(f"Template file {filename} does not contain Q/U maps.") from err
+                q_map = np.asarray(template_data["Q"], dtype=self.config.dtype_np_real)
+                u_map = np.asarray(template_data["U"], dtype=self.config.dtype_np_real)
 
                 if q_map.shape != (ny, nx) or u_map.shape != (ny, nx):
                     raise ValueError(f"Template shape mismatch in {filename}: expected {(ny, nx)}, got {q_map.shape}/{u_map.shape}")
@@ -485,22 +471,22 @@ class DataLoader:
                     raise ValueError(f"Template file {filename} does not contain 'source_offsets'.")
 
                 for source_id, offsets in offsets_payload.items():
-                    try:
-                        y_offset = float(offsets["y_offset"])
-                        x_offset = float(offsets["x_offset"])
-                    except (KeyError, TypeError) as err:
-                        raise ValueError(f"Invalid source offset format in {filename} for source '{source_id}'.") from err
-
+                    y_offset = float(offsets["y_offset"])
+                    x_offset = float(offsets["x_offset"])
+ 
                     # Always trust the offsets stored with each template; they supersede gaussfit positions.
-                    field_offsets[source_id] = (y_offset, x_offset)
+                    per_source_offsets = field_offsets.setdefault(str(source_id), {})
+                    per_source_offsets[band] = (y_offset, x_offset)
 
             templates[field] = field_templates
 
         return templates, template_offsets
 
-    def _apply_template_offsets(self, source_data: Dict, template_offsets: Dict[str, Dict[str, Tuple[float, float]]]):
+    def _apply_template_offsets(
+        self, source_data: Dict, template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]
+    ):
         """Overwrite initial offsets with the values stored alongside precomputed templates."""
-        gaussfit_yoff = source_data["gaussfit_yoff"]
+        gaussfit_yoff = source_data["gaussfit_yoff"] # reference to mutable array
         gaussfit_xoff = source_data["gaussfit_xoff"]
         source_ids = source_data["source_ids"]
         source_fields = source_data["fields"]
@@ -509,12 +495,19 @@ class DataLoader:
             sid = str(raw_source_id)
             field = source_fields[idx]
             field_offsets = template_offsets.get(field)
-            if field_offsets is None or sid not in field_offsets:
+            if field_offsets is None:
+                raise ValueError(f"Missing stored offsets for field '{field}' while using precomputed templates.")
+            source_offset_map = field_offsets.get(sid)
+            if source_offset_map is None:
                 raise ValueError(f"Missing stored offset for source '{sid}' in field '{field}' while using precomputed templates.")
-
-            y_offset, x_offset = field_offsets[sid]
-            gaussfit_yoff[idx] = y_offset
-            gaussfit_xoff[idx] = x_offset
+            for band_idx, band in enumerate(self.config.bands):
+                if band not in source_offset_map:
+                    raise ValueError(
+                        f"Missing stored offset for source '{sid}' in field '{field}' for band '{band}'."
+                    )
+                y_offset, x_offset = source_offset_map[band]
+                gaussfit_yoff[idx, band_idx] = y_offset
+                gaussfit_xoff[idx, band_idx] = x_offset
 
     def _prepare_clean_maps(
         self,
@@ -522,6 +515,7 @@ class DataLoader:
         raw_maps: np.ndarray,
         qu_templates,
         source_fields: np.ndarray,
+        source_ids: np.ndarray,
         gaussfit_yoff: np.ndarray,
         gaussfit_xoff: np.ndarray,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -530,9 +524,6 @@ class DataLoader:
         maps_clean = raw_maps.copy()
 
         for i in range(n_src):
-            y_offset = float(gaussfit_yoff[i]) if gaussfit_yoff is not None else 0.0
-            x_offset = float(gaussfit_xoff[i]) if gaussfit_xoff is not None else 0.0
-
             if self.config.use_precomputed_leakage_templates:
                 field = source_fields[i]
                 if field not in qu_templates:
@@ -546,6 +537,8 @@ class DataLoader:
                 template_u = field_template[:, :, j, 1]
 
                 if self.config.use_precomputed_leakage_templates:
+                    y_offset = float(gaussfit_yoff[i, j])
+                    x_offset = float(gaussfit_xoff[i, j])
                     if abs(y_offset) > 1e-6 or abs(x_offset) > 1e-6:
                         template_q_shifted = shift_map_bilinear(template_q, y_offset, x_offset)
                         template_u_shifted = shift_map_bilinear(template_u, y_offset, x_offset)

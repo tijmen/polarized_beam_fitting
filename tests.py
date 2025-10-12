@@ -151,8 +151,8 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
     maps_apodized = maps_numpy * apod_mask[np.newaxis, :, :, np.newaxis, np.newaxis]
     maps_fft_numpy = np.fft.fft2(maps_apodized, axes=(1, 2))
 
-    gaussfit_yoff = true_yoffs
-    gaussfit_xoff = true_xoffs
+    gaussfit_yoff = np.tile(true_yoffs[:, None], (1, n_bands))
+    gaussfit_xoff = np.tile(true_xoffs[:, None], (1, n_bands))
     gaussfit_initial_amp = true_amps
 
     raw_maps = np.zeros_like(maps_numpy)
@@ -256,20 +256,22 @@ class TestTemplateHandling(unittest.TestCase):
         qu_templates = {"mock_field": template}
 
         source_fields = np.array(["mock_field"], dtype=object)
-        gaussfit_yoff = np.array([0.4], dtype=config.dtype_np_real)
-        gaussfit_xoff = np.array([-0.6], dtype=config.dtype_np_real)
+        source_ids = np.array(["mock_source"])
+        gaussfit_yoff = np.array([[0.4]], dtype=config.dtype_np_real)
+        gaussfit_xoff = np.array([[-0.6]], dtype=config.dtype_np_real)
 
         maps_clean, _ = loader._prepare_clean_maps(
             gaussfit_amp,
             raw_maps,
             qu_templates,
             source_fields,
+            source_ids,
             gaussfit_yoff,
             gaussfit_xoff,
         )
 
-        shifted_q = shift_map_bilinear(template[:, :, 0, 0], gaussfit_yoff[0], gaussfit_xoff[0])
-        shifted_u = shift_map_bilinear(template[:, :, 0, 1], gaussfit_yoff[0], gaussfit_xoff[0])
+        shifted_q = shift_map_bilinear(template[:, :, 0, 0], gaussfit_yoff[0, 0], gaussfit_xoff[0, 0])
+        shifted_u = shift_map_bilinear(template[:, :, 0, 1], gaussfit_yoff[0, 0], gaussfit_xoff[0, 0])
 
         expected_q = raw_maps[0, :, :, 0, 1] - shifted_q * gaussfit_amp[0, 0, 0]
         expected_u = raw_maps[0, :, :, 0, 2] - shifted_u * gaussfit_amp[0, 0, 0]
