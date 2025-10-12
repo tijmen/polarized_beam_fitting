@@ -101,7 +101,7 @@ class BeamFittingConfig:
 
     # === Noise and chi-squared evaluation ===
     chi2_method = "fourier"  # "fourier" or "real_space"
-    noise_psd_method = "pca_psd_separate_tqu"
+    noise_psd_method = "pca_psd_separate_tqu" # TODO: list the options here with one-sentence descriptions
     n_pca_components = 4
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0

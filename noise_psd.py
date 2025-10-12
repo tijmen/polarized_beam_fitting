@@ -10,7 +10,7 @@ is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
 Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pca_psd, pca_psd_separate_tqu] are fully diagonal,
-and [multiband_covariance] is only diagonal in Fourier space.
+and [multiband_covariance] is only diagonal in Fourier space. # TODO update this docstring
 """
 
 import logging
