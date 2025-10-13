@@ -765,10 +765,6 @@ class EnsembleAsdMeanCalculator(NoisePSDCalculator):
         mean_asd = np.mean(all_asds, axis=0)  # Average over sources
         mean_psd = mean_asd**2
 
-        # Apply scaling for polarization
-        mean_psd[:, :, :, 1] *= 2.0  # Q polarization has 2x the noise
-        mean_psd[:, :, :, 2] *= 2.0  # U polarization has 2x the noise
-
         print("Ensemble ASD averaging complete.")
         return mean_psd
 

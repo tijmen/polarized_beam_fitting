@@ -12,7 +12,7 @@ from spt3g import core
 from spt3g.sources import fitting as source_fitting
 
 
-def gaussfit_source(t_map, q_map, u_map, weight, config=None):
+def gaussfit_source(t_map, q_map, u_map, weight, config=None, band=None):
     """
     Gaussian fitting for T, Q, U maps to determine source amplitudes and Q/U amplitudes.
     Returns T amplitude and position, plus Q and U amplitudes fitted at the T position.
@@ -29,6 +29,9 @@ def gaussfit_source(t_map, q_map, u_map, weight, config=None):
         Weight map with TT, QQ, UU components
     config : BeamFittingConfig
         Configuration object containing parameters
+    band : str, optional
+        Identifier of the band associated with the input maps (e.g. \"150GHz\").
+        Defaults to the first band listed in the configuration.
 
     Returns:
     --------
@@ -36,8 +39,8 @@ def gaussfit_source(t_map, q_map, u_map, weight, config=None):
         (yoff_fit, xoff_fit, t_amp, meanoff_fit, q_amp, u_amp)
     """
     map_size_pix = config.map_size_pix
-    bands = config.bands
-    band_fwhm_arcmin = config.band_fwhm_arcmin[bands[0]]
+    active_band = band or config.bands[0]
+    band_fwhm_arcmin = config.band_fwhm_arcmin[active_band]
     mapunw = np.asarray(t_map)
     w = np.asarray(weight.TT)
     medwt = np.median(w[w > 0])

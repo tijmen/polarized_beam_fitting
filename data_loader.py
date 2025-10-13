@@ -264,7 +264,7 @@ class DataLoader:
             if band is None or self._should_skip_source(source_id):
                 continue
 
-            fit_result = self._fit_single_source(frame)
+            fit_result = self._fit_single_source(frame, band)
             if fit_result is not None:
                 fit_result["field"] = field_name
                 results[band][source_id] = fit_result
@@ -295,7 +295,7 @@ class DataLoader:
         """Check if source should be skipped."""
         return any(skip in source_id for skip in self.config.skip_sources)
 
-    def _fit_single_source(self, frame) -> Optional[Dict]:
+    def _fit_single_source(self, frame, band: str) -> Optional[Dict]:
         """Fit Gaussian to a single source."""
         t_map, q_map, u_map, weight = (frame["T"], frame["Q"], frame["U"], frame["Wpol"])
         maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
@@ -304,7 +304,7 @@ class DataLoader:
             print(f"Skipping source {frame['Id']} because of zero fraction is above {self.config.max_zero_fraction}.")
             return None
 
-        fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config)
+        fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config, band=band)
         yoff, xoff, t_amp, meanoff, q_amp, u_amp = fit
 
         if t_amp < self.config.min_t_amplitude:
