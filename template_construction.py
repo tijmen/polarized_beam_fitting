@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Construct shifted T->P leakage templates for multiple fields and bands.
 
 This script reproduces the template construction workflow that previously
@@ -6,11 +5,15 @@ lived in the notebook, but makes it repeatable via a command-line entry
 point. It applies a radial low-pass filter using the TOD Nyquist estimate,
 recenters residual maps with bilinear interpolation, and stores source
 offsets alongside each template so they can be re-used later.
+
+Run with:
+```bash 
+python -m polarized_beam_fitting.template_construction
+```
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import pickle
 from pathlib import Path
@@ -261,32 +264,9 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Construct shifted leakage templates for multiple bands/fields.")
-    parser.add_argument(
-        "--bands",
-        nargs="*",
-        default=BANDS,
-        help="Subset of bands to process (default: 90/150/220 GHz).",
-    )
-    parser.add_argument(
-        "--fields",
-        nargs="*",
-        default=sorted(FIELD_COADD_PATHS.keys()),
-        help="Subset of fields to process (default: all configured fields).",
-    )
-    parser.add_argument(
-        "--no-plots",
-        dest="make_plots",
-        action="store_false",
-        help="Skip generating diagnostic PNGs.",
-    )
+    fields = sorted(FIELD_COADD_PATHS.keys())
 
-    args = parser.parse_args()
-    selected_fields = args.fields
-    selected_bands = args.bands
-    make_plots = args.make_plots
-
-    for field in selected_fields:
+    for field in fields:
         if field not in FIELD_COADD_PATHS:
             raise ValueError(f"Unknown field '{field}'. Known fields: {sorted(FIELD_COADD_PATHS.keys())}")
         if not os.path.exists(FIELD_COADD_PATHS[field]):
@@ -294,10 +274,9 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for field in selected_fields:
-        for band in selected_bands:
-            construct_templates_for_combination(field, band, OUTPUT_DIR, make_plots)
-
+    for field in fields:
+        for band in BANDS:
+            construct_templates_for_combination(field, band, OUTPUT_DIR, make_plots=True)
 
 if __name__ == "__main__":
     main()

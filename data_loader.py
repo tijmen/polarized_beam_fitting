@@ -359,7 +359,7 @@ class DataLoader:
 
         for band in self.config.bands[1:]:
             expected_id = f"{base_name}-{band}"
-            if not any(expected_id == sid.split("_")[0] for sid in results[band]):
+            if expected_id not in results[band]:
                 return False
         return True
 
@@ -473,9 +473,12 @@ class DataLoader:
                 for source_id, offsets in offsets_payload.items():
                     y_offset = float(offsets["y_offset"])
                     x_offset = float(offsets["x_offset"])
- 
+
                     # Always trust the offsets stored with each template; they supersede gaussfit positions.
-                    per_source_offsets = field_offsets.setdefault(str(source_id), {})
+                    src = str(source_id)
+                    suffix = f"-{band}"
+                    base_id = src.split(suffix)[0] if suffix in src else src
+                    per_source_offsets = field_offsets.setdefault(base_id, {})
                     per_source_offsets[band] = (y_offset, x_offset)
 
             templates[field] = field_templates
