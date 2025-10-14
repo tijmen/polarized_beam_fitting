@@ -93,6 +93,8 @@ class BeamFittingConfig:
         "J235935-3133.7",  # too faint at 220
         "J002430-2928.8",  # too faint at 150
         "J032046-3837.4",  # too faint at 150
+        "J034838-2749.2",  # second noisiest-source. Don't know why.
+        "J045703-2324.8",  # noisiest source by a factor of 3! Definitely don't know why.
     ]
 
     # === Source selection & leakage handling ===

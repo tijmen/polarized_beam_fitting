@@ -37,6 +37,10 @@ PARAMETRIC_PRECISION_RADIAL_PIVOT = 1000.0
 PARAMETRIC_PRECISION_RADIAL_EXPONENT = 1.0
 PARAMETRIC_PRECISION_RADIAL_DC_FAKE = 50.0
 PARAMETRIC_PRECISION_EIGEN_EPS = 1e-5
+PARAMETRIC_PRECISION_ELL_X_PIVOT = 1000.0
+PARAMETRIC_PRECISION_ELL_X_DC_FAKE = 50.0
+PARAMETRIC_PRECISION_ELL_X_BOUNDS_LOWER = np.array([0.0, 0.0, 0.0])
+PARAMETRIC_PRECISION_ELL_X_BOUNDS_UPPER = np.array([5e-7, 3e-4, 2e-7])
 PARAMETRIC_PRECISION_DESCRIPTION = (
     "Precision matrix from parametric modelling: CMB (fixed calibration) + ell_x-dependent + radial uncorrelated model. "
     "Uses unshifted FFT convention (DC located at [0,0]) and discrete Fourier normalization."
@@ -213,29 +217,14 @@ def _compute_cmb_covariance(
     return cov_cmb
 
 
-def _vandermonde_matrix(ell_x_vals: np.ndarray, pivot: float = 1000.0, ell_min: float = 100.0) -> np.ndarray:
-    """Return the fixed design matrix used for ell_x polynomial fitting."""
+def _design_matrix_ell_x(ell_x_vals: np.ndarray) -> np.ndarray:
+    """Return the simplified design matrix for ell_x fitting with three basis functions."""
     ell_x_vals = np.asarray(ell_x_vals, dtype=float)
-    a = ell_x_vals / pivot
-    design = np.zeros((len(ell_x_vals), 6), dtype=float)
-
-    is_dc = ell_x_vals == 0.0
-    is_high = np.abs(ell_x_vals) >= ell_min
-    is_low = (~is_dc) & (~is_high)
-
-    aa_high = a[is_high]
-    design[is_high, 0] = 1.0 / (aa_high**4)
-    design[is_high, 1] = 1.0 / np.abs(aa_high)
-    design[is_high, 2] = 1.0
-    design[is_high, 3] = aa_high**2
-    design[is_high, 4] = aa_high**4
-
-    aa_low = a[is_low]
-    design[is_low, 2] = 1.0
-    design[is_low, 3] = aa_low**2
-    design[is_low, 4] = aa_low**4
-
-    design[is_dc, 5] = 1.0
+    pivot = PARAMETRIC_PRECISION_ELL_X_PIVOT
+    design = np.zeros((len(ell_x_vals), 3), dtype=float)
+    design[:, 0] = (pivot / ell_x_vals) ** 2
+    design[:, 1] = 1.0
+    design[:, 2] = (ell_x_vals / pivot) ** 2
     return design
 
 
@@ -245,9 +234,13 @@ def _fit_ell_x_model(
     ell_x: np.ndarray,
     high_ky_mask: np.ndarray,
 ) -> np.ndarray:
-    """Fit the ell_x-dependent uncorrelated noise model for each source/band/stokes."""
+    """Fit the ell_x-dependent uncorrelated noise model using log-space weighted least squares."""
     n_src, _, nx, n_bands, n_stokes, _, _ = cov_no_cmb.shape
-    design = _vandermonde_matrix(ell_x)
+
+    ell_x_fit = ell_x.copy()
+    ell_x_fit[ell_x == 0.0] = PARAMETRIC_PRECISION_ELL_X_DC_FAKE
+
+    design = _design_matrix_ell_x(ell_x_fit)
     cov_ellx = np.zeros((n_src, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=cov_no_cmb.dtype)
 
     if not np.any(high_ky_mask):
@@ -260,16 +253,26 @@ def _fit_ell_x_model(
         for band in range(n_bands):
             for stokes in range(n_stokes):
                 y = averaged[src, :, band, stokes, band, stokes]
-                theta, *_ = np.linalg.lstsq(design, y, rcond=None)
+                y = np.maximum(y, 1e-20)
+
+                weights = 1.0 / y
+                W = np.sqrt(weights)
+                W_diag = np.diag(W)
+                design_weighted = W_diag @ design
+                y_weighted = W_diag @ y
+
+                theta, *_ = np.linalg.lstsq(design_weighted, y_weighted, rcond=None)
+                theta = np.clip(theta, PARAMETRIC_PRECISION_ELL_X_BOUNDS_LOWER, PARAMETRIC_PRECISION_ELL_X_BOUNDS_UPPER)
+
                 model = design @ theta
-                model = np.maximum(model, 0.0)
 
                 white_mask = np.abs(ell_x) >= PARAMETRIC_PRECISION_WHITE_NOISE_FLOOR_ELL
                 if np.any(white_mask):
-                    reference = cov_input_for_floor[src, :, :, band, stokes, band, stokes][:, white_mask]
+                    reference = cov_input_for_floor[src, :, :, band, stokes, band, stokes]
                     if reference.size:
-                        floor = 0.7 * np.median(reference)
-                        model = np.where(white_mask, np.maximum(model, floor), model)
+                        floor = 0.7 * np.median(reference[white_mask])
+                        model = np.maximum(model, floor)
+
                 cov_ellx[src, :, band, stokes, band, stokes] = model
     return cov_ellx
 
