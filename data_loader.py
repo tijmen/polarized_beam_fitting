@@ -31,10 +31,21 @@ class DataLoader:
         source_fields = source_data["fields"]
 
         # Create leakage template
-        qu_templates, template_offsets = self._create_leakage_template(source_data["gaussfit_amp"], source_data["raw_maps"], source_fields)
+        qu_templates, template_offsets, template_flux = self._create_leakage_template(
+            source_data["gaussfit_amp"], source_data["raw_maps"], source_fields
+        )
+
+        template_flux_array = None
 
         if template_offsets is not None:
             self._apply_template_offsets(source_data, template_offsets)
+            if template_flux is None:
+                raise ValueError(
+                    "Precomputed leakage templates are missing stored flux parameters. "
+                    "Re-run template construction to embed source fluxes."
+                )
+            template_flux_array = self._build_template_flux_array(source_data, template_flux)
+            source_data["gaussfit_amp"] = template_flux_array.copy()
 
         # Clean maps
         maps_clean, maps_fft = self._prepare_clean_maps(
@@ -45,6 +56,7 @@ class DataLoader:
             source_data["source_ids"],
             source_data["gaussfit_yoff"],
             source_data["gaussfit_xoff"],
+            template_flux_array,
         )
 
         maps_fft_prepared, noise_bundle = self._build_noise_bundle(maps_clean, maps_fft, source_fields)
@@ -264,7 +276,10 @@ class DataLoader:
             if band is None or self._should_skip_source(source_id):
                 continue
 
-            fit_result = self._fit_single_source(frame, band)
+            if self.config.use_precomputed_leakage_templates:
+                fit_result = self._build_precomputed_source_record(frame)
+            else:
+                fit_result = self._fit_single_source(frame, band)
             if fit_result is not None:
                 fit_result["field"] = field_name
                 results[band][source_id] = fit_result
@@ -295,14 +310,24 @@ class DataLoader:
         """Check if source should be skipped."""
         return any(skip in source_id for skip in self.config.skip_sources)
 
-    def _fit_single_source(self, frame, band: str) -> Optional[Dict]:
-        """Fit Gaussian to a single source."""
+    def _extract_maps_from_frame(self, frame):
+        """Remove weights and validate a frame's maps."""
         t_map, q_map, u_map, weight = (frame["T"], frame["Q"], frame["U"], frame["Wpol"])
         maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
 
         if not check_zero_fraction(t_map, frame["Id"], max_zero_fraction=self.config.max_zero_fraction):
             print(f"Skipping source {frame['Id']} because of zero fraction is above {self.config.max_zero_fraction}.")
             return None
+
+        return t_map, q_map, u_map, weight
+
+    def _fit_single_source(self, frame, band: str) -> Optional[Dict]:
+        """Fit Gaussian to a single source."""
+        extracted = self._extract_maps_from_frame(frame)
+        if extracted is None:
+            return None
+
+        t_map, q_map, u_map, weight = extracted
 
         fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config, band=band)
         yoff, xoff, t_amp, meanoff, q_amp, u_amp = fit
@@ -318,6 +343,25 @@ class DataLoader:
             "q_amp": q_amp,
             "u_amp": u_amp,
             "meanoff": meanoff,
+            "maps": (t_map, q_map, u_map, weight),
+        }
+
+    def _build_precomputed_source_record(self, frame) -> Optional[Dict]:
+        """Collect maps without running Gaussian fits (for precomputed templates)."""
+        extracted = self._extract_maps_from_frame(frame)
+        if extracted is None:
+            return None
+
+        t_map, q_map, u_map, weight = extracted
+
+        zero = float(0.0)
+        return {
+            "yoff": zero,
+            "xoff": zero,
+            "t_amp": zero,
+            "q_amp": zero,
+            "u_amp": zero,
+            "meanoff": zero,
             "maps": (t_map, q_map, u_map, weight),
         }
 
@@ -398,8 +442,10 @@ class DataLoader:
         arrays["weights"][src_idx, :, :, band_idx, 1, 2] = w.QU
         arrays["weights"][src_idx, :, :, band_idx, 2, 1] = w.QU
 
-    def _create_leakage_template(self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, source_fields: np.ndarray):
-        """Create or load the T->QU leakage correction template(s)."""
+    def _create_leakage_template(
+        self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, source_fields: np.ndarray
+    ) -> Tuple:
+        """Create or load the T->QU leakage correction template(s) with offsets and fluxes."""
         if self.config.use_precomputed_leakage_templates:
             return self._load_precomputed_leakage_templates(source_fields)
 
@@ -424,24 +470,30 @@ class DataLoader:
             weight_sum = np.sum(weights, axis=0)
             template = weighted_sum / weight_sum
 
-        return template, None
+        return template, None, None
 
     def _load_precomputed_leakage_templates(
         self, source_fields: np.ndarray
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]]:
-        """Load precomputed leakage templates and per-band source offsets."""
+    ) -> Tuple[
+        Dict[str, np.ndarray],
+        Dict[str, Dict[str, Dict[str, Tuple[float, float]]]],
+        Dict[str, Dict[str, Dict[str, np.ndarray]]],
+    ]:
+        """Load precomputed leakage templates, per-band source offsets, and stored fluxes."""
         unique_fields = {field for field in source_fields if field is not None}
         if not unique_fields:
             raise ValueError("No source fields available to match precomputed leakage templates.")
 
         templates = {}
         template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]] = {}
+        template_fluxes: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
         ny, nx = self.map_shape
         n_bands = len(self.config.bands)
 
         for field in unique_fields:
             field_templates = np.zeros((ny, nx, n_bands, 2), dtype=self.config.dtype_np_real)
             field_offsets: Dict[str, Dict[str, Tuple[float, float]]] = template_offsets.setdefault(field, {})
+            field_fluxes: Dict[str, Dict[str, np.ndarray]] = template_fluxes.setdefault(field, {})
 
             for band_idx, band in enumerate(self.config.bands):
                 filename = os.path.join(
@@ -469,6 +521,12 @@ class DataLoader:
                 offsets_payload = template_data.get("source_offsets")
                 if offsets_payload is None:
                     raise ValueError(f"Template file {filename} does not contain 'source_offsets'.")
+                flux_payload = template_data.get("source_flux")
+                if flux_payload is None:
+                    raise ValueError(
+                        f"Template file {filename} does not contain 'source_flux'. "
+                        "Re-run template construction to include stored flux parameters."
+                    )
 
                 for source_id, offsets in offsets_payload.items():
                     y_offset = float(offsets["y_offset"])
@@ -481,9 +539,25 @@ class DataLoader:
                     per_source_offsets = field_offsets.setdefault(base_id, {})
                     per_source_offsets[band] = (y_offset, x_offset)
 
+                for source_id, band_flux_map in flux_payload.items():
+                    src = str(source_id)
+                    suffix = f"-{band}"
+                    base_id = src.split(suffix)[0] if suffix in src else src
+                    per_source_flux = field_fluxes.setdefault(base_id, {})
+                    flux_entry = band_flux_map.get(band)
+                    if flux_entry is None:
+                        raise ValueError(
+                            f"Template file {filename} does not contain stored flux for source '{base_id}' and band '{band}'."
+                        )
+                    flux_vector = np.array(
+                        [float(flux_entry["T"]), float(flux_entry["Q"]), float(flux_entry["U"])],
+                        dtype=self.config.dtype_np_real,
+                    )
+                    per_source_flux[band] = flux_vector
+
             templates[field] = field_templates
 
-        return templates, template_offsets
+        return templates, template_offsets, template_fluxes
 
     def _apply_template_offsets(
         self, source_data: Dict, template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]
@@ -512,6 +586,35 @@ class DataLoader:
                 gaussfit_yoff[idx, band_idx] = y_offset
                 gaussfit_xoff[idx, band_idx] = x_offset
 
+    def _build_template_flux_array(
+        self, source_data: Dict, template_flux: Dict[str, Dict[str, Dict[str, np.ndarray]]]
+    ) -> np.ndarray:
+        """Assemble stored flux parameters into an array aligned with the source ordering."""
+        flux_array = np.zeros(source_data["gaussfit_amp"].shape, dtype=self.config.dtype_np_real)
+        source_ids = source_data["source_ids"]
+        source_fields = source_data["fields"]
+
+        for idx, raw_source_id in enumerate(source_ids):
+            sid = str(raw_source_id)
+            field = source_fields[idx]
+            field_flux = template_flux.get(field)
+            if field_flux is None:
+                raise ValueError(f"Missing stored flux for field '{field}' while using precomputed templates.")
+            source_flux_map = field_flux.get(sid)
+            if source_flux_map is None:
+                raise ValueError(f"Missing stored flux for source '{sid}' in field '{field}'.")
+
+            for band_idx, band in enumerate(self.config.bands):
+                flux_vector = source_flux_map.get(band)
+                if flux_vector is None:
+                    raise ValueError(
+                        f"Missing stored flux for source '{sid}' in field '{field}' for band '{band}'. "
+                        "Re-run template construction to regenerate templates."
+                    )
+                flux_array[idx, band_idx, :] = flux_vector
+
+        return flux_array
+
     def _prepare_clean_maps(
         self,
         gaussfit_amp: np.ndarray,
@@ -521,6 +624,7 @@ class DataLoader:
         source_ids: np.ndarray,
         gaussfit_yoff: np.ndarray,
         gaussfit_xoff: np.ndarray,
+        template_flux: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Apply leakage correction, subtract shifted templates, and prepare final maps."""
         n_src, ny, nx, n_bands, _ = raw_maps.shape
@@ -552,7 +656,16 @@ class DataLoader:
                     template_q_shifted = template_q
                     template_u_shifted = template_u
 
-                t_amp = gaussfit_amp[i, j, 0]
+                if self.config.use_precomputed_leakage_templates:
+                    if template_flux is None:
+                        raise ValueError(
+                            "Precomputed leakage templates require stored flux parameters for scaling. "
+                            "Re-run template construction to embed flux information."
+                        )
+                    t_amp = float(template_flux[i, j, 0])
+                else:
+                    t_amp = gaussfit_amp[i, j, 0]
+
                 maps_clean[i, :, :, j, 1] -= template_q_shifted * t_amp
                 maps_clean[i, :, :, j, 2] -= template_u_shifted * t_amp
 

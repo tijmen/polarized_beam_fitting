@@ -268,6 +268,7 @@ class TestTemplateHandling(unittest.TestCase):
             source_ids,
             gaussfit_yoff,
             gaussfit_xoff,
+            template_flux=gaussfit_amp,
         )
 
         shifted_q = shift_map_bilinear(template[:, :, 0, 0], gaussfit_yoff[0, 0], gaussfit_xoff[0, 0])

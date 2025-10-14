@@ -30,7 +30,7 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
                 if param_name == "flux":
                     # For flux gradients, need to expand mask to match shape (n_sources, n_bands, 3)
                     flux_grad_shape = masked_grads["sources"][param_name].shape
-                    zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_grad_shape)
+                    zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask[:, None, None], flux_grad_shape)
                     masked_grads["sources"][param_name] = jnp.where(
                         zero_weight_mask_expanded,
                         jnp.zeros_like(masked_grads["sources"][param_name]),
@@ -38,8 +38,9 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
                     )
                 else:
                     # For yoff and xoff, mask has correct shape already
+                    zero_weight_mask_yx = zero_weight_mask[:, None]
                     masked_grads["sources"][param_name] = jnp.where(
-                        zero_weight_mask,
+                        zero_weight_mask_yx,
                         jnp.zeros_like(masked_grads["sources"][param_name]),
                         masked_grads["sources"][param_name],
                     )
@@ -261,12 +262,17 @@ class BootstrapBeamFitter:
         neutral_flux = jnp.ones_like(initial_params_physical["sources"]["flux"])
 
         # Apply neutral values to excluded sources using jnp.where
-        initial_params_physical["sources"]["yoff"] = jnp.where(zero_weight_mask, neutral_yoff, initial_params_physical["sources"]["yoff"])
-        initial_params_physical["sources"]["xoff"] = jnp.where(zero_weight_mask, neutral_xoff, initial_params_physical["sources"]["xoff"])
+        zero_weight_mask_yx = zero_weight_mask[:, None]
+        initial_params_physical["sources"]["yoff"] = jnp.where(
+            zero_weight_mask_yx, neutral_yoff, initial_params_physical["sources"]["yoff"]
+        )
+        initial_params_physical["sources"]["xoff"] = jnp.where(
+            zero_weight_mask_yx, neutral_xoff, initial_params_physical["sources"]["xoff"]
+        )
 
         # For flux, expand mask to match flux array shape (n_sources, n_bands, 3)
         flux_shape = initial_params_physical["sources"]["flux"].shape
-        zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask.reshape(-1, 1, 1), flux_shape)
+        zero_weight_mask_expanded = jnp.broadcast_to(zero_weight_mask[:, None, None], flux_shape)
         initial_params_physical["sources"]["flux"] = jnp.where(
             zero_weight_mask_expanded, neutral_flux, initial_params_physical["sources"]["flux"]
         )

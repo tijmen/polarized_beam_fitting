@@ -104,7 +104,16 @@ class BeamFittingConfig:
 
     # === Noise and chi-squared evaluation ===
     chi2_method = "fourier"  # "fourier" or "real_space"
-    noise_psd_method = "pca_psd_separate_tqu" # TODO: list the options here with one-sentence descriptions
+    # noise_psd_method options:
+    #   "clusterfinder_psd"          : load fixed PSD from FITS (single-band only).
+    #   "kx_averaged"                : 1D PSD averaged along kx, diagonal in (band, stokes).
+    #   "ensemble_asd_mean"          : take ASD per source, average, square back to PSD per band/stokes.
+    #   "white_noise"                : unit PSD with 2× scaling for Q/U (simple test case).
+    #   "multiband_covariance"       : full (band × stokes) covariance estimated from source ensemble.
+    #   "pca_multiband_covariance"   : PCA-regularized multiband covariance (complex precision output).
+    #   "parametric_precision"       : CAMB + analytic noise model yielding dense precision matrices.
+    #   "pca_psd_separate_tqu"       : log-space PCA per stokes, diagonal in band; default.
+    noise_psd_method = "pca_psd_separate_tqu"
     n_pca_components = 4
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
