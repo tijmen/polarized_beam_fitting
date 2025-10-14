@@ -7,7 +7,7 @@ recenters residual maps with bilinear interpolation, and stores source
 offsets alongside each template so they can be re-used later.
 
 Run with:
-```bash 
+```bash
 python -m polarized_beam_fitting.template_construction
 ```
 """
@@ -41,6 +41,7 @@ FIELD_COADD_PATHS = {
     "summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
     "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
     "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
+    "winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
 }
 OUTPUT_DIR = Path("output/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
@@ -166,6 +167,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
     normalized_u_maps = []
     source_t_amps = []
     source_offsets: Dict[str, Dict[str, float]] = {}
+    source_flux: Dict[str, Dict[str, np.ndarray]] = {}
     source_kmax: Dict[str, float | None] = {}
 
     for source_base, raw_maps in raw_maps_data.items():
@@ -208,6 +210,8 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
         normalized_u_maps.append(shift_map_bilinear(u_normalized, -yoff, -xoff))
         source_t_amps.append(t_amp)
         source_offsets[source_base] = {"y_offset": float(yoff), "x_offset": float(xoff)}
+        per_source_flux = source_flux.setdefault(source_base, {})
+        per_source_flux[band] = flux.copy()
 
     if len(normalized_q_maps) < 2:
         raise ValueError("Fewer than 2 sources available after processing. Cannot build a robust template.")
@@ -253,6 +257,10 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
                 sid: {"y_offset": float(offsets["y_offset"]), "x_offset": float(offsets["x_offset"])}
                 for sid, offsets in source_offsets.items()
             },
+            "source_flux": {
+                sid: {band_key: {"T": float(vec[0]), "Q": float(vec[1]), "U": float(vec[2])} for band_key, vec in per_band.items()}
+                for sid, per_band in source_flux.items()
+            },
             "source_kmax_cpd": {sid: (None if value is None else float(value)) for sid, value in source_kmax.items()},
             "metadata": metadata,
         }
@@ -277,6 +285,7 @@ def main():
     for field in fields:
         for band in BANDS:
             construct_templates_for_combination(field, band, OUTPUT_DIR, make_plots=True)
+
 
 if __name__ == "__main__":
     main()
