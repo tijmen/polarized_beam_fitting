@@ -41,8 +41,7 @@ class DataLoader:
             self._apply_template_offsets(source_data, template_offsets)
             if template_flux is None:
                 raise ValueError(
-                    "Precomputed leakage templates are missing stored flux parameters. "
-                    "Re-run template construction to embed source fluxes."
+                    "Precomputed leakage templates are missing stored flux parameters. Re-run template construction to embed source fluxes."
                 )
             template_flux_array = self._build_template_flux_array(source_data, template_flux)
             source_data["gaussfit_amp"] = template_flux_array.copy()
@@ -442,9 +441,7 @@ class DataLoader:
         arrays["weights"][src_idx, :, :, band_idx, 1, 2] = w.QU
         arrays["weights"][src_idx, :, :, band_idx, 2, 1] = w.QU
 
-    def _create_leakage_template(
-        self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, source_fields: np.ndarray
-    ) -> Tuple:
+    def _create_leakage_template(self, gaussfit_amp: np.ndarray, raw_maps: np.ndarray, source_fields: np.ndarray) -> Tuple:
         """Create or load the T->QU leakage correction template(s) with offsets and fluxes."""
         if self.config.use_precomputed_leakage_templates:
             return self._load_precomputed_leakage_templates(source_fields)
@@ -546,9 +543,7 @@ class DataLoader:
                     per_source_flux = field_fluxes.setdefault(base_id, {})
                     flux_entry = band_flux_map.get(band)
                     if flux_entry is None:
-                        raise ValueError(
-                            f"Template file {filename} does not contain stored flux for source '{base_id}' and band '{band}'."
-                        )
+                        raise ValueError(f"Template file {filename} does not contain stored flux for source '{base_id}' and band '{band}'.")
                     flux_vector = np.array(
                         [float(flux_entry["T"]), float(flux_entry["Q"]), float(flux_entry["U"])],
                         dtype=self.config.dtype_np_real,
@@ -559,11 +554,9 @@ class DataLoader:
 
         return templates, template_offsets, template_fluxes
 
-    def _apply_template_offsets(
-        self, source_data: Dict, template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]
-    ):
+    def _apply_template_offsets(self, source_data: Dict, template_offsets: Dict[str, Dict[str, Dict[str, Tuple[float, float]]]]):
         """Overwrite initial offsets with the values stored alongside precomputed templates."""
-        gaussfit_yoff = source_data["gaussfit_yoff"] # reference to mutable array
+        gaussfit_yoff = source_data["gaussfit_yoff"]  # reference to mutable array
         gaussfit_xoff = source_data["gaussfit_xoff"]
         source_ids = source_data["source_ids"]
         source_fields = source_data["fields"]
@@ -579,16 +572,12 @@ class DataLoader:
                 raise ValueError(f"Missing stored offset for source '{sid}' in field '{field}' while using precomputed templates.")
             for band_idx, band in enumerate(self.config.bands):
                 if band not in source_offset_map:
-                    raise ValueError(
-                        f"Missing stored offset for source '{sid}' in field '{field}' for band '{band}'."
-                    )
+                    raise ValueError(f"Missing stored offset for source '{sid}' in field '{field}' for band '{band}'.")
                 y_offset, x_offset = source_offset_map[band]
                 gaussfit_yoff[idx, band_idx] = y_offset
                 gaussfit_xoff[idx, band_idx] = x_offset
 
-    def _build_template_flux_array(
-        self, source_data: Dict, template_flux: Dict[str, Dict[str, Dict[str, np.ndarray]]]
-    ) -> np.ndarray:
+    def _build_template_flux_array(self, source_data: Dict, template_flux: Dict[str, Dict[str, Dict[str, np.ndarray]]]) -> np.ndarray:
         """Assemble stored flux parameters into an array aligned with the source ordering."""
         flux_array = np.zeros(source_data["gaussfit_amp"].shape, dtype=self.config.dtype_np_real)
         source_ids = source_data["source_ids"]
