@@ -42,6 +42,9 @@ FIELD_COADD_PATHS = {
     "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
     "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
     "winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
+    "summer_a_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
+    "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
+    "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
 }
 OUTPUT_DIR = Path("output/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")

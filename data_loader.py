@@ -287,16 +287,21 @@ class DataLoader:
         """Infer observing field (winter/summer_a/...) from the input filename."""
         basename = os.path.basename(filename).lower()
         if "winter" in basename:
-            return "winter"
-        if "summera" in basename:
-            return "summer_a"
-        if "summerb" in basename:
-            return "summer_b"
-        if "summerc" in basename:
-            return "summer_c"
+            field = "winter"
+        elif "summera" in basename:
+            field = "summer_a_nodecon"
+        elif "summerb" in basename:
+            field = "summer_b_nodecon"
+        elif "summerc" in basename:
+            field = "summer_c_nodecon"
         else:
-            print(f"Warning, could not infer field from filename: {filename}, assuming winter field.")
+            print(f"Warning, could not infer field from filename: {filename}, assuming winter field!")
             return "winter"
+
+        if "tau_decon" in basename:
+            return field
+        else:
+            return field + "_nodecon"
 
     def _get_band_from_id(self, source_id: str) -> Optional[str]:
         """Extract band from source ID."""
@@ -521,8 +526,7 @@ class DataLoader:
                 flux_payload = template_data.get("source_flux")
                 if flux_payload is None:
                     raise ValueError(
-                        f"Template file {filename} does not contain 'source_flux'. "
-                        "Re-run template construction to include stored flux parameters."
+                        f"Template file {filename} does not contain 'source_flux'. Re-run template construction to include stored flux parameters."
                     )
 
                 for source_id, offsets in offsets_payload.items():

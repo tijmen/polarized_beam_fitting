@@ -99,8 +99,7 @@ class BeamModelBspline(BeamModelBase):
         """
         super().__init__(config, y_grid, x_grid, band)
         warnings.warn(
-            "BeamModelBspline is experimentally biased due to B-spline overfitting near r=0. "
-            "Consider using 'bsplines_plus_gaussian' instead.",
+            "BeamModelBspline is experimentally biased due to B-spline overfitting near r=0. Consider using 'bsplines_plus_gaussian' instead.",
             RuntimeWarning,
             stacklevel=2,
         )
