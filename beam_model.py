@@ -382,11 +382,16 @@ class BeamModelBspline(BeamModelBase):
         numpy.ndarray
             Coefficients for the orthonormal basis functions
         """
+        # Convert JAX arrays to NumPy explicitly to avoid silent device-host transfers
+        r_fine_np = np.asarray(self.r_fine_jax)
+        particular_np = np.asarray(self.particular_func_jax)
+        ortho_basis_np = np.asarray(self.ortho_basis_funcs_jax)
+
         # Convert FWHM to sigma
         sigma_arcmin = fwhm_arcmin / (2 * np.sqrt(2 * np.log(2)))
 
         # Create target Gaussian profile on the fine grid
-        target_gaussian = np.exp(-0.5 * (self.r_fine_jax / sigma_arcmin) ** 2)
+        target_gaussian = np.exp(-0.5 * (r_fine_np / sigma_arcmin) ** 2)
 
         # We want to find coeffs such that:
         # particular_func + ortho_basis_funcs @ coeffs ≈ target_gaussian
@@ -394,20 +399,15 @@ class BeamModelBspline(BeamModelBase):
         # This gives us: ortho_basis_funcs @ coeffs ≈ target_gaussian - particular_func
         #
         # Solve the least squares problem
-        residual = target_gaussian - self.particular_func_jax
-
-        # Use numpy arrays for the least squares solve
-        ortho_basis_np = np.array(self.ortho_basis_funcs_jax)
-        residual_np = np.array(residual)
+        residual = target_gaussian - particular_np
 
         # Solve weighted least squares using 2D polar coordinates
-        r_fine_np = np.array(self.r_fine_jax)
         dr = r_fine_np[1] - r_fine_np[0]
         weight = r_fine_np.copy()
         weight[0] = weight[1] * 0.5
         w_sqrt = np.sqrt(weight * dr)
         A = ortho_basis_np * w_sqrt[:, np.newaxis]
-        b = residual_np * w_sqrt
+        b = residual * w_sqrt
         coeffs, residual_norm, rank, _ = np.linalg.lstsq(A, b, rcond=None)
 
         print(f"Gaussian fitting for FWHM={fwhm_arcmin:.2f}' (σ={sigma_arcmin:.2f}):")
@@ -415,7 +415,7 @@ class BeamModelBspline(BeamModelBase):
         print(f"  Matrix rank: {rank}/{self.n_fittable_coeffs}")
 
         # Verify the fit quality
-        fitted_profile = self.particular_func_jax + np.dot(ortho_basis_np, coeffs)
+        fitted_profile = particular_np + np.dot(ortho_basis_np, coeffs)
         max_error = np.max(np.abs(fitted_profile - target_gaussian))
         rms_error = np.sqrt(np.mean((fitted_profile - target_gaussian) ** 2))
         print(f"  Max error: {max_error:.6f}, RMS error: {rms_error:.6f}")

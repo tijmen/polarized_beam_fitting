@@ -544,8 +544,8 @@ class ClusterfinderPSDCalculator(NoisePSDCalculator):
         psd_resampled[sy : sy + n_cov, sx : sx + n_cov] = np.fft.fftshift(lowk_psd)
 
         # Set high values for k_x=0 modes to avoid division by zero
+        # We know these have not been fftshift-ed so column 0 is the k_x=0 mode
         psd_resampled[:, 0] = 1e12
-        psd_resampled[:, -1] = 1e12
 
         return psd_resampled
 

@@ -334,7 +334,7 @@ class PolarizedBeamFitter:
         self.state.precision_jax = jnp.asarray(precision_np, dtype=dtype)
         self.state.k_mask_jax = None
 
-        self._apply_fourier_mask()
+        self._apply_fourier_mask() # This is a no-op, but ok to leave for now. Use this if we ever need a k-mask again
         self.objective_data = (self.state.maps_fft_jax, self.state.precision_jax)
 
     def _setup_real_space_data(self, weights):
@@ -376,7 +376,7 @@ class PolarizedBeamFitter:
                 jax.tree.map(
                     lambda x: jnp.asarray(x, dtype=self.config.dtype_jax_real),
                     beam_params,
-                )
+                ) # yes, jax.tree.map really is correct for our version of python. NEVER CHANGE THIS TO tree_util, which doesn't exist
             )
 
         # Initialize source parameters

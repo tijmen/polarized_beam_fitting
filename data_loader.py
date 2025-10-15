@@ -264,6 +264,7 @@ class DataLoader:
         g3_file = core.G3File(filename)
 
         field_name = self._infer_field_from_filename(filename)
+        print(f"Identified field: {field_name}")
 
         for frame in g3_file:
             if frame.type != core.G3FrameType.Map or "Id" not in frame:
@@ -289,11 +290,11 @@ class DataLoader:
         if "winter" in basename:
             field = "winter"
         elif "summera" in basename:
-            field = "summer_a_nodecon"
+            field = "summer_a"
         elif "summerb" in basename:
-            field = "summer_b_nodecon"
+            field = "summer_b"
         elif "summerc" in basename:
-            field = "summer_c_nodecon"
+            field = "summer_c"
         else:
             print(f"Warning, could not infer field from filename: {filename}, assuming winter field!")
             return "winter"

@@ -60,7 +60,7 @@ class CacheManager:
         creation_func to generate the data and then saves it to cache.
         """
         cached_data = self.load()
-        if cached_data:
+        if cached_data is not None:
             return cached_data
 
         # Data not in cache, create it
