@@ -5,6 +5,7 @@ Contains helper functions for data processing, apodization, and coordinate trans
 """
 
 import re
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -35,10 +36,6 @@ def predict_nyquist_kx(declination_deg):
 
     # Effective scan speed on the sky depends on declination
     on_sky_scan_speed_deg_s = scan_speed_az_deg_s * np.cos(np.deg2rad(declination_deg))
-
-    # Avoid division by zero for sources near the pole
-    if on_sky_scan_speed_deg_s < 1e-6:
-        return np.inf
 
     # Convert temporal frequency (Hz) to spatial frequency (cycles/deg)
     return nyquist_hz / on_sky_scan_speed_deg_s
@@ -692,8 +689,28 @@ def build_whitening_transform(map_params, curvature):
     return to_whitened, from_whitened, log_det_jacobian
 
 
+def _clone_params(params):
+    """Create a tree copy of parameters stored as the current best."""
+    if params is None:
+        return None
+    return jax.tree_util.tree_map(lambda x: jnp.array(x), params)
+
+
+def init_convergence_state() -> Dict[str, Any]:
+    """Return a fresh convergence tracking state."""
+    return {"loss_history": (), "best_loss": float("inf"), "best_step": -1, "best_params": None}
+
+
 # Convergence criteria utilities
-def check_convergence(loss, grad_norm, step, config, convergence_state=None, initial_grad_norm=None, current_params=None):
+def check_convergence(
+    loss,
+    grad_norm,
+    step,
+    config,
+    convergence_state: Optional[Dict[str, Any]] = None,
+    initial_grad_norm=None,
+    current_params=None,
+) -> Tuple[bool, str, Dict[str, Any]]:
     """
     Check if convergence criterion is met and optionally track best parameters.
 
@@ -708,7 +725,7 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
     config : BeamFittingConfig
         Configuration object containing convergence parameters
     convergence_state : dict, optional
-        State dictionary for tracking convergence (modified in-place)
+        State snapshot for tracking convergence (a new instance is returned)
     initial_grad_norm : float, optional
         Initial gradient norm (required for relative_gtol)
     current_params : pytree, optional
@@ -717,18 +734,20 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
     Returns:
     --------
     tuple
-        (converged: bool, message: str, best_loss: float, best_params: pytree or None)
+        (converged: bool, message: str, state: dict)
     """
     # Initialize convergence state if not provided
     if convergence_state is None:
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1, "best_params": None}
+        state = init_convergence_state()
+    else:
+        state = dict(convergence_state)
 
     criterion_type = config.convergence_criterion
 
     if criterion_type == "absolute_gtol":
         converged = grad_norm < config.absolute_gtol
         message = f"gradient norm {grad_norm:.2e} < {config.absolute_gtol:.2e}" if converged else ""
-        return converged, message, convergence_state.get("best_loss", loss), convergence_state.get("best_params")
+        return converged, message, state
 
     elif criterion_type == "relative_gtol":
         if initial_grad_norm is None:
@@ -736,33 +755,149 @@ def check_convergence(loss, grad_norm, step, config, convergence_state=None, ini
         relative_grad = grad_norm / initial_grad_norm
         converged = relative_grad < config.relative_gtol
         message = f"relative gradient {relative_grad:.2e} < {config.relative_gtol:.2e}" if converged else ""
-        return converged, message, convergence_state.get("best_loss", loss), convergence_state.get("best_params")
+        return converged, message, state
 
     elif criterion_type == "loss_history":
         # Update best loss and params if current loss is better
-        if loss < convergence_state["best_loss"]:
-            convergence_state["best_loss"] = loss
-            convergence_state["best_step"] = step
-            if current_params is not None:
-                convergence_state["best_params"] = jax.tree.map(lambda x: x, current_params)
+        if loss < state["best_loss"]:
+            state["best_loss"] = float(loss)
+            state["best_step"] = step
+            state["best_params"] = _clone_params(current_params)
 
-        # Add current loss to history
-        convergence_state["loss_history"].append(loss)
-
-        # Keep only the last N entries
+        # Add current loss to history with rolling window
         history_length = config.loss_history_length
-        if len(convergence_state["loss_history"]) > history_length:
-            convergence_state["loss_history"].pop(0)
+        history = state["loss_history"] + (float(loss),)
+        if len(history) > history_length:
+            history = history[-history_length:]
+        state["loss_history"] = history
 
         # Check if we have enough history and no improvement
-        if len(convergence_state["loss_history"]) >= history_length:
-            steps_since_best = step - convergence_state["best_step"]
+        if len(state["loss_history"]) >= history_length:
+            steps_since_best = step - state["best_step"]
             converged = steps_since_best >= history_length
             message = f"no improvement for {steps_since_best} steps" if converged else ""
-            return converged, message, convergence_state["best_loss"], convergence_state["best_params"]
+            return converged, message, state
 
         # Not enough history yet
-        return False, "", convergence_state["best_loss"], convergence_state["best_params"]
+        return False, "", state
 
     else:
         raise ValueError(f"Unknown convergence criterion: {criterion_type}")
+
+
+# Newton-PCG utilities
+def hvp(loss_fn, params, v):
+    """
+    Hessian-vector product using forward-mode AD (Pearlmutter trick).
+
+    Parameters:
+    -----------
+    loss_fn : callable
+        Loss function that takes params and returns scalar
+    params : pytree
+        Parameters at which to evaluate HVP
+    v : pytree
+        Vector to multiply with Hessian
+
+    Returns:
+    --------
+    pytree
+        Hessian-vector product H @ v
+    """
+    g = jax.grad(loss_fn)
+    _, hv = jax.jvp(g, (params,), (v,))
+    return hv
+
+
+def pcg_solve(Ax, b, M_inv=None, tol=1e-12, maxiter=1000):
+    """
+    Preconditioned conjugate gradient solver for Ax = b.
+
+    Parameters:
+    -----------
+    Ax : callable
+        Function that applies matrix A to a vector
+    b : array
+        Right-hand side vector
+    M_inv : callable, optional
+        Preconditioner (applies M^-1 to a vector)
+    tol : float
+        Convergence tolerance
+    maxiter : int
+        Maximum iterations
+
+    Returns:
+    --------
+    tuple
+        (solution, residual_norm)
+    """
+    x = jnp.zeros_like(b)
+    r = b - Ax(x)
+    z = r if M_inv is None else M_inv(r)
+    p = z
+    rz_old = jnp.dot(r, z)
+    b_norm = jnp.linalg.norm(b)
+
+    def cond(state):
+        k, x, r, z, p, rz_old = state
+        return jnp.logical_and(k < maxiter, jnp.linalg.norm(r) > tol * b_norm)
+
+    def body(state):
+        k, x, r, z, p, rz_old = state
+        Ap = Ax(p)
+        alpha = rz_old / jnp.dot(p, Ap)
+        x_new = x + alpha * p
+        r_new = r - alpha * Ap
+        z_new = r_new if M_inv is None else M_inv(r_new)
+        rz_new = jnp.dot(r_new, z_new)
+        beta = rz_new / rz_old
+        p_new = z_new + beta * p
+        return (k + 1, x_new, r_new, z_new, p_new, rz_new)
+
+    k0 = jnp.array(0)
+    state = (k0, x, r, z, p, rz_old)
+    state = jax.lax.while_loop(cond, body, state)
+    _, x_final, r_final, *_ = state
+    return x_final, jnp.linalg.norm(r_final)
+
+
+def newton_step_pcg_whitened(loss_fn_white, params_white, damping=1e-6, cg_tol=1e-12, cg_maxiter=1000):
+    """
+    Single Newton step in whitened space using preconditioned conjugate gradient.
+    In whitened space, the Hessian is approximately identity, so we only need damping.
+
+    Parameters:
+    -----------
+    loss_fn_white : callable
+        Loss function in whitened space (takes whitened params, returns scalar)
+    params_white : array
+        Current parameters in whitened space (flat array)
+    damping : float
+        Damping term λ for regularization
+    cg_tol : float
+        CG convergence tolerance
+    cg_maxiter : int
+        Maximum CG iterations
+
+    Returns:
+    --------
+    tuple
+        (new_params_white, cg_residual_norm, gradient_norm)
+    """
+    # Compute gradient in whitened space
+    g_white = jax.grad(loss_fn_white)(params_white)
+    grad_norm = jnp.linalg.norm(g_white)
+
+    # Define Hessian-vector product operator with damping
+    def hvp_white(v):
+        hv = hvp(loss_fn_white, params_white, v)
+        return hv + damping * v
+
+    # In whitened space, Hessian ≈ I, so no preconditioner needed
+    b = -g_white
+    s_white, cg_res = pcg_solve(hvp_white, b, M_inv=None, tol=cg_tol, maxiter=cg_maxiter)
+
+    # Update parameters in whitened space
+    params_white_new = params_white + s_white
+
+    return params_white_new, cg_res, grad_norm

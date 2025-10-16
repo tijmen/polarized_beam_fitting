@@ -26,7 +26,9 @@ from .utils import (
     build_whitening_transform,
     calculate_tod_nyquist_radial_mask_smooth,
     check_convergence,
+    init_convergence_state,
     make_apodization_mask,
+    newton_step_pcg_whitened,
     params_from_logit,
     params_to_logit,
 )
@@ -404,6 +406,8 @@ class PolarizedBeamFitter:
             self._run_bfgs()
         elif self.config.solver == "optax_adam":
             self._run_adam()
+        elif self.config.solver == "newton_pcg":
+            self._run_newton_pcg()
         else:
             raise ValueError(f"Unknown solver: {self.config.solver}")
 
@@ -436,23 +440,49 @@ class PolarizedBeamFitter:
         opt_state = optimizer.init(self.params_logit)
 
         # Initialize convergence tracking
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1, "best_params": None}
+        convergence_state = init_convergence_state()
         _, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
         initial_grad_norm = optax.global_norm(initial_grads)
+
+        # Initialize optimization history if debug is enabled
+        if self.config.debug:
+            self.opt_history = []
+            print("Debug mode: storing optimization history in fitter.opt_history")
 
         for i in range(self.config.n_steps):
             loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
             grad_norm = optax.global_norm(grads)
 
-            # Check convergence and track best parameters
-            converged, message, best_loss, best_params = check_convergence(
-                loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, self.params_logit
-            )
+            # Store history if debug is enabled
+            if self.config.debug:
+                params_phys = params_from_logit(self.params_logit, self.config)
+                history_entry = {
+                    "step": i,
+                    "loss": float(loss),
+                    "grad_norm": float(grad_norm),
+                    "params_physical": jax.device_get(params_phys),
+                    "params_logit": jax.device_get(self.params_logit),
+                    "gradients": jax.device_get(grads),
+                    "adam_mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], 'mu') else None,
+                    "adam_nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], 'nu') else None,
+                    "adam_count": int(opt_state[0].count) if hasattr(opt_state[0], 'count') else None,
+                }
+                self.opt_history.append(history_entry)
 
+            # Check convergence and track best parameters
+            converged, message, convergence_state = check_convergence(
+                loss,
+                grad_norm,
+                i,
+                self.config,
+                convergence_state,
+                initial_grad_norm,
+                self.params_logit,
+            )
             if converged:
                 print(f"Converged at step {i}: {message}")
                 if self.config.convergence_criterion == "loss_history":
-                    print(f"Returning best loss found: {best_loss:.2f}")
+                    print(f"Returning best loss found: {convergence_state['best_loss']:.2f}")
                 break
 
             updates, opt_state = optimizer.update(grads, opt_state)
@@ -464,6 +494,70 @@ class PolarizedBeamFitter:
         if convergence_state["best_params"] is not None:
             self.params_logit = convergence_state["best_params"]
         self.params_physical = params_from_logit(self.params_logit, self.config)
+
+    def _run_newton_pcg(self):
+        """Run Newton-PCG optimization using whitened parameter space."""
+        # Prepare whitening transform using existing NUTS infrastructure
+        print("Computing whitening transform from Hessian at MAP...")
+        self._prepare_nuts_transform()
+        print("Whitening transform ready.")
+
+        # Define loss function in whitened space
+        def loss_whitened(params_white):
+            params_phys = self.from_whitened(params_white)
+            params_logit = params_to_logit(params_phys, self.config)
+            return self.objective_function(params_logit, self.objective_data)
+
+        # Transform initial parameters to whitened space
+        params_white = self.to_whitened(self.params_physical)
+
+        # Initialize convergence tracking
+        convergence_state = init_convergence_state()
+
+        # Compute initial gradient norm
+        initial_loss = loss_whitened(params_white)
+        initial_grad_norm = jnp.linalg.norm(jax.grad(loss_whitened)(params_white))
+
+        print(f"Initial loss: {initial_loss:.2f}, Initial gradient norm: {initial_grad_norm:.2e}")
+
+        # Newton iteration in whitened space
+        for i in range(self.config.n_steps):
+            # Compute loss before step
+            prev_params_white = params_white
+            loss = loss_whitened(prev_params_white)
+
+            # Take Newton step with PCG in whitened space
+            params_white, cg_res, grad_norm = newton_step_pcg_whitened(
+                loss_whitened,
+                params_white,
+                damping=getattr(self.config, "newton_damping", 1e-6),
+                cg_tol=getattr(self.config, "newton_cg_tol", 1e-12),
+                cg_maxiter=getattr(self.config, "newton_cg_maxiter", 1000),
+            )
+
+            # Check convergence
+            converged, message, convergence_state = check_convergence(
+                loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, prev_params_white
+            )
+
+            if converged:
+                print(f"Converged at step {i}: {message}")
+                if self.config.convergence_criterion == "loss_history":
+                    print(f"Returning best loss found: {convergence_state['best_loss']:.2f}")
+                break
+
+            if i % 1 == 0:
+                print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2e}, CG res={cg_res:.2e}")
+
+        # Use best parameters if available, otherwise use current
+        if convergence_state["best_params"] is not None:
+            params_white = convergence_state["best_params"]
+
+        # Transform back to physical space
+        self.params_physical = self.from_whitened(params_white)
+        self.params_logit = params_to_logit(self.params_physical, self.config)
+
+        print("Newton-PCG optimization finished.")
 
     def sample_with_mclmc(self):
         """

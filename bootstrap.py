@@ -10,7 +10,7 @@ import numpy as np
 import optax
 
 from .fitter import PolarizedBeamFitter
-from .utils import check_convergence, params_from_logit, params_to_logit
+from .utils import check_convergence, init_convergence_state, newton_step_pcg_whitened, params_from_logit, params_to_logit
 
 
 def mask_gradients_for_excluded_sources(grad_tree, weight_array):
@@ -187,6 +187,8 @@ class BootstrapBeamFitter:
         self.original_fit_results = None
         self.ml_params_physical = None
         self.ml_params_logit = None
+        self.to_whitened = None
+        self.from_whitened = None
 
         # Build and JIT the objective function once to avoid recompilation
         self.bootstrap_objective = self._build_bootstrap_objective()
@@ -207,11 +209,30 @@ class BootstrapBeamFitter:
         # Add chi2 to original results
         self.original_fit_results["total_chi2"] = np.sum(self.base_fitter.latest_chi2s)
 
+        # Compute whitening transform once at ML solution for Newton
+        use_newton = getattr(self.config, "bootstrap_use_newton", False)
+        if use_newton:
+            print("\n2. Computing whitening transform at ML solution for bootstrap...")
+
+            # Check if base_fitter already has whitening transform from Newton optimization
+            if hasattr(self.base_fitter, "to_whitened") and self.base_fitter.to_whitened is not None:
+                print("   Reusing whitening transform from main fit.")
+                self.to_whitened = self.base_fitter.to_whitened
+                self.from_whitened = self.base_fitter.from_whitened
+            else:
+                print("   Computing whitening transform...")
+                self.base_fitter._prepare_nuts_transform()
+                self.to_whitened = self.base_fitter.to_whitened
+                self.from_whitened = self.base_fitter.from_whitened
+
+            print("   Whitening transform ready and cached for all bootstrap samples.")
+
         # Initialize RNG key for bootstrap for reproducibility
         self.rng_key = jax.random.PRNGKey(self.config.bootstrap_seed)
 
         # Step 3 & 4: Prepare bootstrap weights and run iterations
-        print(f"\n2. Preparing and running {self.config.n_bootstrap_samples} bootstrap iterations...")
+        step_num = 3 if use_newton else 2
+        print(f"\n{step_num}. Preparing and running {self.config.n_bootstrap_samples} bootstrap iterations...")
         bootstrap_params = self._run_bootstrap_fits()
 
         # Step 5: Return results
@@ -240,7 +261,7 @@ class BootstrapBeamFitter:
 
         return jax.vmap(create_weight_array)(bootstrap_indices)
 
-    def _create_bootstrap_initial_params(self, weight_array):
+    def _create_bootstrap_initial_params_physical(self, weight_array):
         """
         Create smart initial parameters for a bootstrap sample based on source weights.
 
@@ -249,6 +270,9 @@ class BootstrapBeamFitter:
         - Source parameters:
           * Weight > 0: Use ML parameters (these sources are included)
           * Weight = 0: Use neutral/default values (these sources are excluded)
+        
+        Returns:
+            Physical parameters (not logit-transformed)
         """
         # Start with ML parameters as base
         initial_params_physical = jax.tree.map(lambda x: x, self.ml_params_physical)
@@ -277,8 +301,7 @@ class BootstrapBeamFitter:
             zero_weight_mask_expanded, neutral_flux, initial_params_physical["sources"]["flux"]
         )
 
-        # Convert to logit space for optimization
-        return params_to_logit(initial_params_physical, self.config)
+        return initial_params_physical
 
     def _build_bootstrap_objective(self):
         """
@@ -308,20 +331,79 @@ class BootstrapBeamFitter:
 
         # Get data from base fitter
         objective_data = self.base_fitter.objective_data
+        use_newton = getattr(self.config, "bootstrap_use_newton", False)
+        
         for i, weight_array in enumerate(bootstrap_weights):
             print(f"Bootstrap iteration {i + 1}/{self.config.n_bootstrap_samples}")
 
             # Create smart initial parameters for this bootstrap sample
-            initial_params_logit = self._create_bootstrap_initial_params(weight_array)
+            initial_params_physical = self._create_bootstrap_initial_params_physical(weight_array)
 
-            # Run Adam optimization with smart initialization
-            optimized_params_logit = self._run_adam_bootstrap(initial_params_logit, weight_array, objective_data)
+            # Run optimization with smart initialization
+            if use_newton:
+                optimized_params_physical = self._run_newton_pcg_bootstrap(initial_params_physical, weight_array, objective_data)
+            else:
+                initial_params_logit = params_to_logit(initial_params_physical, self.config)
+                optimized_params_logit = self._run_adam_bootstrap(initial_params_logit, weight_array, objective_data)
+                optimized_params_physical = params_from_logit(optimized_params_logit, self.config)
 
-            # Convert logit parameters back to physical space for storage
-            physical_params = params_from_logit(optimized_params_logit, self.config)
-            bootstrap_params.append(physical_params)
+            bootstrap_params.append(optimized_params_physical)
 
         return bootstrap_params
+
+    def _run_newton_pcg_bootstrap(self, initial_params_physical, weight_array, data):
+        """
+        Run Newton-PCG optimization for a single bootstrap iteration.
+        Uses whitened parameter space and cached whitening transform from ML solution.
+        """
+        # Transform initial parameters to whitened space
+        params_white = self.to_whitened(initial_params_physical)
+
+        # Define loss function in whitened space
+        def loss_whitened(params_w):
+            params_phys = self.from_whitened(params_w)
+            params_logit = params_to_logit(params_phys, self.config)
+            return self.bootstrap_objective(params_logit, data, weight_array)
+
+        # Initialize convergence tracking
+        convergence_state = init_convergence_state()
+
+        # Compute initial gradient norm
+        initial_grad_norm = jnp.linalg.norm(jax.grad(loss_whitened)(params_white))
+
+        for i in range(self.config.n_steps):
+            prev_params_white = params_white
+            loss = loss_whitened(prev_params_white)
+
+            # Take Newton step in whitened space
+            params_white, cg_res, grad_norm = newton_step_pcg_whitened(
+                loss_whitened,
+                params_white,
+                damping=getattr(self.config, "newton_damping", 1e-6),
+                cg_tol=getattr(self.config, "newton_cg_tol", 1e-12),
+                cg_maxiter=getattr(self.config, "newton_cg_maxiter", 1000),
+            )
+
+            # Check convergence
+            converged, message, convergence_state = check_convergence(
+                loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, prev_params_white
+            )
+
+            if converged:
+                print(f"  Converged at step {i}: {message}")
+                if self.config.convergence_criterion == "loss_history":
+                    print(f"  Best loss found: {convergence_state['best_loss']:.2f} at step {convergence_state['best_step']}")
+                break
+
+            if i % 10 == 0:
+                print(f"  Step {i}: loss={loss:.2f}, |grad|={grad_norm:.2e}, CG res={cg_res:.2e}")
+
+        # Use best parameters if available
+        if convergence_state["best_params"] is not None:
+            params_white = convergence_state["best_params"]
+
+        # Transform back to physical space
+        return self.from_whitened(params_white)
 
     def _run_adam_bootstrap(self, initial_params_logit, weight_array, data):
         """
@@ -333,7 +415,7 @@ class BootstrapBeamFitter:
         current_params = initial_params_logit
 
         # Initialize convergence tracking
-        convergence_state = {"loss_history": [], "best_loss": float("inf"), "best_step": -1, "best_params": None}
+        convergence_state = init_convergence_state()
 
         # Calculate initial gradients, passing all required arguments to the JIT-compiled function
         loss, initial_grads = self._loss_and_grad(current_params, data, weight_array)
@@ -348,15 +430,15 @@ class BootstrapBeamFitter:
             masked_grads = mask_gradients_for_excluded_sources(grads, weight_array)
             grad_norm = optax.global_norm(masked_grads)
 
-            # check_convergence updates convergence_state in-place with the best parameters seen so far
-            converged, message, best_loss, _ = check_convergence(
+            # check_convergence returns the updated state with the best parameters seen so far
+            converged, message, convergence_state = check_convergence(
                 loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, current_params
             )
 
             if converged:
                 print(f"  Converged at step {i}: {message}")
                 if self.config.convergence_criterion == "loss_history":
-                    print(f"  Best loss found: {best_loss:.2f} at step {convergence_state['best_step']}")
+                    print(f"  Best loss found: {convergence_state['best_loss']:.2f} at step {convergence_state['best_step']}")
                 break
 
             updates, opt_state = optimizer.update(masked_grads, opt_state)

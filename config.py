@@ -41,7 +41,7 @@ class BeamFittingConfig:
     apodization_width_pix = 10
 
     # === Beam modeling ===
-    knot_spacing_arcmin = 0.25
+    knot_spacing_arcmin = 0.4
     spline_k = 4  # Cubic B-spline
     spline_rmax_arcmin = 10.0
     beam_model_type = "beta_pol"  # 'bsplines', 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
@@ -119,10 +119,10 @@ class BeamFittingConfig:
     n_pca_components = 4
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
-    ellmax = 25_000  # Multipole cutoff used when operating in Fourier space
+    ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data
 
     # === Optimization and convergence ===
-    solver = "optax_adam"  # "optimistix_bfgs", "optax_adam"
+    solver = "optax_adam"  # "optimistix_bfgs", "optax_adam", "newton_pcg"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
     adam_kwargs = {"learning_rate": 0.001}
     convergence_criterion = "loss_history"  # "absolute_gtol", "relative_gtol", or "loss_history"
