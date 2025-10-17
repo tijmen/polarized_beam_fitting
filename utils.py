@@ -349,6 +349,10 @@ def linear_interp_differentiable(x, xp, fp, config):
     y0, y1 = fp[idx], fp[idx + 1]
     t = jnp.clip((x - (xp[0] + idx * dx)) * dx_inv, 0.0, 1.0)
 
+    # Promote interpolation weights to match extra dimensions of fp
+    for _ in range(fp.ndim - 1):
+        t = t[..., None]
+
     return y0 + t * (y1 - y0)
 
 
@@ -519,19 +523,6 @@ def convert_array_to_dict(data_array, bands):
     return data_dict
 
 
-# Parameter transformation utilities
-def get_beam_model_bounds(config):
-    """Return the bounds dictionary for the requested beam model, respecting semilogy setting."""
-    if config.beam_model_type == "bsplines_plus_gaussian":
-        key = (
-            "bsplines_plus_gaussian_semilogy"
-            if getattr(config, "bsplines_plus_gaussian_semilogy", False)
-            else "bsplines_plus_gaussian_linear"
-        )
-        return config.beam_model_bounds[key]
-    return config.beam_model_bounds[config.beam_model_type]
-
-
 def to_logit(value, bounds):
     """
     Transform physical parameter to logit space.
@@ -604,7 +595,7 @@ def params_to_logit(physical_params, config):
         Parameters in logit space with same structure
     """
     logit_params = {"beams": [], "sources": {}}
-    active_model_bounds = get_beam_model_bounds(config)
+    active_model_bounds = config.active_beam_model_bounds
 
     # Convert beam parameters for each band
     for _, beam_params in enumerate(physical_params["beams"]):
@@ -645,7 +636,7 @@ def params_from_logit(logit_params, config):
     physical_params = {"beams": [], "sources": {}}
 
     # Convert beam parameters for each band
-    active_model_bounds = get_beam_model_bounds(config)
+    active_model_bounds = config.active_beam_model_bounds
 
     for _, beam_logit in enumerate(logit_params["beams"]):
         beam_physical = {}

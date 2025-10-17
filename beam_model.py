@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy import interpolate
 
-from .utils import get_beam_model_bounds, linear_interp_differentiable
+from .utils import linear_interp_differentiable
 
 
 class BeamModelBase(ABC):
@@ -718,7 +718,6 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             "bspline_coeffs_T",
             "bspline_coeffs_P",
         ]
-        self.use_semilogy = getattr(config, "bsplines_plus_gaussian_semilogy", False)
         self.spline_k = config.spline_k
         self.spline_rmax_arcmin = config.spline_rmax_arcmin
         self.knot_spacing_arcmin = config.knot_spacing_arcmin
@@ -932,45 +931,28 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         band_fwhm = self.config.band_fwhm_arcmin[self.band]
         initial_sigma = band_fwhm / (2 * np.sqrt(2 * np.log(2)))  # Convert FWHM to sigma
 
-        coeffs_from_measurement = None
         if self.measured_beam_profile is not None:
             r_fine_np = np.array(self.r_fine_jax, dtype=self.config.dtype_np_real)
             gaussian_component_np = np.exp(-0.5 * (r_fine_np / initial_sigma) ** 2)
             basis_np = np.array(self.ortho_basis_funcs_jax, dtype=self.config.dtype_np_real)
 
-            if self.use_semilogy:
-                safe_measured = np.clip(self.measured_beam_profile, 1e-12, None)
-                safe_gaussian = np.clip(gaussian_component_np, 1e-12, None)
-                target_profile = np.log(safe_measured) - np.log(safe_gaussian)
-            else:
-                target_profile = self.measured_beam_profile - gaussian_component_np
+            target_profile = self.measured_beam_profile - gaussian_component_np
 
-            try:
-                weight = 2.0 * np.pi * r_fine_np
-                integrand = target_profile[:, None] * basis_np * weight[:, None]
-                coeffs_solution = np.trapezoid(integrand, r_fine_np, axis=0)
-                bounds = get_beam_model_bounds(self.config, "bsplines_plus_gaussian")["bspline_coeffs_T"]
-                eps = 1e-6
-                coeffs_solution = np.clip(coeffs_solution, bounds[0] + eps, bounds[1] - eps)
-                coeffs_from_measurement = jnp.asarray(coeffs_solution, dtype=self.config.dtype_jax_real)
-            except np.linalg.LinAlgError:
-                coeffs_from_measurement = None
-            except ValueError:
-                coeffs_from_measurement = None
-
-        if coeffs_from_measurement is not None:
+            weight = 2.0 * np.pi * r_fine_np
+            integrand = target_profile[:, None] * basis_np * weight[:, None]
+            coeffs_solution = np.trapezoid(integrand, r_fine_np, axis=0)
+            bounds = self.config.active_beam_model_bounds["bspline_coeffs_T"]
+            eps = 1e-6
+            coeffs_solution = np.clip(coeffs_solution, bounds[0] + eps, bounds[1] - eps)
+            coeffs_from_measurement = jnp.asarray(coeffs_solution, dtype=self.config.dtype_jax_real)
             bspline_coeffs_T = coeffs_from_measurement
             bspline_coeffs_P = coeffs_from_measurement
         else:
-            if self.use_semilogy:
-                bspline_coeffs_T = jnp.zeros((self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real)
-                bspline_coeffs_P = jnp.zeros((self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real)
-            else:
-                # Initialize B-spline coefficients to small random values (separate for T and P)
-                key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
-                key1, key2 = jax.random.split(key)
-                bspline_coeffs_T = jax.random.normal(key1, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
-                bspline_coeffs_P = jax.random.normal(key2, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
+            print("Warning: no measured beam profile available, using random B-spline starting points.")
+            key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+            key1, key2 = jax.random.split(key)
+            bspline_coeffs_T = jax.random.normal(key1, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
+            bspline_coeffs_P = jax.random.normal(key2, (self.n_bspline_coeffs,), dtype=self.config.dtype_jax_real) * 0.01
 
         return {
             "gaussian_sigma_arcmin": initial_sigma,  # Shared between T and P
@@ -1007,12 +989,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
 
-        if self.use_semilogy:
-            gaussian_component = jnp.clip(gaussian_component, 1e-30, None)
-            total_beam = gaussian_component * jnp.exp(bspline_component)
-        else:
-            # Combined beam
-            total_beam = gaussian_component + bspline_component
+        # Combined beam
+        total_beam = gaussian_component + bspline_component
 
         return total_beam
 
@@ -1040,13 +1018,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
         bspline_component_T = ortho_funcs @ bspline_coeffs_T
         bspline_component_P = ortho_funcs @ bspline_coeffs_P
-        if self.use_semilogy:
-            gaussian_component = np.clip(gaussian_component, 1e-300, None)
-            profile_T_fine = gaussian_component * np.exp(bspline_component_T)
-            profile_P_fine = gaussian_component * np.exp(bspline_component_P)
-        else:
-            profile_T_fine = gaussian_component + bspline_component_T
-            profile_P_fine = gaussian_component + bspline_component_P
+        profile_T_fine = gaussian_component + bspline_component_T
+        profile_P_fine = gaussian_component + bspline_component_P
         info = {
             "t_label": f"T-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin + B-splines)",
             "p_label": f"P-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin + B-splines)",

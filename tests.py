@@ -28,7 +28,6 @@ from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.utils import (
     calculate_tod_nyquist_radial_mask_smooth,
     compute_2d_asd,
-    get_beam_model_bounds,
     linear_interp_differentiable,
     make_apod_mask_center_excised,
     make_apodization_mask,
@@ -384,34 +383,6 @@ class TestEndToEndRecovery(unittest.TestCase):
             lambda fit, true: self._assert_gaussian_bspline_recovery(config, fit[0], true),
         )
         print("✓ Gaussian + B-splines model test successful.")
-
-    def test_bspline_gaussian_semilogy_bounds(self, *mocks):
-        config = get_test_config(beam_model_type="bsplines_plus_gaussian")
-        bounds_linear = get_beam_model_bounds(config)
-        default_bounds = bounds_linear
-        base_upper = config.beam_model_bounds["bsplines_plus_gaussian_linear"]["bspline_coeffs_T"][1]
-        self.assertEqual(default_bounds["bspline_coeffs_T"], (-0.5, 1.5))
-
-        config.bsplines_plus_gaussian_semilogy = True
-        semilogy_bounds = get_beam_model_bounds(config)
-        expected_lower = np.log(1e-6)
-        expected_upper = np.log(base_upper)
-        self.assertAlmostEqual(semilogy_bounds["bspline_coeffs_T"][0], expected_lower, places=12)
-        self.assertAlmostEqual(semilogy_bounds["bspline_coeffs_T"][1], expected_upper, places=12)
-
-    def test_bspline_gaussian_semilogy_profile(self, *mocks):
-        config = get_test_config(beam_model_type="bsplines_plus_gaussian")
-        config.bsplines_plus_gaussian_semilogy = True
-        ny = nx = config.map_size_pix
-        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
-        beam_model = create_beam_model(config, y, x, config.bands[0])
-        params = beam_model.get_initial_physical_params()
-        r_values = jnp.linspace(0, config.spline_rmax_arcmin, 32, dtype=config.dtype_jax_real)
-        self.assertIsNotNone(beam_model.measured_beam_profile)
-        profile_T = beam_model.evaluate_beam_profile(params["gaussian_sigma_arcmin"], params["bspline_coeffs_T"], r_values)
-        measured_interp = np.interp(np.asarray(r_values), np.array(beam_model.r_fine_jax), beam_model.measured_beam_profile)
-        diff = np.abs(profile_T - measured_interp)
-        self.assertLess(np.max(diff), 2e-3)
 
     def test_chi2_method_real_space(self, *mocks):
         print("\n--- Testing Chi2 Method: Real Space ---")

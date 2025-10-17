@@ -46,22 +46,16 @@ class BeamFittingConfig:
     spline_rmax_arcmin = 10.0
     beam_model_type = "beta_pol"  # 'bsplines', 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
     bsplines_gaussian_rmin_arcmin = 0.5
-    bsplines_plus_gaussian_semilogy = False
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
     beam_model_bounds = {
         "bsplines": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
         "beta_pol": {"beta_pol": (-0.5, 2.0)},
         "beta_T": {"beta_T": (-0.5, 2.0)},
-        "bsplines_plus_gaussian_linear": {
+        "bsplines_plus_gaussian": {
             "gaussian_sigma_arcmin": (0.1, 1.0),
             "bspline_coeffs_T": (-0.5, 1.5),
             "bspline_coeffs_P": (-0.5, 1.5),
-        },
-        "bsplines_plus_gaussian_semilogy": {
-            "gaussian_sigma_arcmin": (0.1, 1.0),
-            "bspline_coeffs_T": (np.log(1e-6), np.log(1.5)),
-            "bspline_coeffs_P": (np.log(1e-6), np.log(1.5)),
         },
     }
 
@@ -168,3 +162,7 @@ class BeamFittingConfig:
     @property
     def dtype_jax_complex(self):
         return jnp.complex128 if self.double_precision else jnp.complex64
+
+    @property
+    def active_beam_model_bounds(self):
+        return self.beam_model_bounds[self.beam_model_type]

@@ -11,7 +11,7 @@ import corner
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .utils import get_beam_model_bounds, safe_filename
+from .utils import safe_filename
 
 
 class BeamPlotter:
@@ -861,7 +861,7 @@ class BeamPlotter:
         print(f"\n--- Generating {sampler_name} Trace Plots ---")
 
         az_data, samples_flat, n_chains = self._process_sampling_output(sampling_output, sampler_type)
-        active_model_bounds = get_beam_model_bounds(self.fitter.config)
+        active_model_bounds = self.fitter.config.active_beam_model_bounds
 
         # Plot beam parameters
         for band_idx, band in enumerate(self.fitter.config.bands):
@@ -953,7 +953,7 @@ class BeamPlotter:
         all_corner_arrays = []
         all_labels = None
         colors = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]  # Default matplotlib colors
-        active_model_bounds = get_beam_model_bounds(self.fitter.config)
+        active_model_bounds = self.fitter.config.active_beam_model_bounds
 
         for i, output in enumerate(sampling_output):
             az_data, samples_flat, _ = self._process_sampling_output(output, sampler_type)
