@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.scipy.ndimage import map_coordinates
 from scipy.ndimage import shift as nd_shift
 from scipy.special import j0  # pylint: disable=no-name-in-module
 
@@ -314,46 +315,44 @@ def linear_interp_differentiable(x, xp, fp, config):
     """
     1-D linear interpolation that is differentiable w.r.t. x.
 
-    This function provides the same functionality as jnp.interp but maintains
-    differentiability with respect to the query points x, which is crucial
-    for optimizing position parameters in beam fitting.
-
-    Note: This function may produce NaN gradients at points where the interpolated
-    function has zero derivative in all directions (e.g., at the center of symmetric
-    functions). The calling code should avoid initializing optimization at such points.
+    Uses jax.scipy.ndimage.map_coordinates for a fully differentiable
+    interpolation, replacing the previous manual implementation that had
+    discontinuities at integer boundaries.
 
     Parameters:
     -----------
     x : array_like
-        Query points to interpolate at
+        Query points to interpolate at.
     xp : array_like
-        1-D array of x-coordinates, must be increasing
+        1-D array of x-coordinates, must be uniformly spaced and increasing.
     fp : array_like
-        1-D array of function values at xp
+        1-D array of function values at xp.
     config : BeamFittingConfig
-        Configuration object
+        Configuration object.
 
     Returns:
     --------
     array_like
-        Interpolated values at x
+        Interpolated values at x.
     """
     x = jnp.asarray(x, dtype=config.dtype_jax_real)
     xp = jnp.asarray(xp, dtype=config.dtype_jax_real)
     fp = jnp.asarray(fp, dtype=config.dtype_jax_real)
 
-    dx = xp[1] - xp[0]  # assumes uniform grid
-    dx_inv = 1.0 / dx
-    idx = jnp.clip(jnp.floor((x - xp[0]) * dx_inv).astype(jnp.int32), 0, xp.size - 2)
+    # Convert physical coordinates (x) to fractional index coordinates
+    # for map_coordinates. Assumes a uniform grid for xp.
+    dx = xp[1] - xp[0]
+    coords_frac = (x - xp[0]) / dx
 
-    y0, y1 = fp[idx], fp[idx + 1]
-    t = jnp.clip((x - (xp[0] + idx * dx)) * dx_inv, 0.0, 1.0)
+    # map_coordinates expects coordinates in a specific shape: (n_dims, ...).
+    # Since our interpolation is 1D, we reshape to (1, ...).
+    coords_reshaped = coords_frac.reshape(1, *coords_frac.shape)
 
-    # Promote interpolation weights to match extra dimensions of fp
-    for _ in range(fp.ndim - 1):
-        t = t[..., None]
+    # Perform the differentiable interpolation. order=1 specifies linear.
+    # mode='nearest' handles boundary conditions by extending the edge value.
+    interpolated_values = map_coordinates(fp, coords_reshaped, order=1, mode="nearest")
 
-    return y0 + t * (y1 - y0)
+    return interpolated_values
 
 
 def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):

@@ -149,7 +149,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
     config = BeamFittingConfig()
     config.bands = [band]
     config.coadd_filenames = [FIELD_COADD_PATHS[field]]
-    config.use_precomputed_leakage_templates = False
+    config.use_precomputed_leakage_templates = True  # for subsequent iterations. Set to False for the first run
 
     fitter = PolarizedBeamFitter(config)
     best_fit_params = fitter.run_fit()

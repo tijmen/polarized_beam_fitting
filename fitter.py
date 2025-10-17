@@ -143,7 +143,8 @@ class ObjectiveFunctions:
             model_fft = jnp.take(model_fft, self.state.k_indices_x, axis=1)
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
-            chi2 = (jnp.abs(residual_fft) ** 2) * precision
+            # chi2 = (jnp.abs(residual_fft)**2) * precision
+            chi2 = jnp.real(residual_fft * jnp.conj(residual_fft)) * precision  # better derivatives?
             chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
             return jnp.mean(chi2_per_mode)
 
@@ -434,7 +435,7 @@ class PolarizedBeamFitter:
 
     def _run_adam(self):
         """Run Adam optimization."""
-        optimizer = optax.adam(**self.config.adam_kwargs)
+        optimizer = optax.amsgrad(**self.config.adam_kwargs)
         opt_state = optimizer.init(self.params_logit)
 
         # Initialize convergence tracking
