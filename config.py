@@ -45,30 +45,32 @@ class BeamFittingConfig:
     spline_k = 4  # Cubic B-spline
     spline_rmax_arcmin = 10.0
     beam_model_type = "beta_pol"  # 'bsplines', 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
+    bsplines_gaussian_rmin_arcmin = 0.5
+    bsplines_plus_gaussian_semilogy = False
+    band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
     beam_model_bounds = {
         "bsplines": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
         "beta_pol": {"beta_pol": (-0.5, 2.0)},
         "beta_T": {"beta_T": (-0.5, 2.0)},
-        "bsplines_plus_gaussian": {
+        "bsplines_plus_gaussian_linear": {
             "gaussian_sigma_arcmin": (0.1, 1.0),
             "bspline_coeffs_T": (-0.5, 1.5),
             "bspline_coeffs_P": (-0.5, 1.5),
         },
+        "bsplines_plus_gaussian_semilogy": {
+            "gaussian_sigma_arcmin": (0.1, 1.0),
+            "bspline_coeffs_T": (np.log(1e-6), np.log(1.5)),
+            "bspline_coeffs_P": (np.log(1e-6), np.log(1.5)),
+        },
     }
-    bsplines_gaussian_rmin_arcmin = 0.5
-    band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
+
     source_param_names = ["yoff", "xoff", "flux"]
     source_flux_bounds = (-5.0, 100.0)  # T, Q, U flux in uK
     source_position_bounds = (
         (-5.0, 5.0),  # yoff (source center y offset in pixels)
         (-5.0, 5.0),  # xoff (source center x offset in pixels)
     )
-
-    @property
-    def beam_coeff_bounds(self):
-        """Expose bounds for the active beam model."""
-        return self.beam_model_bounds[self.beam_model_type]
 
     skip_sources = [
         "J010644-4034.4",  # extended source

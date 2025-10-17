@@ -270,7 +270,7 @@ class BootstrapBeamFitter:
         - Source parameters:
           * Weight > 0: Use ML parameters (these sources are included)
           * Weight = 0: Use neutral/default values (these sources are excluded)
-        
+
         Returns:
             Physical parameters (not logit-transformed)
         """
@@ -332,7 +332,7 @@ class BootstrapBeamFitter:
         # Get data from base fitter
         objective_data = self.base_fitter.objective_data
         use_newton = getattr(self.config, "bootstrap_use_newton", False)
-        
+
         for i, weight_array in enumerate(bootstrap_weights):
             print(f"Bootstrap iteration {i + 1}/{self.config.n_bootstrap_samples}")
 

@@ -336,7 +336,7 @@ class PolarizedBeamFitter:
         self.state.precision_jax = jnp.asarray(precision_np, dtype=dtype)
         self.state.k_mask_jax = None
 
-        self._apply_fourier_mask() # This is a no-op, but ok to leave for now. Use this if we ever need a k-mask again
+        self._apply_fourier_mask()  # This is a no-op, but ok to leave for now. Use this if we ever need a k-mask again
         self.objective_data = (self.state.maps_fft_jax, self.state.precision_jax)
 
     def _setup_real_space_data(self, weights):
@@ -378,7 +378,7 @@ class PolarizedBeamFitter:
                 jax.tree.map(
                     lambda x: jnp.asarray(x, dtype=self.config.dtype_jax_real),
                     beam_params,
-                ) # yes, jax.tree.map really is correct for our version of python. NEVER CHANGE THIS TO tree_util, which doesn't exist
+                )  # yes, jax.tree.map really is correct for our version of python. NEVER CHANGE THIS TO tree_util, which doesn't exist
             )
 
         # Initialize source parameters
@@ -463,9 +463,9 @@ class PolarizedBeamFitter:
                     "params_physical": jax.device_get(params_phys),
                     "params_logit": jax.device_get(self.params_logit),
                     "gradients": jax.device_get(grads),
-                    "adam_mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], 'mu') else None,
-                    "adam_nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], 'nu') else None,
-                    "adam_count": int(opt_state[0].count) if hasattr(opt_state[0], 'count') else None,
+                    "adam_mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], "mu") else None,
+                    "adam_nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], "nu") else None,
+                    "adam_count": int(opt_state[0].count) if hasattr(opt_state[0], "count") else None,
                 }
                 self.opt_history.append(history_entry)
 

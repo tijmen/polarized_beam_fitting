@@ -405,7 +405,7 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
 
         # Integrate using trapezoidal rule
         # Factor of 1/(2π) from the Hankel transform definition
-        B_r[i] = np.trapz(integrand, ell_nonzero) / (2 * np.pi)
+        B_r[i] = np.trapezoid(integrand, ell_nonzero) / (2 * np.pi)
 
     if normalize:
         # Normalize to 1 at r=0
@@ -520,6 +520,18 @@ def convert_array_to_dict(data_array, bands):
 
 
 # Parameter transformation utilities
+def get_beam_model_bounds(config):
+    """Return the bounds dictionary for the requested beam model, respecting semilogy setting."""
+    if config.beam_model_type == "bsplines_plus_gaussian":
+        key = (
+            "bsplines_plus_gaussian_semilogy"
+            if getattr(config, "bsplines_plus_gaussian_semilogy", False)
+            else "bsplines_plus_gaussian_linear"
+        )
+        return config.beam_model_bounds[key]
+    return config.beam_model_bounds[config.beam_model_type]
+
+
 def to_logit(value, bounds):
     """
     Transform physical parameter to logit space.
@@ -592,12 +604,13 @@ def params_to_logit(physical_params, config):
         Parameters in logit space with same structure
     """
     logit_params = {"beams": [], "sources": {}}
+    active_model_bounds = get_beam_model_bounds(config)
 
     # Convert beam parameters for each band
     for _, beam_params in enumerate(physical_params["beams"]):
         beam_logit = {}
         for param_name, param_value in beam_params.items():
-            bounds = config.beam_coeff_bounds[param_name]
+            bounds = active_model_bounds[param_name]
             beam_logit[param_name] = to_logit(param_value, bounds)
         logit_params["beams"].append(beam_logit)
 
@@ -632,10 +645,12 @@ def params_from_logit(logit_params, config):
     physical_params = {"beams": [], "sources": {}}
 
     # Convert beam parameters for each band
+    active_model_bounds = get_beam_model_bounds(config)
+
     for _, beam_logit in enumerate(logit_params["beams"]):
         beam_physical = {}
         for param_name, logit_value in beam_logit.items():
-            bounds = config.beam_coeff_bounds[param_name]
+            bounds = active_model_bounds[param_name]
             beam_physical[param_name] = from_logit(logit_value, bounds)
         physical_params["beams"].append(beam_physical)
 

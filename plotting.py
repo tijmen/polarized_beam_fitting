@@ -11,7 +11,7 @@ import corner
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .utils import safe_filename
+from .utils import get_beam_model_bounds, safe_filename
 
 
 class BeamPlotter:
@@ -481,7 +481,7 @@ class BeamPlotter:
 
         for i in range(n_check):
             for j in range(n_check):
-                gram_visual[i, j] = np.trapz(ortho_funcs[:, i] * ortho_funcs[:, j] * weight, r)
+                gram_visual[i, j] = np.trapezoid(ortho_funcs[:, i] * ortho_funcs[:, j] * weight, r)
 
         im = ax.imshow(gram_visual, cmap="RdBu_r", vmin=-0.1, vmax=1.1)
         ax.set_title("Gram Matrix of Basis Functions")
@@ -861,11 +861,13 @@ class BeamPlotter:
         print(f"\n--- Generating {sampler_name} Trace Plots ---")
 
         az_data, samples_flat, n_chains = self._process_sampling_output(sampling_output, sampler_type)
+        active_model_bounds = get_beam_model_bounds(self.fitter.config)
 
         # Plot beam parameters
         for band_idx, band in enumerate(self.fitter.config.bands):
             band_suffix = self._get_band_suffix(band)
-            beam_params = [f"beam_{band_idx}_{p}" for p in self.fitter.config.beam_coeff_bounds.keys()]
+            beam_param_names = list(active_model_bounds.keys())
+            beam_params = [f"beam_{band_idx}_{p}" for p in beam_param_names]
             az.plot_trace(az_data, var_names=beam_params)
             plt.suptitle(f"{sampler_name} Trace for Beam Parameters ({band_suffix})", y=1.02)
             if save:
@@ -951,6 +953,7 @@ class BeamPlotter:
         all_corner_arrays = []
         all_labels = None
         colors = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]  # Default matplotlib colors
+        active_model_bounds = get_beam_model_bounds(self.fitter.config)
 
         for i, output in enumerate(sampling_output):
             az_data, samples_flat, _ = self._process_sampling_output(output, sampler_type)
@@ -983,7 +986,7 @@ class BeamPlotter:
 
             for band_idx, band in enumerate(self.fitter.config.bands):
                 band_suffix = self._get_band_suffix(band)
-                for param_name in self.fitter.config.beam_coeff_bounds.keys():
+                for param_name in active_model_bounds.keys():
                     key_flat = f"beam_{band_idx}_{param_name}"
                     var_flat = _merge_cd(samples_flat[key_flat])  # (nsamp,)
                     if "beta" in param_name:
