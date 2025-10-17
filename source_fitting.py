@@ -67,6 +67,10 @@ def gaussfit_source(t_map, q_map, u_map, weight, config=None, band=None):
 
     yoff_fit, xoff_fit, t_amp, meanoff_fit = pout
 
+    # Shift offsets from pixel-corner convention (gaussfit output) to pixel centers.
+    yoff_fit -= 0.5
+    xoff_fit -= 0.5
+
     # Now fit Q and U amplitudes at the fixed position from T fit
     q_amp = fit_map_amplitude(q_map, weight.QQ, tmpl, yoff_fit, xoff_fit, q_map.res)
     u_amp = fit_map_amplitude(u_map, weight.UU, tmpl, yoff_fit, xoff_fit, u_map.res)

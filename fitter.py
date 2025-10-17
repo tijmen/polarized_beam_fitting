@@ -64,10 +64,9 @@ class FitterState:
     n_bands: int = 0
 
     # Initial guesses
-    gaussfit_yoff_numpy: np.ndarray = None
-    gaussfit_xoff_numpy: np.ndarray = None
-    gaussfit_initial_amp_numpy: np.ndarray = None
-    gaussfit_initial_amp_jax: jnp.ndarray = None
+    init_yoff: Optional[np.ndarray] = None
+    init_xoff: Optional[np.ndarray] = None
+    init_flux: Optional[np.ndarray] = None
 
 
 class ObjectiveFunctions:
@@ -300,15 +299,14 @@ class PolarizedBeamFitter:
         # Store in state
         self.state.source_ids = source_ids
         self.state.n_src = n_src
-        self.state.gaussfit_yoff_numpy = gaussfit_yoff
-        self.state.gaussfit_xoff_numpy = gaussfit_xoff
-        self.state.gaussfit_initial_amp_numpy = gaussfit_amp
+        self.state.init_yoff = gaussfit_yoff
+        self.state.init_xoff = gaussfit_xoff
+        self.state.init_flux = gaussfit_amp
         self.state.fields = source_fields
         self.state.raw_maps_numpy = raw_maps
         self.state.noise_bundle = noise_bundle
 
         # Convert to JAX arrays
-        self.state.gaussfit_initial_amp_jax = jnp.asarray(gaussfit_amp, dtype=self.config.dtype_jax_real)
         self.state.maps_jax = jnp.asarray(maps, dtype=self.config.dtype_jax_real)
 
         # Setup for specific chi2 method
@@ -382,13 +380,13 @@ class PolarizedBeamFitter:
             )
 
         # Initialize source parameters
-        yoff = self.state.gaussfit_yoff_numpy - 0.5
-        xoff = self.state.gaussfit_xoff_numpy - 0.5
+        if self.state.init_yoff is None or self.state.init_xoff is None or self.state.init_flux is None:
+            raise ValueError("Initial source parameters are missing; ensure data loading completed successfully.")
 
         params["sources"] = {
-            "yoff": jnp.asarray(yoff, dtype=self.config.dtype_jax_real),
-            "xoff": jnp.asarray(xoff, dtype=self.config.dtype_jax_real),
-            "flux": self.state.gaussfit_initial_amp_jax,
+            "yoff": jnp.asarray(self.state.init_yoff, dtype=self.config.dtype_jax_real),
+            "xoff": jnp.asarray(self.state.init_xoff, dtype=self.config.dtype_jax_real),
+            "flux": jnp.asarray(self.state.init_flux, dtype=self.config.dtype_jax_real),
         }
 
         return params
