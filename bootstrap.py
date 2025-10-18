@@ -410,7 +410,7 @@ class BootstrapBeamFitter:
         Run Adam optimization for a single bootstrap iteration.
         Only optimizes parameters for sources with weight > 0.
         """
-        optimizer = optax.adam(**self.config.adam_kwargs)
+        optimizer = getattr(optax, self.config.adam_variant)(**self.config.adam_kwargs)
         opt_state = optimizer.init(initial_params_logit)
         current_params = initial_params_logit
 

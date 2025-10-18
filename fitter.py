@@ -217,6 +217,10 @@ class PolarizedBeamFitter:
         self.params_physical = self._initialize_parameters()
         self.params_logit = params_to_logit(self.params_physical, self.config)
 
+        # Initialize last optimizer state and variant
+        self._last_opt_state = None
+        self._last_opt_variant = None
+
     def _setup_jax(self):
         """Configure JAX settings."""
         if self.config.double_precision:
@@ -407,6 +411,8 @@ class PolarizedBeamFitter:
             self._run_adam()
         elif self.config.solver == "newton_pcg":
             self._run_newton_pcg()
+        elif self.config.solver == "tuned":
+            self._run_tuned_optimization()
         else:
             raise ValueError(f"Unknown solver: {self.config.solver}")
 
@@ -434,14 +440,31 @@ class PolarizedBeamFitter:
         print(f"Optimization finished after {sol.stats['num_steps']} steps.")
 
     def _run_adam(self):
-        """Run Adam optimization."""
-        optimizer = optax.amsgrad(**self.config.adam_kwargs)
+        """
+        Run Adam (or compatible Optax) optimization.
+
+        My recommendation is to run Adam first with a more aggressive learning rate, then
+        switch to AMSGrad for fine-tuning, as Adam converges faster, but can bounce back out
+        of local minima after some time.
+        """
+        variant = self.config.adam_variant
+        print(f"Starting optimization with optax variant {variant}.")
+        optimizer = getattr(optax, variant)(**self.config.adam_kwargs)
         opt_state = optimizer.init(self.params_logit)
+
+        if self._last_opt_state is not None:
+            print("Continuing from previous optimizer state.")
+            s_prev = self._last_opt_state[0]  # has .count, .mu, .nu
+            s_cur = opt_state[0]
+            kwargs = dict(count=s_prev.count, mu=s_prev.mu, nu=s_prev.nu)
+            s_new0 = s_cur._replace(**kwargs)
+            opt_state = (s_new0,) + opt_state[1:]
 
         # Initialize convergence tracking
         convergence_state = init_convergence_state()
-        _, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
+        initial_loss, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
         initial_grad_norm = optax.global_norm(initial_grads)
+        print(f"Initial loss: {initial_loss:.2f}, Initial gradient norm: {initial_grad_norm:.2f}")
 
         # Initialize optimization history if debug is enabled
         if self.config.debug:
@@ -462,9 +485,9 @@ class PolarizedBeamFitter:
                     "params_physical": jax.device_get(params_phys),
                     "params_logit": jax.device_get(self.params_logit),
                     "gradients": jax.device_get(grads),
-                    "adam_mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], "mu") else None,
-                    "adam_nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], "nu") else None,
-                    "adam_count": int(opt_state[0].count) if hasattr(opt_state[0], "count") else None,
+                    "mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], "mu") else None,
+                    "nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], "nu") else None,
+                    "count": int(opt_state[0].count) if hasattr(opt_state[0], "count") else None,
                 }
                 self.opt_history.append(history_entry)
 
@@ -493,6 +516,37 @@ class PolarizedBeamFitter:
         if convergence_state["best_params"] is not None:
             self.params_logit = convergence_state["best_params"]
         self.params_physical = params_from_logit(self.params_logit, self.config)
+
+        # Remember optimizer state/variant for possible warm-start next time
+        self._last_opt_state = opt_state
+        self._last_opt_variant = variant
+
+    def _run_tuned_optimization(self):
+        """
+        Wrapper for _run_adam overwriting configuration with pre-determined
+        hyperparameters.
+
+        I tuned the optimization procedure. Most critical is that Adam over the logit
+        parameters has a major problem. By the time some of the low-curvature parameters
+        (such as polarization beam parameters) are optimized, some of the hyper-sensitive
+        parameters such as source positions or temperature flux parameters have been sitting
+        in their minimum for so long that the optimizer state has accumulated to a point where
+        it exceeds alpha k > 2 and the optimizer explodes, followed by rapid recovery.
+
+        This tuned procedure first aggressively allows this phenomenon to occur, then
+        detects it and finishes the optimization with a gentle and robust completion using amsgrad.
+        """
+        print("Starting tuned optimization...")
+        self.config.adam_variant = "adam"  # start with aggressive Adam
+        self.config.adam_kwargs = {"learning_rate": 1e-2}  # aggressive learning rate
+        self.config.loss_history_length = 100  # go until Adam isn't improving anymore
+        self.config.n_steps = 8000  # the longest we're willing to wait
+        self._run_adam()
+        self.config.adam_variant = "amsgrad"  # switch to gentle AMSGrad
+        self.config.n_steps = 1000  # the longest we're willing to wait for the fine-tuning
+        self.config.adam_kwargs = {"learning_rate": 1e-3}  # gentle learning rate
+        self.config.loss_history_length = 10  # go until AMSGrad isn't improving anymore
+        self._run_adam()
 
     def _run_newton_pcg(self):
         """Run Newton-PCG optimization using whitened parameter space."""

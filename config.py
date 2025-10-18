@@ -118,8 +118,9 @@ class BeamFittingConfig:
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data
 
     # === Optimization and convergence ===
-    solver = "optax_adam"  # "optimistix_bfgs", "optax_adam", "newton_pcg"
+    solver = "tuned"  # "optimistix_bfgs", "optax_adam", "newton_pcg", "tuned"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
+    adam_variant = "adam"  # Optax optimizer name ("adam", "amsgrad", ...)
     adam_kwargs = {"learning_rate": 0.001}
     convergence_criterion = "loss_history"  # "absolute_gtol", "relative_gtol", or "loss_history"
     absolute_gtol = 100.0
