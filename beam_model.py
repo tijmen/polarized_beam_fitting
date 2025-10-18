@@ -783,13 +783,17 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
     def _setup_bspline_lut(self):
         """
-        Setup area-normalized orthogonal B-splines with boundary conditions B(r_min) = 0 and B'(r_min) = 0.
+        Setup area-normalized orthogonal B-splines with boundary conditions
+        B(r_min) = 0, B'(r_min) = 0, and B(r_max) = 0.
 
         The first knot is at r_min, but the B-spline basis functions are constrained
         to evaluate to zero and have zero derivative at r_min, ensuring C1 continuity
         with the Gaussian component.
         """
-        print("Setting up area-normalized orthogonal B-splines with B(r_min) = B'(r_min) = 0 constraints...")
+        print(
+            "Setting up area-normalized orthogonal B-splines with B(r_min) = B'(r_min) = 0 "
+            "and B(r_max) = 0 constraints..."
+        )
         degree = self.spline_k - 1  # degree = 3 for cubic spline
         r_min = self.spline_rmin_arcmin
         r_max = self.spline_rmax_arcmin
@@ -809,7 +813,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         for i in range(n_coeffs_total):
             basis_functions.append(interpolate.BSpline(self.r_knots, identity_coeffs[i], degree))
 
-        # Build constraint matrix for boundary conditions B(r_min) = 0 and B'(r_min) = 0
+        # Build constraint matrix for boundary conditions at r_min and r_max
         constraint_rows = []
         constraint_values = []
 
@@ -819,6 +823,10 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         # B'(r_min) = 0 (first derivative)
         constraint_rows.append(np.array([bf.derivative()(r_min) for bf in basis_functions]))
+        constraint_values.append(0.0)
+
+        # B(r_max) = 0
+        constraint_rows.append(np.array([bf(r_max) for bf in basis_functions]))
         constraint_values.append(0.0)
 
         A = np.vstack(constraint_rows)
@@ -883,16 +891,21 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         print(f"2D area orthonormality verification: max off-diagonal = {off_diag_error:.2e}")
 
         # Verify boundary conditions are satisfied
-        boundary_check_value = basis_matrix[0, :] @ orthogonal_coeffs
-        max_value_violation = np.max(np.abs(boundary_check_value))
+        boundary_check_rmin = basis_matrix[0, :] @ orthogonal_coeffs
+        max_rmin_violation = np.max(np.abs(boundary_check_rmin))
 
         # Check derivative at boundary
         derivative_at_boundary = np.array([bf.derivative()(r_min) for bf in basis_functions])
         boundary_check_derivative = derivative_at_boundary @ orthogonal_coeffs
         max_derivative_violation = np.max(np.abs(boundary_check_derivative))
 
-        print(f"Boundary condition B(r_min) = 0: max violation = {max_value_violation:.2e}")
+        # Check value at r_max
+        boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
+        max_rmax_violation = np.max(np.abs(boundary_check_rmax))
+
+        print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
         print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
+        print(f"Boundary condition B(r_max) = 0: max violation = {max_rmax_violation:.2e}")
 
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]
@@ -926,7 +939,10 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
         print(f"  {self.n_bspline_coeffs} orthonormal basis functions")
-        print(f"  B-splines start at r = {r_min:.1f} arcmin with B(r_min) = B'(r_min) = 0 constraints")
+        print(
+            f"  B-splines start at r = {r_min:.1f} arcmin with B(r_min) = B'(r_min) = 0 and "
+            f"terminate with B(r_max={r_max:.1f} arcmin) = 0 constraints"
+        )
 
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
 
