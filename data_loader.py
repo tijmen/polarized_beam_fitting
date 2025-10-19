@@ -83,6 +83,7 @@ class DataLoader:
             "k_indices_y": None,
             "k_indices_x": None,
             "calculator_payload": None,
+            "fields": None,
         }
 
         if self.config.chi2_method != "fourier" or maps_fft is None:
@@ -102,6 +103,7 @@ class DataLoader:
         bundle["k_indices_y"] = idx_y
         bundle["k_indices_x"] = idx_x
         bundle["calculator_payload"] = getattr(psd_calc, "payload", None)
+        bundle["fields"] = None if source_fields is None else np.asarray(source_fields, dtype=object)
         return maps_fft_prepared, bundle
 
     def _compute_precision_per_source(
@@ -115,6 +117,9 @@ class DataLoader:
         """Return precision tensors per source for Fourier-space analyses."""
         if self.config.chi2_method != "fourier":
             return None
+
+        if hasattr(psd_calc, "set_source_fields"):
+            psd_calc.set_source_fields(source_fields)
 
         method = self.config.noise_psd_method
         if method == "multiband_covariance":
@@ -236,7 +241,7 @@ class DataLoader:
         """Check that skip_sources exist in data files."""
         all_source_ids = set()
 
-        for filename in self.config.coadd_filenames:
+        for _, filename in self.config.iter_coadd_files():
             g3_file = core.G3File(filename)
 
             for frame in g3_file:
@@ -253,18 +258,15 @@ class DataLoader:
         """Load data and perform Gaussian fits."""
         results = {band: {} for band in self.config.bands}
 
-        for filename in self.config.coadd_filenames:
-            print(f"Processing: {filename}")
-            self._process_file(filename, results)
+        for field_name, filename in self.config.iter_coadd_files():
+            print(f"Processing: {filename} (field={field_name})")
+            self._process_file(field_name, filename, results)
 
         return results
 
-    def _process_file(self, filename: str, results: Dict):
+    def _process_file(self, field_name: str, filename: str, results: Dict):
         """Process a single coadd file."""
         g3_file = core.G3File(filename)
-
-        field_name = self._infer_field_from_filename(filename)
-        print(f"Identified field: {field_name}")
 
         for frame in g3_file:
             if frame.type != core.G3FrameType.Map or "Id" not in frame:
@@ -283,26 +285,6 @@ class DataLoader:
             if fit_result is not None:
                 fit_result["field"] = field_name
                 results[band][source_id] = fit_result
-
-    def _infer_field_from_filename(self, filename: str) -> str:
-        """Infer observing field (winter/summer_a/...) from the input filename."""
-        basename = os.path.basename(filename).lower()
-        if "winter" in basename:
-            field = "winter"
-        elif "summera" in basename:
-            field = "summer_a"
-        elif "summerb" in basename:
-            field = "summer_b"
-        elif "summerc" in basename:
-            field = "summer_c"
-        else:
-            print(f"Warning, could not infer field from filename: {filename}, assuming winter field!")
-            return "winter"
-
-        if "tau_decon" in basename:
-            return field
-        else:
-            return field + "_nodecon"
 
     def _get_band_from_id(self, source_id: str) -> Optional[str]:
         """Extract band from source ID."""

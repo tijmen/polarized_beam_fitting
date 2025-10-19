@@ -2,10 +2,13 @@
 
 import os
 from dataclasses import dataclass
+from typing import Generator, Tuple
 
 import jax.numpy as jnp
 import numpy as np
 from spt3g import core
+
+from .fields import FieldCatalog
 
 
 @dataclass
@@ -15,20 +18,40 @@ class BeamFittingConfig:
     # === Filesystem & data sources ===
     output_dir = "/home/tijmen/cmb_analysis/beam_analysis/output"
     cache_dir = "/home/tijmen/cmb_analysis/beam_analysis/cache"
-    coadd_filenames = [
-        "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
-        "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
-        "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
-        "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
-        # "/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3",
-        # "/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3",  # these targeted sources are sus
-    ]
+    coadd_filenames = {
+        "winter": [
+            "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
+        ],
+        "summer_a": [
+            "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
+        ],
+        "summer_b": [
+            "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
+        ],
+        "summer_c": [
+            "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
+        ],
+        # "winter_nodecon": [
+        #     "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
+        # ],
+        # "summer_a_nodecon": [
+        #     "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
+        # ],
+        # "summer_b_nodecon": [
+        #     "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
+        # ],
+        # "summer_c_nodecon": [
+        #     "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
+        # ],
+        # "targeted1": ["/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3"],
+        # "targeted2": ["/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3"],  # these targeted sources are sus
+    }
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
-    leakage_template_dir = os.path.join(output_dir, "leakage_templates")
+    leakage_template_dir = os.path.join(cache_dir, "leakage_templates")
 
-    # Ensure output directory exists so downstream consumers can write immediately.
-    os.makedirs(output_dir, exist_ok=True)
+    for this_dir in [output_dir, cache_dir, leakage_template_dir]:
+        os.makedirs(this_dir, exist_ok=True)
 
     # === Run selection & numerics ===
     bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
@@ -116,6 +139,7 @@ class BeamFittingConfig:
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data
+    parametric_precision_perfield_median = False  # Pool parametric precision tensors per field by median when enabled.
 
     # === Optimization and convergence ===
     solver = "tuned"  # "optimistix_bfgs", "optax_adam", "newton_pcg", "tuned"
@@ -167,3 +191,17 @@ class BeamFittingConfig:
     @property
     def active_beam_model_bounds(self):
         return self.beam_model_bounds[self.beam_model_type]
+
+    @property
+    def field_catalog(self) -> FieldCatalog:
+        """Return a FieldCatalog describing all coadd files keyed by observing field."""
+        return FieldCatalog(self.coadd_filenames)
+
+    def iter_coadd_files(self) -> Generator[Tuple[str, str], None, None]:
+        """Yield (field, filename) pairs for each configured coadd file."""
+        yield from self.field_catalog.iter_field_paths()
+
+    @property
+    def coadd_file_list(self) -> Tuple[str, ...]:
+        """Return a flattened tuple of all coadd file paths."""
+        return self.field_catalog.all_paths

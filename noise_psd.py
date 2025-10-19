@@ -311,7 +311,11 @@ def _fit_radial_model(
     return amplitudes, radial_model
 
 
-def compute_parametric_precision(config, raw_maps: np.ndarray) -> Dict[str, Any]:
+def compute_parametric_precision(
+    config,
+    raw_maps: np.ndarray,
+    source_fields: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
     """
     Compute the parametric precision matrix using the production pipeline formerly implemented in precision.ipynb.
 
@@ -387,6 +391,30 @@ def compute_parametric_precision(config, raw_maps: np.ndarray) -> Dict[str, Any]
     precision *= Omega_pix
     precision /= core.G3Units.uK**2
 
+    perfield_median_applied = False
+    metadata_fields = None
+    if getattr(config, "parametric_precision_perfield_median", False):
+        if source_fields is None:
+            raise ValueError(
+                "parametric_precision_perfield_median=True requires per-source field labels. "
+                "Provide them via NoisePSDCalculator.set_source_fields before computing precision."
+            )
+        source_fields = np.asarray(source_fields)
+        if source_fields.shape[0] != n_src:
+            raise ValueError(f"Length of provided source_fields does not match number of sources ({source_fields.shape[0]} != {n_src}).")
+        unique_fields = np.unique(source_fields)
+        logging.info("Applying per-field median pooling to parametric precision (fields: %s).", unique_fields.tolist())
+        for field in unique_fields:
+            field_mask = source_fields == field
+            if not np.any(field_mask):
+                continue
+            field_precision = precision[field_mask]
+            median_precision = np.median(field_precision, axis=0)
+            median_precision = np.asarray(median_precision, dtype=config.dtype_np_complex)
+            precision[field_mask] = median_precision
+        metadata_fields = [None if field is None else str(field) for field in source_fields]
+        perfield_median_applied = True
+
     logging.info("Parametric precision computation complete.")
     return {
         "precision": precision.astype(config.dtype_np_complex),
@@ -406,6 +434,8 @@ def compute_parametric_precision(config, raw_maps: np.ndarray) -> Dict[str, Any]
             "nx": int(nx),
             "bands": list(config.bands),
             "description": PARAMETRIC_PRECISION_DESCRIPTION,
+            "parametric_precision_perfield_median": perfield_median_applied,
+            "source_fields": metadata_fields,
         },
     }
 
@@ -432,6 +462,7 @@ class NoisePSDCalculator(ABC):
         self.config = config
         self.n_bands = len(self.config.bands)
         self.map_shape = map_shape
+        self._source_fields: Optional[np.ndarray] = None
 
     @abstractmethod
     def calculate_noise_psd(self, maps_numpy):
@@ -450,6 +481,18 @@ class NoisePSDCalculator(ABC):
             For multi-band: (ky,kx,band,band,stokes,stokes) array for covariance.
         """
         pass
+
+    def set_source_fields(self, source_fields: Optional[np.ndarray]) -> None:
+        """Store per-source field labels for downstream calculations."""
+        if source_fields is None:
+            self._source_fields = None
+        else:
+            self._source_fields = np.asarray(source_fields)
+
+    @property
+    def source_fields(self) -> Optional[np.ndarray]:
+        """Return the cached per-source field labels, if any."""
+        return None if self._source_fields is None else np.asarray(self._source_fields)
 
 
 class ClusterfinderPSDCalculator(NoisePSDCalculator):
@@ -932,7 +975,7 @@ class ParametricPrecisionCalculator(NoisePSDCalculator):
         """
         if self._payload is None:
             logging.info("No cached parametric precision payload found; computing from scratch.")
-            self._payload = self._normalize_payload(compute_parametric_precision(self.config, maps_numpy))
+            self._payload = self._normalize_payload(compute_parametric_precision(self.config, maps_numpy, source_fields=self.source_fields))
         precision = np.asarray(self._payload["precision"]).astype(self.config.dtype_np_complex)
         return precision
 

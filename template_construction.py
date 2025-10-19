@@ -46,7 +46,7 @@ FIELD_COADD_PATHS = {
     "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
     "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
 }
-OUTPUT_DIR = Path("output/leakage_templates")
+OUTPUT_DIR = Path("cache/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
 
 
@@ -112,7 +112,10 @@ def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitte
     band = config.bands[0]
     source_ids = set(fitter.state.source_ids)
 
-    filename = config.coadd_filenames[0]
+    filenames = config.coadd_file_list
+    if not filenames:
+        raise ValueError("No coadd files configured for template construction.")
+    filename = filenames[0]
     try:
         g3_file = core.G3File(filename)
     except RuntimeError as err:
@@ -148,7 +151,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
 
     config = BeamFittingConfig()
     config.bands = [band]
-    config.coadd_filenames = [FIELD_COADD_PATHS[field]]
+    config.coadd_filenames = {field: [FIELD_COADD_PATHS[field]]}
     config.use_precomputed_leakage_templates = True  # for subsequent iterations. Set to False for the first run
 
     fitter = PolarizedBeamFitter(config)

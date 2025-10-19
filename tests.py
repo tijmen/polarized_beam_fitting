@@ -54,7 +54,7 @@ def get_test_config(**kwargs):
     config.noise_psd_method = "white_noise"
     config.min_t_amplitude = 0
     config.cache_dir = tempfile.mkdtemp()
-    config.coadd_filenames = ["mock_file.g3"]
+    config.coadd_filenames = {"test_field": ["mock_file.g3"]}
     config.n_diagnostic_plots = 0
     config.bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({})}
 

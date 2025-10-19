@@ -17,6 +17,7 @@ from .beam_model import (
 )
 from .bootstrap import BootstrapBeamFitter
 from .config import BeamFittingConfig
+from .fields import FieldCatalog
 from .fitter import PolarizedBeamFitter
 from .noise_psd import (
     ClusterfinderPSDCalculator,
@@ -51,6 +52,7 @@ __all__ = [
     "PolarizedBeamFitter",
     "BootstrapBeamFitter",
     "BeamFittingConfig",
+    "FieldCatalog",
     "BeamPlotter",
     "create_diagnostic_plots",
     "make_apodization_mask",

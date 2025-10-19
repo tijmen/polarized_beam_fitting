@@ -17,7 +17,7 @@ class CacheManager:
         # if these parameters are different, it makes sense to start afresh
         # from the G3 files and re-calculate the leakage templates
         relevant_params = {
-            "coadd_filenames": self.config.coadd_filenames,  # different input data
+            "coadd_filenames": self.config.field_catalog.as_serializable(),  # different input data
             "bands": self.config.bands,  # different data
             "map_size_pix": self.config.map_size_pix,  # different input data
             "reso_arcmin": self.config.reso_arcmin,  # different input data

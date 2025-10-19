@@ -790,10 +790,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         to evaluate to zero and have zero derivative at r_min, ensuring C1 continuity
         with the Gaussian component.
         """
-        print(
-            "Setting up area-normalized orthogonal B-splines with B(r_min) = B'(r_min) = 0 "
-            "and B(r_max) = 0 constraints..."
-        )
+        print("Setting up area-normalized orthogonal B-splines with B(r_min) = B'(r_min) = 0 and B(r_max) = 0 constraints...")
         degree = self.spline_k - 1  # degree = 3 for cubic spline
         r_min = self.spline_rmin_arcmin
         r_max = self.spline_rmax_arcmin
