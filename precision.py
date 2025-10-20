@@ -1229,10 +1229,14 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         diag_regularized = self._regularize_diagonals(diag_original, ell_x_grid, ell_y_grid)
         print("PCA regularization complete.")
 
+        print("Estimating white-noise floors from residual (non-CMB) covariance...")
+        floors = self._compute_white_noise_floors(diag_original, ell_x_grid, ell_y_grid)
+        diag_bounded = self._apply_white_noise_floors(diag_regularized, floors)
+
         residual = np.zeros_like(cov_no_cmb)
         for band in range(n_bands):
             for stokes in range(3):
-                residual[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
+                residual[:, :, :, band, stokes, band, stokes] = diag_bounded[:, :, :, band, stokes]
 
         covariance_model = residual + cov_cmb[None, :, :, :, :, :, :]
         _print_rms_summary("Regularized residual covariance RMS", residual, self.config)
@@ -1245,11 +1249,18 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
 
         debug = None
         if self.config.debug:
+            covariance_regularized = np.zeros_like(cov_no_cmb)
+            for band in range(n_bands):
+                for stokes in range(3):
+                    covariance_regularized[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
             debug = {
                 "covariance_raw": covariance,
                 "covariance_cmb": cov_cmb,
+                "covariance_regularized": covariance_regularized,
+                "covariance_residual": residual,
                 "covariance_noncmb": residual,
                 "covariance_total": covariance_model,
+                "white_noise_floors": floors,
                 "precision": precision,
                 "k_indices_y": None if idx_y_eff is None else np.asarray(idx_y_eff),
                 "k_indices_x": None if idx_x_eff is None else np.asarray(idx_x_eff),
@@ -1269,7 +1280,7 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         return diag
 
     def _regularize_diagonals(self, diagonals: np.ndarray, ell_x_grid: np.ndarray, ell_y_grid: np.ndarray) -> np.ndarray:
-        """PCA-regularize diagonals per band, stokes, field and apply white-noise floor clipping."""
+        """PCA-regularize residual diagonals per band and Stokes, grouped by field."""
         n_src, ny, nx, n_bands, n_stokes = diagonals.shape
         field_labels = self._resolve_field_labels(n_src)
         # convert from complex to real
@@ -1301,37 +1312,10 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
                     else:  # allow for no PCA
                         print(f"No PCA applied to field {field} band {band} stokes {stokes}.")
                         reconstructed = np.zeros_like(centered)
-                    
+
                     samples_reconstructed = reconstructed + mean
 
-                    # Clip to positive values, as any source of noise must have positive power
-                    samples_reconstructed = np.clip(samples_reconstructed, 0.0, None)
-
                     regularized[indices, :, :, band, stokes] = samples_reconstructed.reshape(indices.size, ny, nx)
-
-        floors = self._compute_white_noise_floors(diagonals, ell_x_grid, ell_y_grid)
-        for band in range(n_bands):
-            for stokes in range(n_stokes):
-                floor = floors[band, stokes]
-                label = f"{'TQU'[stokes]}{_band_suffix(self.config.bands[band])}"
-                if floor < 0.0:
-                    print(
-                        f"White noise floor {label} computed as negative; clipping to 0. This usually indicates poorly estimated residual power."
-                    )
-                    floor = 0.0
-                if floor <= 0:
-                    floor_rms = 0.0
-                else:
-                    floor_rms = float(np.sqrt(floor)) * 1000.0 * self.config.reso_arcmin
-                print(f"White noise floor {label}: {_format_rms_value(floor_rms)} µK-arcmin")
-                below_floor_mask = regularized[:, :, :, band, stokes] < floor
-                if np.any(below_floor_mask):
-                    below_floor_fraction = np.sum(below_floor_mask) / np.prod(below_floor_mask.shape)
-                    print(
-                        f"Some PSD values are below the white noise floor {label}. {below_floor_fraction:.2%} of the values are below the floor. Clipping to the floor and continuing..."
-                    )
-                    regularized[:, :, :, band, stokes][below_floor_mask] = floor
-
         return regularized
 
     def _resolve_field_labels(self, n_src: int) -> np.ndarray:
@@ -1394,6 +1378,27 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
                 eps_floor = np.finfo(diagonals.dtype).eps
                 floors[band, stokes] = max(white_level * 0.8, eps_floor)
         return floors
+
+    def _apply_white_noise_floors(self, diagonals: np.ndarray, floors: np.ndarray) -> np.ndarray:
+        """Bound residual diagonals from below using the provided white-noise floor estimates."""
+        bounded = np.array(diagonals, copy=True)
+        n_src, ny, nx, n_bands, n_stokes = bounded.shape
+        for band in range(n_bands):
+            for stokes in range(n_stokes):
+                floor = float(floors[band, stokes])
+                label = f"{'TQU'[stokes]}{_band_suffix(self.config.bands[band])}"
+                if floor <= 0:
+                    raise ValueError(f"White noise floor for {label} is non-positive: {floor}")
+                floor_rms = float(np.sqrt(floor)) * 1000.0 * self.config.reso_arcmin
+                print(f"White noise floor {label}: {_format_rms_value(floor_rms)} µK-arcmin")
+                below_floor_mask = bounded[:, :, :, band, stokes] < floor
+                if np.any(below_floor_mask):
+                    below_floor_fraction = np.sum(below_floor_mask) / np.prod(below_floor_mask.shape)
+                    print(
+                        f"Some PSD values are below the white noise floor {label}. {below_floor_fraction:.2%} of the values are below the floor. Clipping to the floor and continuing..."
+                    )
+                    bounded[:, :, :, band, stokes][below_floor_mask] = floor
+        return bounded
 
 
 class PcaPsdSeparateTQUCalculator(PrecisionCalculator):

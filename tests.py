@@ -635,17 +635,18 @@ class TestUnitPrecision(unittest.TestCase):
         for src in range(n_src):
             diag_inputs[src, 0, :, 0, 0] = diag_values[src]
 
-        floors = calc._compute_white_noise_floors(diag_inputs, ell_x_grid, ell_y_grid)
         diag_regularized = calc._regularize_diagonals(diag_inputs.copy(), ell_x_grid, ell_y_grid)
+        floors = calc._compute_white_noise_floors(diag_inputs, ell_x_grid, ell_y_grid)
+        diag_bounded = calc._apply_white_noise_floors(diag_regularized.copy(), floors)
 
         for band in range(n_bands):
             for stokes in range(n_stokes):
-                self.assertTrue(np.all(diag_regularized[:, :, :, band, stokes] >= floors[band, stokes] - 1e-6))
+                self.assertTrue(np.all(diag_bounded[:, :, :, band, stokes] >= floors[band, stokes] - 1e-6))
 
         residual = covariance.copy()
         for band in range(n_bands):
             for stokes in range(n_stokes):
-                residual[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
+                residual[:, :, :, band, stokes, band, stokes] = diag_bounded[:, :, :, band, stokes]
 
         diag_result = residual[:, 0, :, 0, 0, 0, 0]
         self.assertTrue(np.all(diag_result >= floors[0, 0] - 1e-6))
