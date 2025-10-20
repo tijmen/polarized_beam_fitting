@@ -45,6 +45,16 @@ PARAMETRIC_PRECISION_DESCRIPTION = (
     "Uses unshifted FFT convention (DC located at [0,0]) and discrete Fourier normalization."
 )
 
+# Tcal https://sptlocal.grid.uchicago.edu/~yomori/20192020_lensing/Tcal/v3/spt3g20192020_tcal.html#updated-calibration
+# Pcal https://pole.uchicago.edu/spt3g/index.php/File:20231009_EETETT_Updates.pdf
+CMB_CALIBRATION_FACTORS = np.array(
+    [
+        [1.07, 1.02, 1.01],
+        [1.05, 1.06, 1.17],
+        [1.05, 1.06, 1.17],
+    ]
+)
+
 
 def _band_suffix(band_name: str) -> str:
     """Return a compact suffix (e.g. '150') extracted from a band label such as '150GHz'."""
@@ -131,31 +141,6 @@ def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 360.0, ell1: float =
         frac = (ell_vals[transition] - ell0) / (ell1 - ell0)
         H[transition] = 0.5 * (1.0 - np.cos(np.pi * frac))
     return H
-
-
-def _default_cmb_calibration(config, n_bands: int) -> np.ndarray:
-    """Return per-stokes calibration factors to convert between bandpass calibrations."""
-    cal = getattr(config, "cmb_calibration_factors", None)
-    if cal is None:
-        cal = np.array(
-            [
-                [1.07, 1.02, 1.01],
-                [1.05, 1.06, 1.17],
-                [1.05, 1.06, 1.17],
-            ],
-            dtype=config.dtype_np_real,
-        )
-    cal = np.asarray(cal, dtype=config.dtype_np_real)
-    if cal.shape[0] != 3:
-        raise ValueError(f"Expected cmb_calibration_factors with 3 stokes rows; received shape {cal.shape}.")
-    if cal.shape[1] < n_bands:
-        raise ValueError(
-            f"Expected cmb_calibration_factors with at least {n_bands} columns, received {cal.shape}. "
-            "Update the configuration to match the active band list."
-        )
-    if cal.shape[1] > n_bands:
-        cal = cal[:, :n_bands]
-    return cal
 
 
 def _project_to_spd(matrix: np.ndarray, eps: float = PARAMETRIC_PRECISION_EIGEN_EPS) -> np.ndarray:
@@ -268,19 +253,22 @@ def _compute_cmb_covariance(
     cov_tqu_highres[..., 2, 2] = C_EE * s2phi**2 + C_BB * c2phi**2
     cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (C_EE - C_BB) * s2phi * c2phi
 
+    # convolve with the FFT of the full apod mask
+
     cov_shifted = np.fft.fftshift(cov_tqu_highres, axes=(0, 1))
     cov_shifted = cov_shifted.reshape(ny, PARAMETRIC_PRECISION_SUPERSAMPLING, nx, PARAMETRIC_PRECISION_SUPERSAMPLING, 3, 3).mean(
         axis=(1, 3)
     )
     cov_tqu = np.fft.ifftshift(cov_shifted, axes=(0, 1))
 
-    cal = _default_cmb_calibration(config, n_bands)
     cov_cmb = np.zeros((ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
-    cal_inv = 1.0 / cal
-    for s1 in range(3):
-        for s2 in range(3):
-            factor = np.outer(cal_inv[s1], cal_inv[s2])  # (band, band)
-            cov_cmb[:, :, :, s1, :, s2] = cov_tqu[:, :, s1, s2][:, :, None, None] * factor[None, None, :, :]
+    for iband in range(n_bands):
+        for istokes in range(3):
+            for jband in range(n_bands):
+                for jstokes in range(3):
+                    cov_cmb[:, :, iband, istokes, jband, jstokes] = (
+                        cov_tqu[:, :, istokes, jstokes] * CMB_CALIBRATION_FACTORS[istokes, iband] * CMB_CALIBRATION_FACTORS[jstokes, jband]
+                    )
 
     return cov_cmb
 
@@ -632,14 +620,16 @@ class PrecisionCalculator(ABC):
         """Invert a single covariance grid with axes (ny, nx, n_bands, 3, n_bands, 3)."""
         ny, nx, n_bands, n_stokes, _, _ = covariance_psd.shape
         n_dim = n_bands * n_stokes
-        assert covariance_psd.dtype == self.config.dtype_np_real, f"Covariance must be {self.config.dtype_np_real}, not {covariance_psd.dtype}"
+        assert covariance_psd.dtype == self.config.dtype_np_real, (
+            f"Covariance must be {self.config.dtype_np_real}, not {covariance_psd.dtype}"
+        )
         precision = np.zeros((ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_real)
         for iy in range(ny):
             for ix in range(nx):
                 cov = covariance_psd[iy, ix].reshape(n_dim, n_dim)
                 cov_spd = _project_to_spd(cov)
                 inv = np.linalg.inv(cov_spd)
-                inv = 0.5 * (inv + inv.T) # probably don't need this
+                inv = 0.5 * (inv + inv.T)  # probably don't need this
                 precision[iy, ix] = inv.reshape(n_bands, n_stokes, n_bands, n_stokes)
         return precision
 
@@ -1204,10 +1194,9 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         ell_y_grid = 360.0 * ky_grid
         ell_radial = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
 
-        covariance = (
-            np.einsum("nyxbs,nyxct->nyxbsct", fft_maps, np.conj(fft_maps), optimize=True).real.astype(self.config.dtype_np_real)
-            / (omega_eff * omega_pix)
-        )
+        covariance = np.einsum("nyxbs,nyxct->nyxbsct", fft_maps, np.conj(fft_maps), optimize=True).real.astype(
+            self.config.dtype_np_real
+        ) / (omega_eff * omega_pix)
 
         print(f"Largest ell_x value in covariance: {float(np.max(ell_x_grid)):.2f}")
         print(f"Data covariance diag mean (mK^2) before CMB subtraction: {float(np.mean(covariance[..., 0, 0, 0, 0])):.6e}")
@@ -1249,15 +1238,9 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
 
         debug = None
         if self.config.debug:
-            covariance_regularized = np.zeros_like(cov_no_cmb)
-            for band in range(n_bands):
-                for stokes in range(3):
-                    covariance_regularized[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
             debug = {
                 "covariance_raw": covariance,
                 "covariance_cmb": cov_cmb,
-                "covariance_regularized": covariance_regularized,
-                "covariance_residual": residual,
                 "covariance_noncmb": residual,
                 "covariance_total": covariance_model,
                 "white_noise_floors": floors,
