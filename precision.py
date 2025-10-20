@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import camb
 import numpy as np
 from astropy.io import fits
-from scipy.ndimage import convolve
 from sklearn.decomposition import PCA
 
 from .utils import (
@@ -30,7 +29,7 @@ from .utils import (
     make_apodization_mask,
 )
 
-PARAMETRIC_PRECISION_SUPERSAMPLING = 8
+PARAMETRIC_PRECISION_SUPERSAMPLING = 4
 PARAMETRIC_PRECISION_HIGH_KY_THRESHOLD = 3000.0
 PARAMETRIC_PRECISION_WHITE_NOISE_FLOOR_ELL = 8000.0
 PARAMETRIC_PRECISION_RADIAL_MAX_ELL = 3000.0
@@ -212,11 +211,12 @@ def _compute_cmb_covariance(
     results = camb.get_results(pars)
     powers = results.get_cmb_power_spectra(pars, CMB_unit="muK", raw_cl=True)
     ell_camb = np.arange(powers["total"].shape[0])
+    cl_tt_raw = powers["total"][:, 0] * 1e-6
+    cl_ee_raw = powers["total"][:, 1] * 1e-6
+    cl_bb_raw = powers["total"][:, 2] * 1e-6
+    cl_te_raw = powers["total"][:, 3] * 1e-6
 
-    cl_tt_raw = powers["total"][:, 0]
-    cl_ee_raw = powers["total"][:, 1]
-    cl_bb_raw = powers["total"][:, 2]
-    cl_te_raw = powers["total"][:, 3]
+    print("Applying high-pass filter to CAMB spectra...")
 
     hp_filter = _smooth_highpass_1d(ell_camb, 360.0, 720.0)
     cl_tt = cl_tt_raw * hp_filter
@@ -227,8 +227,11 @@ def _compute_cmb_covariance(
     ny_highres = ny * PARAMETRIC_PRECISION_SUPERSAMPLING
     nx_highres = nx * PARAMETRIC_PRECISION_SUPERSAMPLING
 
-    dell_x = ell_x_grid[0, 1] - ell_x_grid[0, 0] if nx > 1 else 360.0 / (nx * config.reso_arcmin / 60.0)
-    dell_y = ell_y_grid[1, 0] - ell_y_grid[0, 0] if ny > 1 else 360.0 / (ny * config.reso_arcmin / 60.0)
+    dell_x = ell_x_grid[0, 1] - ell_x_grid[0, 0]
+    dell_y = ell_y_grid[1, 0] - ell_y_grid[0, 0]
+    print(f"ell_x spacing = {dell_x:.2f}$, ell_y spacing = {dell_y:.2f}$")
+
+    print("Interpolating CMB spectra onto high-resolution grid...")
 
     ell_x_highres = np.fft.fftfreq(nx_highres, d=1.0 / (nx_highres * dell_x / PARAMETRIC_PRECISION_SUPERSAMPLING))
     ell_y_highres = np.fft.fftfreq(ny_highres, d=1.0 / (ny_highres * dell_y / PARAMETRIC_PRECISION_SUPERSAMPLING))
@@ -243,10 +246,13 @@ def _compute_cmb_covariance(
     C_BB = interp(cl_bb)
     C_TE = interp(cl_te)
 
+    print("Converting from TEB to TQU...")
+
     phi = np.arctan2(ell_y_grid_highres, ell_x_grid_highres)
     c2phi = np.cos(2.0 * phi)
     s2phi = np.sin(2.0 * phi)
 
+    print("Calculating CMB covariance on high-resolution grid...")
     cov_tqu_highres = np.zeros((ny_highres, nx_highres, 3, 3), dtype=config.dtype_np_real)
     cov_tqu_highres[..., 0, 0] = C_TT
     cov_tqu_highres[..., 0, 1] = cov_tqu_highres[..., 1, 0] = C_TE * c2phi
@@ -254,25 +260,25 @@ def _compute_cmb_covariance(
     cov_tqu_highres[..., 1, 1] = C_EE * c2phi**2 + C_BB * s2phi**2
     cov_tqu_highres[..., 2, 2] = C_EE * s2phi**2 + C_BB * c2phi**2
     cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (C_EE - C_BB) * s2phi * c2phi
-    print("Calculated CMB covariance on high-resolution grid...")
-    cov_shifted = np.fft.fftshift(cov_tqu_highres, axes=(0, 1))
-    # convolve with the FFT of the full apod mask
+
+    print("Downsampling CMB covariance...")
+    ss = PARAMETRIC_PRECISION_SUPERSAMPLING
+    cov_tqu_highres_shifted = np.fft.fftshift(cov_tqu_highres)
+    cov_tqu_highres_shifted = 0.5 * np.roll(cov_tqu_highres_shifted, (-1, -1), axis=(0, 1)) + 0.5 * cov_tqu_highres_shifted
+    cov_tqu_shifted = cov_tqu_highres_shifted.reshape(ny, ss, nx, ss, 3, 3).mean(axis=(1, 3))
+    cov_tqu = np.fft.ifftshift(cov_tqu_shifted)
+
     print("Building apod mask for CMB covariance convolution...")
-    apod_mask = make_apodization_mask((ny_highres, nx_highres), config.apodization_width_pix * PARAMETRIC_PRECISION_SUPERSAMPLING)
+    apod_mask = make_apodization_mask((config.map_size_pix, config.map_size_pix), config.apodization_width_pix)
     apod_mask_fft = np.fft.fft2(apod_mask)
-    power_window = (np.abs(apod_mask_fft) ** 2) / (
-        ny_highres * nx_highres
-    )  # NOTE: this takes care of the effective area not being exactly ny x nx, don't repeat this correction!
-    cov_shifted_convolved_hires = np.zeros_like(cov_shifted)
-    print("Convolving CMB covariance with apodization mask...")
-    for s1 in range(3):
-        for s2 in range(3):
-            print(f"Convolving {s1}, {s2}...")
-            cov_shifted_convolved_hires[:, :, s1, s2] = convolve(cov_shifted[:, :, s1, s2], power_window, mode="constant", cval=0.0)
-    cov_shifted_convolved = cov_shifted_convolved_hires.reshape(
-        ny, PARAMETRIC_PRECISION_SUPERSAMPLING, nx, PARAMETRIC_PRECISION_SUPERSAMPLING, 3, 3
-    ).mean(axis=(1, 3))
-    cov_tqu = np.fft.ifftshift(cov_shifted_convolved, axes=(0, 1))
+    window_full = np.abs(apod_mask_fft) ** 2 / config.map_size_pix**2
+    inds_y = np.concatenate((np.arange(0, ny // 2 + 1), np.arange(-ny // 2 + 1, 0)))
+    inds_x = np.concatenate((np.arange(0, nx // 2 + 1), np.arange(-nx // 2 + 1, 0)))
+    fftwindow_full = np.fft.fft2(window_full)
+    fftwindow = fftwindow_full[np.ix_(inds_y, inds_x)]
+    fft_cov_tqu = np.fft.fft2(cov_tqu, axes=(0, 1))
+    fft_cov_tqu_convolved = fft_cov_tqu * fftwindow[:, :, None, None]
+    cov_tqu_convolved = np.fft.ifft2(fft_cov_tqu_convolved, axes=(0, 1))
 
     print("Applying CMB calibration factors...")
     cov_cmb = np.zeros((ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
@@ -281,8 +287,22 @@ def _compute_cmb_covariance(
             for jband in range(n_bands):
                 for jstokes in range(3):
                     cov_cmb[:, :, iband, istokes, jband, jstokes] = (
-                        cov_tqu[:, :, istokes, jstokes] * CMB_CALIBRATION_FACTORS[istokes, iband] * CMB_CALIBRATION_FACTORS[jstokes, jband]
+                        cov_tqu_convolved[:, :, istokes, jstokes]
+                        * CMB_CALIBRATION_FACTORS[istokes, iband]
+                        * CMB_CALIBRATION_FACTORS[jstokes, jband]
                     )
+
+    # something is wrong with the normalization (about a factor of 3000...)
+    # might need some of the following
+    # noise_mask = make_apod_mask_center_excised(
+    #     (config.map_size_pix, config.map_size_pix),
+    #     config.apodization_width_pix,
+    #     config.noise_hole_radius_arcmin,
+    #     config.reso_arcmin,
+    # )
+    # dtheta_rad = config.reso_arcmin * (np.pi / (180.0 * 60.0)) # 3e-5
+    # Omega_pix = dtheta_rad**2 # 8e-10
+    # Omega_eff = Omega_pix * float(np.sum(noise_mask**2)) # 8e-5
 
     return cov_cmb
 
