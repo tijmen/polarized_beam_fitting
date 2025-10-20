@@ -1261,6 +1261,9 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
                 "covariance_regularized": covariance_model,
                 "k_indices_y": None if idx_y_eff is None else np.asarray(idx_y_eff),
                 "k_indices_x": None if idx_x_eff is None else np.asarray(idx_x_eff),
+                "ell_x_grid": ell_x_grid,
+                "ell_y_grid": ell_y_grid,
+                "ell_radial": ell_radial,
             }
         return precision, debug
 

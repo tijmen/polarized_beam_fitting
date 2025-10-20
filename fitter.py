@@ -226,7 +226,6 @@ class PolarizedBeamFitter:
         self.weights_jax: Optional[jnp.ndarray] = None
         self.maps_fft_jax: Optional[jnp.ndarray] = None
         self.precision_jax: Optional[jnp.ndarray] = None
-        self.k_mask_jax: Optional[jnp.ndarray] = None
         self.k_indices_y: Optional[jnp.ndarray] = None
         self.k_indices_x: Optional[jnp.ndarray] = None
         self.raw_maps_numpy: Optional[np.ndarray] = None
@@ -318,9 +317,7 @@ class PolarizedBeamFitter:
             raise ValueError("Cached Fourier precision matrix missing from prepared data.")
         dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_np) else self.config.dtype_jax_real
         self.precision_jax = jnp.asarray(precision_np, dtype=dtype)
-        self.k_mask_jax = None
 
-        self._apply_fourier_mask()  # This is a no-op, but ok to leave for now. Use this if we ever need a k-mask again
         self.objective_data = (self.maps_fft_jax, self.precision_jax)
 
     def _setup_real_space_data(self, weights):
@@ -333,23 +330,6 @@ class PolarizedBeamFitter:
         map_shape = tuple(int(dim) for dim in self.apod_mask.shape)
         masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
         return np.stack(masks)  # (n_src, ny, nx)
-
-    def _apply_fourier_mask(self):
-        """Multiply precision weights by the source-specific Fourier mask."""
-        if self.k_mask_jax is None or self.precision_jax is None:
-            return
-
-        mask = self.k_mask_jax
-        precision = self.precision_jax
-
-        if precision.ndim == 5:  # (n_src, ny, nx, n_bands, 3)
-            mask_broadcast = mask[..., None, None]
-        elif precision.ndim == 7:  # (n_src, ny, nx, n_bands, 3, n_bands, 3)
-            mask_broadcast = mask[..., None, None, None, None]
-        else:
-            raise ValueError(f"Unexpected precision tensor rank: {precision.ndim}")
-
-        self.precision_jax = precision * mask_broadcast
 
     def _initialize_parameters(self) -> Dict:
         """Initialize fitting parameters."""
