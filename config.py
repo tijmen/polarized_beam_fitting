@@ -133,8 +133,8 @@ class BeamFittingConfig:
     #   "parametric_precision"       : CAMB + analytic noise model yielding dense precision matrices.
     #   "pca_psd_separate_tqu"       : log-space PCA per stokes, diagonal in band; default.
     #   "cmb_pca_perfield"           : PCA-regularized CMB precision estimator.
-    noise_psd_method = "pca_psd_separate_tqu"
-    n_pca_components = 4
+    noise_psd_method = "cmb_pca_perfield"
+    n_pca_components = 0  # How many components to use to model the per-source variation in noise properties. 0 assumes all sources sharing a field have the same noise properties
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data

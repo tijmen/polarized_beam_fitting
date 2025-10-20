@@ -35,7 +35,7 @@ PARAMETRIC_PRECISION_RADIAL_MAX_ELL = 3000.0
 PARAMETRIC_PRECISION_RADIAL_PIVOT = 1000.0
 PARAMETRIC_PRECISION_RADIAL_EXPONENT = 1.0
 PARAMETRIC_PRECISION_RADIAL_DC_FAKE = 50.0
-PARAMETRIC_PRECISION_EIGEN_EPS = 1e-5
+PARAMETRIC_PRECISION_EIGEN_EPS = 1e-6
 PARAMETRIC_PRECISION_ELL_X_PIVOT = 1000.0
 PARAMETRIC_PRECISION_ELL_X_DC_FAKE = 50.0
 PARAMETRIC_PRECISION_ELL_X_BOUNDS_LOWER = np.array([0.0, 0.0, 0.0])
@@ -163,7 +163,8 @@ def _project_to_spd(matrix: np.ndarray, eps: float = PARAMETRIC_PRECISION_EIGEN_
     symm = 0.5 * (matrix + matrix.T)
     diag = np.diag(symm)
     positive_diag = diag[diag > 0]
-    scale = np.median(positive_diag) if positive_diag.size else 1.0
+    assert positive_diag.size > 0, "No positive diagonal elements found in covariance matrix"
+    scale = np.median(positive_diag)
     floor = eps * scale
     eigvals, eigvecs = np.linalg.eigh(symm)
     eigvals = np.maximum(eigvals, floor)
@@ -624,21 +625,21 @@ class PrecisionCalculator(ABC):
         if cov.ndim == 6:
             return self._invert_covariance_stack(cov)
         if cov.ndim == 7:
-            pieces = [self._invert_covariance_stack(cov[i]) for i in range(cov.shape[0])]
-            return np.asarray(pieces, dtype=self.config.dtype_np_complex)
+            return np.array([self._invert_covariance_stack(cov[i]) for i in range(cov.shape[0])])
         raise ValueError(f"Unexpected covariance shape {cov.shape}; expected (..., ny, nx, n_bands, 3, n_bands, 3).")
 
     def _invert_covariance_stack(self, covariance_psd: np.ndarray) -> np.ndarray:
         """Invert a single covariance grid with axes (ny, nx, n_bands, 3, n_bands, 3)."""
         ny, nx, n_bands, n_stokes, _, _ = covariance_psd.shape
         n_dim = n_bands * n_stokes
-        precision = np.zeros((ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
+        assert covariance_psd.dtype == self.config.dtype_np_real, f"Covariance must be {self.config.dtype_np_real}, not {covariance_psd.dtype}"
+        precision = np.zeros((ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_real)
         for iy in range(ny):
             for ix in range(nx):
                 cov = covariance_psd[iy, ix].reshape(n_dim, n_dim)
-                cov_spd = _project_to_spd(cov, eps=1e-5)
+                cov_spd = _project_to_spd(cov)
                 inv = np.linalg.inv(cov_spd)
-                inv = 0.5 * (inv + inv.T)
+                inv = 0.5 * (inv + inv.T) # probably don't need this
                 precision[iy, ix] = inv.reshape(n_bands, n_stokes, n_bands, n_stokes)
         return precision
 
@@ -866,10 +867,8 @@ class KxAveragedCalculator(PrecisionCalculator):
         omega_eff = _effective_solid_angle(noise_mask, self.config.reso_arcmin)
         dtheta_rad = self.config.reso_arcmin * (np.pi / (180.0 * 60.0))
         omega_pix = dtheta_rad**2
-        if omega_eff > 0:
-            psd_2d /= omega_eff
-        if omega_pix > 0:
-            psd_2d /= omega_pix
+        psd_2d /= omega_eff
+        psd_2d /= omega_pix
 
         # Average over k_y for each k_x
         ny, nx = psd_2d.shape
@@ -940,10 +939,8 @@ class EnsembleAsdMeanCalculator(PrecisionCalculator):
                     psd_2d = np.abs(fft_2d) ** 2
 
                     # Normalize by effective solid angle and pixel area
-                    if omega_eff > 0:
-                        psd_2d /= omega_eff
-                    if omega_pix > 0:
-                        psd_2d /= omega_pix
+                    psd_2d /= omega_eff
+                    psd_2d /= omega_pix
 
                     # Convert PSD to ASD (amplitude spectral density)
                     asd_2d = np.sqrt(psd_2d)
@@ -996,10 +993,7 @@ class MultiBandCovarianceCalculator(PrecisionCalculator):
             masked_maps_fft = np.fft.fft2(masked_maps, axes=(1, 2)) * omega_pix
             n_field_src = masked_maps_fft.shape[0]
             covariance_sum = np.einsum("nyxbs,nyxct->yxbcst", masked_maps_fft, np.conj(masked_maps_fft))
-            omega_scale = omega_eff if omega_eff > 0 else (self.map_shape[0] * self.map_shape[1]) * omega_pix
-            covariance_psd = covariance_sum / (n_field_src * omega_scale)
-            if omega_pix > 0:
-                covariance_psd /= omega_pix
+            covariance_psd = covariance_sum / (n_field_src * omega_eff * omega_pix)
             covariance_psd = np.transpose(covariance_psd, (0, 1, 2, 4, 3, 5))
             covariance_psd = covariance_psd.astype(self.config.dtype_np_complex, copy=False)
             covariance_psd = self._truncate_fourier_numpy(covariance_psd, idx_y, idx_x, axis_y=0, axis_x=1)
@@ -1210,13 +1204,10 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         ell_y_grid = 360.0 * ky_grid
         ell_radial = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
 
-        normalization = omega_eff if omega_eff > 0 else float(ny_full * nx_full) * omega_pix
         covariance = (
             np.einsum("nyxbs,nyxct->nyxbsct", fft_maps, np.conj(fft_maps), optimize=True).real.astype(self.config.dtype_np_real)
-            / normalization
+            / (omega_eff * omega_pix)
         )
-        if omega_pix > 0:
-            covariance /= omega_pix
 
         print(f"Largest ell_x value in covariance: {float(np.max(ell_x_grid)):.2f}")
         print(f"Data covariance diag mean (mK^2) before CMB subtraction: {float(np.mean(covariance[..., 0, 0, 0, 0])):.6e}")
@@ -1225,8 +1216,7 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         ny, nx = ell_x_grid.shape
         print("Calculating expected CMB covariance...")
         cov_cmb = _compute_cmb_covariance(self.config, ny, nx, ell_x_grid, ell_y_grid, ell_radial, n_bands)
-        if omega_pix > 0:
-            cov_cmb = cov_cmb / omega_pix
+        cov_cmb = cov_cmb / omega_pix
         cov_cmb *= 1e-6  # Convert CAMB µK^2 spectrum to mK^2 in our discrete normalization.
         print(f"CMB covariance diag mean (mK^2): {float(np.mean(cov_cmb[..., 0, 0, 0, 0])):.6e}")
         _print_rms_summary("CMB covariance RMS", cov_cmb[None, ...], self.config)
@@ -1248,7 +1238,6 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         _print_rms_summary("Regularized residual covariance RMS", residual, self.config)
         _print_rms_summary("Final covariance RMS", covariance_model, self.config)
         print("Covariance matrix calculation complete.")
-        covariance_model = covariance_model.astype(self.config.dtype_np_real, copy=False)
 
         precision = self._covariance_to_precision(covariance_model)
         if not sliced_to_indices:
@@ -1257,9 +1246,11 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         debug = None
         if self.config.debug:
             debug = {
-                "covariance_cmb": cov_cmb.astype(self.config.dtype_np_real, copy=False),
-                "covariance_residual": residual.astype(self.config.dtype_np_real, copy=False),
-                "covariance_regularized": covariance_model,
+                "covariance_raw": covariance,
+                "covariance_cmb": cov_cmb,
+                "covariance_noncmb": residual,
+                "covariance_total": covariance_model,
+                "precision": precision,
                 "k_indices_y": None if idx_y_eff is None else np.asarray(idx_y_eff),
                 "k_indices_x": None if idx_x_eff is None else np.asarray(idx_x_eff),
                 "ell_x_grid": ell_x_grid,
@@ -1310,9 +1301,12 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
                     else:  # allow for no PCA
                         print(f"No PCA applied to field {field} band {band} stokes {stokes}.")
                         reconstructed = np.zeros_like(centered)
-
-                    reconstructed = np.clip(reconstructed, 0.0, 0.0)  # this models the non-CMB sources of noise, must be positive
+                    
                     samples_reconstructed = reconstructed + mean
+
+                    # Clip to positive values, as any source of noise must have positive power
+                    samples_reconstructed = np.clip(samples_reconstructed, 0.0, None)
+
                     regularized[indices, :, :, band, stokes] = samples_reconstructed.reshape(indices.size, ny, nx)
 
         floors = self._compute_white_noise_floors(diagonals, ell_x_grid, ell_y_grid)
