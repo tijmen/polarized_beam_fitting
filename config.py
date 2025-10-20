@@ -1,7 +1,6 @@
 """Module with configuration defaults for polarized beam fitting."""
 
 import os
-from dataclasses import dataclass
 from typing import Generator, Tuple
 
 import jax.numpy as jnp
@@ -11,7 +10,6 @@ from spt3g import core
 from .fields import FieldCatalog
 
 
-@dataclass
 class BeamFittingConfig:
     """Configuration class for polarized beam fitting analysis."""
 
@@ -134,6 +132,7 @@ class BeamFittingConfig:
     #   "pca_multiband_covariance"   : PCA-regularized multiband covariance (complex precision output).
     #   "parametric_precision"       : CAMB + analytic noise model yielding dense precision matrices.
     #   "pca_psd_separate_tqu"       : log-space PCA per stokes, diagonal in band; default.
+    #   "cmb_pca_perfield"           : PCA-regularized CMB precision estimator.
     noise_psd_method = "pca_psd_separate_tqu"
     n_pca_components = 4
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)

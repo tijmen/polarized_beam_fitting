@@ -7,7 +7,6 @@ efficient parallelization across devices.
 """
 
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import blackjax
@@ -33,48 +32,12 @@ from .utils import (
     params_to_logit,
 )
 
-
-@dataclass
-class FitterState:
-    """Container for fitter state and precomputed data."""
-
-    # Coordinate grids
-    y_grid: jnp.ndarray
-    x_grid: jnp.ndarray
-
-    # Masks
-    apod_mask: jnp.ndarray
-    apod_mask_broadcast: jnp.ndarray
-
-    # Data arrays
-    maps_jax: jnp.ndarray
-    weights_jax: Optional[jnp.ndarray] = None
-    maps_fft_jax: Optional[jnp.ndarray] = None
-    precision_jax: Optional[jnp.ndarray] = None
-    k_mask_jax: Optional[jnp.ndarray] = None
-    k_indices_y: Optional[jnp.ndarray] = None
-    k_indices_x: Optional[jnp.ndarray] = None
-    raw_maps_numpy: Optional[np.ndarray] = None
-    noise_bundle: Optional[Dict[str, Any]] = None
-
-    # Source information
-    source_ids: np.ndarray = None
-    n_src: int = 0
-    fields: np.ndarray = None
-    n_bands: int = 0
-
-    # Initial guesses
-    init_yoff: Optional[np.ndarray] = None
-    init_xoff: Optional[np.ndarray] = None
-    init_flux: Optional[np.ndarray] = None
-
-
 class ObjectiveFunctions:
     """Encapsulates objective function logic."""
 
-    def __init__(self, config, state: FitterState, beam_models: Dict):
+    def __init__(self, config, fitter: "PolarizedBeamFitter", beam_models: Dict):
         self.config = config
-        self.state = state
+        self.fitter = fitter
         self.beam_models = beam_models
 
     def build_objective(self):
@@ -136,11 +99,11 @@ class ObjectiveFunctions:
     def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, precision):
         """Chi2 for single source in Fourier space."""
         model = self._build_model(beam_params_list, yoff, xoff, flux)
-        model_apod = model * self.state.apod_mask_broadcast
+        model_apod = model * self.fitter.apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
-        if self.state.k_indices_y is not None and self.state.k_indices_x is not None:
-            model_fft = jnp.take(model_fft, self.state.k_indices_y, axis=0)
-            model_fft = jnp.take(model_fft, self.state.k_indices_x, axis=1)
+        if self.fitter.k_indices_y is not None and self.fitter.k_indices_x is not None:
+            model_fft = jnp.take(model_fft, self.fitter.k_indices_y, axis=0)
+            model_fft = jnp.take(model_fft, self.fitter.k_indices_x, axis=1)
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
             # chi2 = (jnp.abs(residual_fft)**2) * precision
@@ -188,7 +151,7 @@ class PolarizedBeamFitter:
     Refactored polarized beam fitting class.
 
     Cleaner interface and more modular design while maintaining
-    compatibility with existing beam_model and noise_psd modules.
+    compatibility with existing beam_model and precision modules.
     """
 
     def __init__(self, config):
@@ -198,7 +161,7 @@ class PolarizedBeamFitter:
         self._print_welcome()
 
         # Initialize components
-        self.state = self._initialize_state()
+        self._initialize_state()
         self.beam_models = self._create_beam_models()
         self._cache_manager = None
         self._prepared_data_cache = None
@@ -207,7 +170,7 @@ class PolarizedBeamFitter:
         self._load_data()
 
         # Build objective functions
-        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
+        obj_builder = ObjectiveFunctions(self.config, self, self.beam_models)
         self.objective_function = obj_builder.build_objective()
 
         # Compile optimization functions
@@ -235,7 +198,7 @@ class PolarizedBeamFitter:
         print("=" * 65 + "\n")
         print(f"Analysis for {self.config.bands}")
 
-    def _initialize_state(self) -> FitterState:
+    def _initialize_state(self) -> None:
         """Initialize fitter state with coordinate grids."""
         map_shape = (self.config.map_size_pix, self.config.map_size_pix)
         apod_width = self.config.apodization_width_pix
@@ -251,21 +214,38 @@ class PolarizedBeamFitter:
         apod_mask = make_apodization_mask(map_shape, apod_width)
         apod_mask_jax = jnp.asarray(apod_mask, dtype=self.config.dtype_jax_real)
 
-        return FitterState(
-            y_grid=y_grid,
-            x_grid=x_grid,
-            apod_mask=apod_mask_jax,
-            apod_mask_broadcast=apod_mask_jax[:, :, None, None],
-            maps_jax=None,  # Will be filled during data loading
-            n_bands=len(self.config.bands),
-        )
+        # Coordinate grids and masks
+        self.y_grid = y_grid
+        self.x_grid = x_grid
+        self.apod_mask = apod_mask_jax
+        self.apod_mask_broadcast = apod_mask_jax[:, :, None, None]
+
+        # Per-source data placeholders
+        self.maps_jax: Optional[jnp.ndarray] = None
+        self.weights_jax: Optional[jnp.ndarray] = None
+        self.maps_fft_jax: Optional[jnp.ndarray] = None
+        self.precision_jax: Optional[jnp.ndarray] = None
+        self.k_mask_jax: Optional[jnp.ndarray] = None
+        self.k_indices_y: Optional[jnp.ndarray] = None
+        self.k_indices_x: Optional[jnp.ndarray] = None
+        self.raw_maps_numpy: Optional[np.ndarray] = None
+        self.noise_bundle: Optional[Dict[str, Any]] = None
+
+        # Source metadata
+        self.source_ids: Optional[np.ndarray] = None
+        self.n_src: int = 0
+        self.fields: Optional[np.ndarray] = None
+        self.n_bands: int = len(self.config.bands)
+        self.init_yoff: Optional[np.ndarray] = None
+        self.init_xoff: Optional[np.ndarray] = None
+        self.init_flux: Optional[np.ndarray] = None
 
     def _create_beam_models(self) -> Dict:
         """Create beam models for each band."""
         print("Creating beam models...")
         models = {}
         for band in self.config.bands:
-            models[band] = create_beam_model(self.config, self.state.y_grid, self.state.x_grid, band)
+            models[band] = create_beam_model(self.config, self.y_grid, self.x_grid, band)
         return models
 
     def _load_data(self):
@@ -302,17 +282,17 @@ class PolarizedBeamFitter:
         self._prepared_data_cache = data_list
 
         # Store in state
-        self.state.source_ids = source_ids
-        self.state.n_src = n_src
-        self.state.init_yoff = gaussfit_yoff
-        self.state.init_xoff = gaussfit_xoff
-        self.state.init_flux = gaussfit_amp
-        self.state.fields = source_fields
-        self.state.raw_maps_numpy = raw_maps
-        self.state.noise_bundle = noise_bundle
+        self.source_ids = source_ids
+        self.n_src = n_src
+        self.init_yoff = gaussfit_yoff
+        self.init_xoff = gaussfit_xoff
+        self.init_flux = gaussfit_amp
+        self.fields = source_fields
+        self.raw_maps_numpy = raw_maps
+        self.noise_bundle = noise_bundle
 
         # Convert to JAX arrays
-        self.state.maps_jax = jnp.asarray(maps, dtype=self.config.dtype_jax_real)
+        self.maps_jax = jnp.asarray(maps, dtype=self.config.dtype_jax_real)
 
         # Setup for specific chi2 method
         if self.config.chi2_method == "fourier":
@@ -325,41 +305,41 @@ class PolarizedBeamFitter:
         if maps_fft is None:
             raise ValueError("Fourier-space chi2 requested but cached FFT maps are missing.")
 
-        self.state.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
+        self.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
 
         k_indices_y = noise_bundle.get("k_indices_y")
         k_indices_x = noise_bundle.get("k_indices_x")
-        self.state.k_indices_y = None if k_indices_y is None else jnp.asarray(k_indices_y, dtype=jnp.int32)
-        self.state.k_indices_x = None if k_indices_x is None else jnp.asarray(k_indices_x, dtype=jnp.int32)
+        self.k_indices_y = None if k_indices_y is None else jnp.asarray(k_indices_y, dtype=jnp.int32)
+        self.k_indices_x = None if k_indices_x is None else jnp.asarray(k_indices_x, dtype=jnp.int32)
 
         precision_np = noise_bundle.get("precision")
         if precision_np is None:
             raise ValueError("Cached Fourier precision matrix missing from prepared data.")
         dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_np) else self.config.dtype_jax_real
-        self.state.precision_jax = jnp.asarray(precision_np, dtype=dtype)
-        self.state.k_mask_jax = None
+        self.precision_jax = jnp.asarray(precision_np, dtype=dtype)
+        self.k_mask_jax = None
 
         self._apply_fourier_mask()  # This is a no-op, but ok to leave for now. Use this if we ever need a k-mask again
-        self.objective_data = (self.state.maps_fft_jax, self.state.precision_jax)
+        self.objective_data = (self.maps_fft_jax, self.precision_jax)
 
     def _setup_real_space_data(self, weights):
         """Setup data for real-space analysis."""
-        self.state.weights_jax = jnp.asarray(weights, dtype=self.config.dtype_jax_real)
-        self.objective_data = (self.state.maps_jax, self.state.weights_jax)
+        self.weights_jax = jnp.asarray(weights, dtype=self.config.dtype_jax_real)
+        self.objective_data = (self.maps_jax, self.weights_jax)
 
     def _calculate_nyquist_mask(self, source_ids):
         """Return radial Fourier mask per source (values in [0, 1])."""
-        map_shape = tuple(int(dim) for dim in self.state.apod_mask.shape)
+        map_shape = tuple(int(dim) for dim in self.apod_mask.shape)
         masks = [calculate_tod_nyquist_radial_mask_smooth(sid, map_shape, self.config) for sid in source_ids]
         return np.stack(masks)  # (n_src, ny, nx)
 
     def _apply_fourier_mask(self):
         """Multiply precision weights by the source-specific Fourier mask."""
-        if self.state.k_mask_jax is None or self.state.precision_jax is None:
+        if self.k_mask_jax is None or self.precision_jax is None:
             return
 
-        mask = self.state.k_mask_jax
-        precision = self.state.precision_jax
+        mask = self.k_mask_jax
+        precision = self.precision_jax
 
         if precision.ndim == 5:  # (n_src, ny, nx, n_bands, 3)
             mask_broadcast = mask[..., None, None]
@@ -368,7 +348,7 @@ class PolarizedBeamFitter:
         else:
             raise ValueError(f"Unexpected precision tensor rank: {precision.ndim}")
 
-        self.state.precision_jax = precision * mask_broadcast
+        self.precision_jax = precision * mask_broadcast
 
     def _initialize_parameters(self) -> Dict:
         """Initialize fitting parameters."""
@@ -385,16 +365,21 @@ class PolarizedBeamFitter:
             )
 
         # Initialize source parameters
-        if self.state.init_yoff is None or self.state.init_xoff is None or self.state.init_flux is None:
+        if self.init_yoff is None or self.init_xoff is None or self.init_flux is None:
             raise ValueError("Initial source parameters are missing; ensure data loading completed successfully.")
 
         params["sources"] = {
-            "yoff": jnp.asarray(self.state.init_yoff, dtype=self.config.dtype_jax_real),
-            "xoff": jnp.asarray(self.state.init_xoff, dtype=self.config.dtype_jax_real),
-            "flux": jnp.asarray(self.state.init_flux, dtype=self.config.dtype_jax_real),
+            "yoff": jnp.asarray(self.init_yoff, dtype=self.config.dtype_jax_real),
+            "xoff": jnp.asarray(self.init_xoff, dtype=self.config.dtype_jax_real),
+            "flux": jnp.asarray(self.init_flux, dtype=self.config.dtype_jax_real),
         }
 
         return params
+
+    @property
+    def state(self):
+        """Backward-compatible alias exposing fitter attributes under `.state`."""
+        return self
 
     def run_fit(self) -> Dict:
         """
@@ -538,7 +523,7 @@ class PolarizedBeamFitter:
         """
         print("Starting tuned optimization...")
         self.config.adam_variant = "adam"  # start with aggressive Adam
-        self.config.adam_kwargs = {"learning_rate": 1e-2}  # aggressive learning rate
+        self.config.adam_kwargs = {"learning_rate": 5e-3}  # aggressive learning rate
         self.config.loss_history_length = 100  # go until Adam isn't improving anymore
         self.config.n_steps = 8000  # the longest we're willing to wait
         self._run_adam()
@@ -697,7 +682,7 @@ class PolarizedBeamFitter:
 
     def calculate_individual_chi2s(self, params_phys: Dict) -> jnp.ndarray:
         """Calculate chi2 for each source individually."""
-        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
+        obj_builder = ObjectiveFunctions(self.config, self, self.beam_models)
 
         if self.config.chi2_method == "fourier":
 
@@ -708,8 +693,8 @@ class PolarizedBeamFitter:
                 params_phys["sources"]["yoff"],
                 params_phys["sources"]["xoff"],
                 params_phys["sources"]["flux"],
-                self.state.maps_fft_jax,
-                self.state.precision_jax,
+                self.maps_fft_jax,
+                self.precision_jax,
             )
         else:
 
@@ -720,8 +705,8 @@ class PolarizedBeamFitter:
                 params_phys["sources"]["yoff"],
                 params_phys["sources"]["xoff"],
                 params_phys["sources"]["flux"],
-                self.state.maps_jax,
-                self.state.weights_jax,
+                self.maps_jax,
+                self.weights_jax,
             )
 
         return chi2s
@@ -884,7 +869,7 @@ class PolarizedBeamFitter:
         Returns:
             Array of model maps with shape (n_src, ny, nx, n_bands, 3)
         """
-        obj_builder = ObjectiveFunctions(self.config, self.state, self.beam_models)
+        obj_builder = ObjectiveFunctions(self.config, self, self.beam_models)
 
         def model_for_source(yoff, xoff, flux):
             return obj_builder._build_model(params["beams"], yoff, xoff, flux)

@@ -19,17 +19,18 @@ from .bootstrap import BootstrapBeamFitter
 from .config import BeamFittingConfig
 from .fields import FieldCatalog
 from .fitter import PolarizedBeamFitter
-from .noise_psd import (
+from .precision import (
     ClusterfinderPSDCalculator,
+    CmbPcaPerFieldCalculator,
     EnsembleAsdMeanCalculator,
     KxAveragedCalculator,
     MultiBandCovarianceCalculator,
-    NoisePSDCalculator,
+    PrecisionCalculator,
     ParametricPrecisionCalculator,
     PcaMultiBandCalculator,
     PcaPsdSeparateTQUCalculator,
     WhiteNoiseCalculator,
-    create_noise_psd_calculator,
+    create_precision_calculator,
 )
 from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
 from .source_fitting import fit_map_amplitude, gaussfit_source
@@ -71,11 +72,11 @@ __all__ = [
     "BeamModelBetaPol",
     "BeamModelBetaTest",
     "BeamModelBSplinesGaussian",
-    "NoisePSDCalculator",
+    "PrecisionCalculator",
     "ClusterfinderPSDCalculator",
     "KxAveragedCalculator",
     "EnsembleAsdMeanCalculator",
-    "create_noise_psd_calculator",
+    "create_precision_calculator",
     "create_nuts_plots",
     "create_mclmc_plots",
     "PcaPsdSeparateTQUCalculator",
@@ -83,4 +84,5 @@ __all__ = [
     "ParametricPrecisionCalculator",
     "PcaMultiBandCalculator",
     "WhiteNoiseCalculator",
+    "CmbPcaPerFieldCalculator",
 ]

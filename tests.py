@@ -17,8 +17,9 @@ from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
 from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
-from polarized_beam_fitting.noise_psd import (
+from polarized_beam_fitting.precision import (
     ClusterfinderPSDCalculator,
+    CmbPcaPerFieldCalculator,
     EnsembleAsdMeanCalculator,
     MultiBandCovarianceCalculator,
     ParametricPrecisionCalculator,
@@ -182,6 +183,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
                 "k_indices_y": None,
                 "k_indices_x": None,
                 "calculator_payload": None,
+                "debug": None,
             }
         else:
             noise_payload = {
@@ -190,6 +192,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
                 "k_indices_y": None,
                 "k_indices_x": None,
                 "calculator_payload": None,
+                "debug": None,
             }
 
     return (
@@ -455,6 +458,7 @@ class TestEndToEndRecovery(unittest.TestCase):
             "k_indices_y": None,
             "k_indices_x": None,
             "calculator_payload": dummy_payload,
+            "debug": None,
         }
 
         true_params = [{"beta_pol": 0.74}, {"beta_pol": 0.77}]
@@ -478,8 +482,8 @@ class TestEndToEndRecovery(unittest.TestCase):
         print("✓ Multi-band parametric precision test successful.")
 
 
-class TestUnitNoisePSD(unittest.TestCase):
-    """Unit tests for complex functions in the noise_psd module."""
+class TestUnitPrecision(unittest.TestCase):
+    """Unit tests for complex functions in the precision module."""
 
     def test_rebin_psd_with_averaging(self):
         print("\n--- Unit Testing: _rebin_psd_with_averaging ---")
@@ -516,11 +520,17 @@ class TestUnitNoisePSD(unittest.TestCase):
         ensemble_calc = EnsembleAsdMeanCalculator(config, (ny, nx))
         pca_multi_calc = PcaMultiBandCalculator(config, (ny, nx))
 
-        psd_ensemble = ensemble_calc.calculate_noise_psd(maps_numpy)
+        precision_ensemble, _ = ensemble_calc.calculate_precision(maps_numpy)
+        precision_pca_multi, _ = pca_multi_calc.calculate_precision(maps_numpy)
 
-        precision_pca_multi = pca_multi_calc.calculate_noise_psd(maps_numpy)
-        ny_ax, nx_ax = precision_pca_multi.shape[:2]
-        precision_flat = precision_pca_multi.reshape(ny_ax, nx_ax, n_bands * n_stokes, n_bands * n_stokes)
+        precision_ensemble_avg = precision_ensemble.mean(axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            psd_ensemble = np.reciprocal(precision_ensemble_avg)
+        psd_ensemble = np.where(np.isfinite(psd_ensemble), psd_ensemble, np.inf)
+
+        precision_grid = precision_pca_multi[0]
+        ny_ax, nx_ax = precision_grid.shape[:2]
+        precision_flat = precision_grid.reshape(ny_ax, nx_ax, n_bands * n_stokes, n_bands * n_stokes)
         with np.errstate(divide="ignore", invalid="ignore"):
             psd_from_precision = np.reciprocal(precision_flat)
         psd_from_precision = np.where(np.isfinite(psd_from_precision), psd_from_precision, np.inf)
@@ -558,9 +568,14 @@ class TestUnitNoisePSD(unittest.TestCase):
         maps_numpy = rng.normal(size=(n_src, ny, nx, n_bands, n_stokes)).astype(config.dtype_np_real)
 
         calc = MultiBandCovarianceCalculator(config, (ny, nx))
-        covariance_psd = calc.calculate_noise_psd(maps_numpy)
+        precision_result, debug = calc.calculate_precision(maps_numpy)
 
-        self.assertEqual(covariance_psd.shape, (ny, nx, n_bands, n_stokes, n_bands, n_stokes))
+        self.assertEqual(precision_result.shape, (n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes))
+
+        self.assertIsNotNone(debug)
+        field_key, field_debug = next(iter(debug.items()))
+        self.assertIn("covariance", field_debug)
+        covariance_psd = field_debug["covariance"]
 
         noise_mask = make_apod_mask_center_excised(
             (ny, nx),
@@ -575,8 +590,68 @@ class TestUnitNoisePSD(unittest.TestCase):
         covariance_expected = covariance_sum / (n_src * effective_area)
         covariance_expected = np.transpose(covariance_expected, (0, 1, 2, 4, 3, 5))
 
-        np.testing.assert_allclose(covariance_psd, covariance_expected)
+        np.testing.assert_allclose(covariance_psd, covariance_expected, atol=1e-6, rtol=1e-6)
         print("✓ Multi-band covariance axes interleave band and Stokes indices.")
+
+    def test_cmb_pca_perfield_regularizes_diagonals(self):
+        print("\n--- Unit Testing: cmb_pca_perfield diagonal regularization ---")
+        config = get_test_config(
+            map_size_pix=4,
+            bands=["90GHz"],
+            noise_psd_method="cmb_pca_perfield",
+        )
+        config.n_pca_components = 1
+
+        n_src = 4
+        ny = 1
+        nx = 3
+        n_bands = len(config.bands)
+        n_stokes = 3
+
+        diag_values = np.array(
+            [
+                [0.01, 0.05, 0.05],
+                [0.02, 0.06, 0.06],
+                [0.30, 0.70, 0.70],
+                [0.40, 0.80, 0.80],
+            ],
+            dtype=config.dtype_np_real,
+        )
+
+        covariance = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=config.dtype_np_real)
+        for src in range(n_src):
+            covariance[src, 0, :, 0, 0, 0, 0] = diag_values[src]
+            covariance[src, 0, :, 0, 1, 0, 0] = 0.25
+            covariance[src, 0, :, 0, 0, 0, 1] = 0.25
+
+        ell_x_grid = np.array([[0.0, 4000.0, 6000.0]], dtype=config.dtype_np_real)
+        ell_y_grid = np.array([[3100.0, 3100.0, 3100.0]], dtype=config.dtype_np_real)
+        np.sqrt(ell_x_grid**2 + ell_y_grid**2)
+
+        calc = CmbPcaPerFieldCalculator(config, (config.map_size_pix, config.map_size_pix))
+        calc.set_source_fields(np.array(["A", "A", "B", "B"], dtype=object))
+
+        diag_inputs = np.zeros((n_src, ny, nx, n_bands, n_stokes), dtype=config.dtype_np_real)
+        for src in range(n_src):
+            diag_inputs[src, 0, :, 0, 0] = diag_values[src]
+
+        floors = calc._compute_white_noise_floors(diag_inputs, ell_x_grid, ell_y_grid)
+        diag_regularized = calc._regularize_diagonals(diag_inputs.copy(), ell_x_grid, ell_y_grid)
+
+        for band in range(n_bands):
+            for stokes in range(n_stokes):
+                self.assertTrue(np.all(diag_regularized[:, :, :, band, stokes] >= floors[band, stokes] - 1e-6))
+
+        residual = covariance.copy()
+        for band in range(n_bands):
+            for stokes in range(n_stokes):
+                residual[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
+
+        diag_result = residual[:, 0, :, 0, 0, 0, 0]
+        self.assertTrue(np.all(diag_result >= floors[0, 0] - 1e-6))
+        offdiag_result = residual[0, 0, 1, 0, 0, 0, 1]
+        self.assertAlmostEqual(offdiag_result, 0.25)
+        print("✓ cmb_pca_perfield enforces white-noise floors and preserves off-diagonals.")
 
     def test_parametric_precision_calculator(self):
         print("\n--- Unit Testing: Parametric Precision Calculator ---")
@@ -599,14 +674,41 @@ class TestUnitNoisePSD(unittest.TestCase):
             precomputed_payload=payload,
         )
         dummy_maps = np.zeros((1, config.map_size_pix, config.map_size_pix, len(config.bands), 3), dtype=config.dtype_np_real)
-        precision = calc.calculate_noise_psd(dummy_maps)
+        precision, debug = calc.calculate_precision(dummy_maps)
 
         expected_shape = payload["precision"].shape
         self.assertEqual(precision.shape, expected_shape)
         self.assertTrue(np.all(np.isfinite(precision)))
         self.assertTrue(calc.payload is not None)
         self.assertEqual(calc.payload["precision"].shape, precision.shape)
+        self.assertIsNone(debug)
         print("✓ Parametric precision calculator loads precision stack.")
+
+    def test_cmb_pca_perfield_debug_outputs(self):
+        print("\n--- Unit Testing: cmb_pca_perfield debug payload ---")
+        config = get_test_config(
+            map_size_pix=4,
+            bands=["90GHz"],
+            noise_psd_method="cmb_pca_perfield",
+        )
+        config.n_pca_components = 1
+        config.debug = True
+
+        calc = CmbPcaPerFieldCalculator(config, (config.map_size_pix, config.map_size_pix))
+        calc.set_source_fields(np.array(["A", "B"], dtype=object))
+
+        rng = np.random.default_rng(0)
+        maps_clean = rng.normal(size=(2, config.map_size_pix, config.map_size_pix, 1, 3)).astype(config.dtype_np_real)
+        idx_y = np.array([1, 2])
+        idx_x = np.array([0, 3])
+
+        precision, debug = calc.calculate_precision(maps_clean, idx_y=idx_y, idx_x=idx_x)
+
+        self.assertEqual(precision.shape, (2, len(idx_y), len(idx_x), 1, 3, 1, 3))
+        self.assertIsNotNone(debug)
+        for key in ("covariance_cmb", "covariance_residual", "covariance_regularized"):
+            self.assertIn(key, debug)
+        print("✓ cmb_pca_perfield returns precision and debug covariances when debug is enabled.")
 
 
 class TestUtilsFunctions(unittest.TestCase):

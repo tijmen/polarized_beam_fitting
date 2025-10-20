@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from spt3g import core, maps
 
-from .noise_psd import create_noise_psd_calculator
+from .precision import create_precision_calculator
 from .source_fitting import gaussfit_source
 from .utils import check_zero_fraction, compute_rectangular_ell_cut_indices, make_apodization_mask, shift_map_bilinear
 
@@ -84,6 +84,7 @@ class DataLoader:
             "k_indices_x": None,
             "calculator_payload": None,
             "fields": None,
+            "debug": None,
         }
 
         if self.config.chi2_method != "fourier" or maps_fft is None:
@@ -95,147 +96,27 @@ class DataLoader:
             getattr(self.config, "ellmax", None),
         )
 
-        psd_calc = create_noise_psd_calculator(self.config, self.map_shape)
-        precision = self._compute_precision_per_source(psd_calc, maps_clean, source_fields, idx_y, idx_x)
-        maps_fft_prepared = self._truncate_fourier_numpy(maps_fft, idx_y, idx_x, axis_y=1, axis_x=2)
+        precision_calc = create_precision_calculator(self.config, self.map_shape)
+        if hasattr(precision_calc, "set_source_fields"):
+            precision_calc.set_source_fields(source_fields)
+        precision, debug = precision_calc.calculate_precision(maps_clean, idx_y=idx_y, idx_x=idx_x)
 
-        bundle["precision"] = precision
+        if precision is not None:
+            dtype = self.config.dtype_np_complex if np.iscomplexobj(precision) else self.config.dtype_np_real
+            bundle["precision"] = np.asarray(precision, dtype=dtype)
+
+        if idx_y is not None and idx_x is not None:
+            maps_fft_prepared = np.take(maps_fft, idx_y, axis=1)
+            maps_fft_prepared = np.take(maps_fft_prepared, idx_x, axis=2)
+        else:
+            maps_fft_prepared = maps_fft
+
         bundle["k_indices_y"] = idx_y
         bundle["k_indices_x"] = idx_x
-        bundle["calculator_payload"] = getattr(psd_calc, "payload", None)
+        bundle["calculator_payload"] = getattr(precision_calc, "payload", None)
         bundle["fields"] = None if source_fields is None else np.asarray(source_fields, dtype=object)
+        bundle["debug"] = debug
         return maps_fft_prepared, bundle
-
-    def _compute_precision_per_source(
-        self,
-        psd_calc,
-        maps_clean: np.ndarray,
-        source_fields: np.ndarray,
-        idx_y: Optional[np.ndarray],
-        idx_x: Optional[np.ndarray],
-    ) -> Optional[np.ndarray]:
-        """Return precision tensors per source for Fourier-space analyses."""
-        if self.config.chi2_method != "fourier":
-            return None
-
-        if hasattr(psd_calc, "set_source_fields"):
-            psd_calc.set_source_fields(source_fields)
-
-        method = self.config.noise_psd_method
-        if method == "multiband_covariance":
-            return self._precision_from_multiband_covariance(psd_calc, maps_clean, source_fields, idx_y, idx_x)
-        if method == "pca_multiband_covariance":
-            return self._precision_from_pca_multiband(psd_calc, maps_clean, source_fields, idx_y, idx_x)
-        if method == "parametric_precision":
-            precision = np.asarray(psd_calc.calculate_noise_psd(maps_clean)).astype(self.config.dtype_np_complex)
-            return precision
-
-        psd = np.asarray(psd_calc.calculate_noise_psd(maps_clean)).astype(self.config.dtype_np_real)
-        n_src = maps_clean.shape[0]
-        if psd.ndim == 4:
-            psd = np.broadcast_to(psd, (n_src,) + psd.shape)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            precision = np.reciprocal(psd)
-        precision = np.where(np.isfinite(precision), precision, 0.0).astype(self.config.dtype_np_real)
-        precision = self._truncate_fourier_numpy(precision, idx_y, idx_x, axis_y=1, axis_x=2)
-        return precision
-
-    def _precision_from_multiband_covariance(
-        self,
-        psd_calc,
-        maps_clean: np.ndarray,
-        source_fields: np.ndarray,
-        idx_y: Optional[np.ndarray],
-        idx_x: Optional[np.ndarray],
-    ) -> np.ndarray:
-        """Compute per-source precision matrices for multiband covariance methods."""
-        unique_fields = np.unique(source_fields)
-        precision_by_field: Dict[str, np.ndarray] = {}
-
-        for field in unique_fields:
-            field_indices = np.where(source_fields == field)[0]
-            field_maps = maps_clean[field_indices]
-            covariance_psd = np.asarray(psd_calc.calculate_noise_psd(field_maps)).astype(self.config.dtype_np_real)
-            precision_grid = self._invert_covariance_stack(covariance_psd)
-            precision_grid = self._truncate_fourier_numpy(precision_grid, idx_y, idx_x, axis_y=0, axis_x=1)
-            precision_by_field[field] = precision_grid
-
-        sample = next(iter(precision_by_field.values()))
-        precision_per_source = np.zeros((maps_clean.shape[0],) + sample.shape, dtype=sample.dtype)
-
-        for field, precision_grid in precision_by_field.items():
-            indices = np.where(source_fields == field)[0]
-            repeated = np.broadcast_to(precision_grid, (len(indices),) + precision_grid.shape)
-            precision_per_source[indices] = repeated
-
-        return precision_per_source
-
-    def _precision_from_pca_multiband(
-        self,
-        psd_calc,
-        maps_clean: np.ndarray,
-        source_fields: np.ndarray,
-        idx_y: Optional[np.ndarray],
-        idx_x: Optional[np.ndarray],
-    ) -> np.ndarray:
-        """Compile PCA-based precision matrices per source."""
-        unique_fields = np.unique(source_fields)
-        precision_by_field: Dict[str, np.ndarray] = {}
-
-        for field in unique_fields:
-            field_indices = np.where(source_fields == field)[0]
-            field_maps = maps_clean[field_indices]
-            precision_grid = np.asarray(psd_calc.calculate_noise_psd(field_maps)).astype(self.config.dtype_np_complex)
-            precision_grid = self._truncate_fourier_numpy(precision_grid, idx_y, idx_x, axis_y=0, axis_x=1)
-            precision_by_field[field] = precision_grid
-
-        sample = next(iter(precision_by_field.values()))
-        precision_per_source = np.zeros((maps_clean.shape[0],) + sample.shape, dtype=sample.dtype)
-
-        for field, precision_grid in precision_by_field.items():
-            indices = np.where(source_fields == field)[0]
-            repeated = np.broadcast_to(precision_grid, (len(indices),) + precision_grid.shape)
-            precision_per_source[indices] = repeated
-
-        return precision_per_source
-
-    def _truncate_fourier_numpy(self, array: Optional[np.ndarray], idx_y, idx_x, axis_y: int, axis_x: int):
-        """Return array truncated along specified Fourier axes if indices are provided."""
-        if array is None or idx_y is None or idx_x is None:
-            return array
-        truncated = np.take(array, idx_y, axis=axis_y)
-        truncated = np.take(truncated, idx_x, axis=axis_x)
-        return truncated
-
-    def _project_to_spd(self, matrix: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-        """Project a covariance matrix to the nearest symmetric positive-definite matrix."""
-        symm = 0.5 * (matrix + matrix.T)
-        diag = np.diag(symm)
-        positive_diag = diag[diag > 0]
-        scale = np.median(positive_diag) if positive_diag.size else 1.0
-        floor = eps * scale
-        eigvals, eigvecs = np.linalg.eigh(symm)
-        eigvals = np.maximum(eigvals, floor)
-        return eigvecs @ np.diag(eigvals) @ eigvecs.T
-
-    def _invert_covariance_stack(self, covariance_psd: np.ndarray) -> np.ndarray:
-        """Invert a stack of covariance matrices with regularization."""
-        ny, nx = covariance_psd.shape[:2]
-        n_bands = len(self.config.bands)
-        n_stokes = 3
-        n_dim = n_bands * n_stokes
-        precision = np.zeros((ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_complex)
-
-        for iy in range(ny):
-            for ix in range(nx):
-                cov = covariance_psd[iy, ix].reshape(n_dim, n_dim)
-                cov_spd = self._project_to_spd(cov, eps=1e-5)
-                prec = np.linalg.inv(cov_spd)
-                prec = 0.5 * (prec + prec.T)
-                precision[iy, ix] = prec.reshape(n_bands, n_stokes, n_bands, n_stokes)
-
-        return precision
 
     def _validate_skip_sources(self):
         """Check that skip_sources exist in data files."""
