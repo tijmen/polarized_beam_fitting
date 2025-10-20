@@ -63,8 +63,8 @@ class BeamPlotter:
 
     def _apply_ell_cut_indices(self, array_2d):
         """Apply fitter's ell truncation indices to a 2D Fourier array if needed."""
-        idx_y = getattr(self.base_fitter.state, "k_indices_y", None)
-        idx_x = getattr(self.base_fitter.state, "k_indices_x", None)
+        idx_y = getattr(self.base_fitter, "k_indices_y", None)
+        idx_x = getattr(self.base_fitter, "k_indices_x", None)
         if idx_y is None or idx_x is None:
             return array_2d
         if array_2d.shape[0] != len(idx_y) or array_2d.shape[1] != len(idx_x):
@@ -121,8 +121,8 @@ class BeamPlotter:
             print("No skip_sources specified for template projection analysis")
             return []
 
-        maps_numpy = np.array(self.base_fitter.state.maps_jax)
-        source_ids = self.base_fitter.state.source_ids
+        maps_numpy = np.array(self.base_fitter.maps_jax)
+        source_ids = self.base_fitter.source_ids
         flux = best_fit_params["sources"]["flux"]
 
         filenames = []
@@ -532,7 +532,7 @@ class BeamPlotter:
             print("Skipping source diagnostic plots (n_diagnostic_plots = 0)")
             return []
 
-        total_sources = len(self.base_fitter.state.source_ids)
+        total_sources = len(self.base_fitter.source_ids)
         if isinstance(n_sources, str) and n_sources.lower() == "all":
             n_to_plot = total_sources
             print(f"\n--- Generating Data/Model/Residual Maps for All {n_to_plot} Sources ---")
@@ -543,9 +543,9 @@ class BeamPlotter:
         if central_crop is not None:
             print(f"Using central {central_crop}x{central_crop} pixel crop")
 
-        maps_numpy = np.array(self.base_fitter.state.maps_jax)
+        maps_numpy = np.array(self.base_fitter.maps_jax)
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
-        source_ids = self.base_fitter.state.source_ids
+        source_ids = self.base_fitter.source_ids
         flux = best_fit_params["sources"]["flux"]
 
         # Rank sources by polarization amplitude in the primary band
@@ -683,10 +683,10 @@ class BeamPlotter:
             List of filenames if saved, empty list otherwise
         """
         print("\n--- Generating ASD Analysis ---")
-        maps_numpy = np.array(self.base_fitter.state.maps_jax)
+        maps_numpy = np.array(self.base_fitter.maps_jax)
         model_maps = self.base_fitter.create_model_maps(best_fit_params)
         flux = best_fit_params["sources"]["flux"]
-        source_ids = self.base_fitter.state.source_ids
+        source_ids = self.base_fitter.source_ids
 
         filenames = []
         for band_idx, band in enumerate(self.fitter.config.bands):
@@ -708,7 +708,7 @@ class BeamPlotter:
 
     def _create_asd_plot_for_source(self, source_id, source_idx, band, band_idx, data_maps, model_maps, save):
         """Helper to create a single ASD plot for a given source and band."""
-        if self.base_fitter.state.precision_jax is None:
+        if self.base_fitter.precision_jax is None:
             print("ASD analysis requires Fourier precision; skipping.")
             return None
 
@@ -733,7 +733,7 @@ class BeamPlotter:
             asd_model = self._compute_asd_with_ell_cut(m_map)
             asd_residual = self._compute_asd_with_ell_cut(r_map)
 
-            precision_all = np.array(self.base_fitter.state.precision_jax)
+            precision_all = np.array(self.base_fitter.precision_jax)
             if precision_all.ndim == 5:
                 precision = precision_all[source_idx, :, :, band_idx, i]
             elif precision_all.ndim == 7:

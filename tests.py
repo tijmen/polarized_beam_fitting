@@ -17,6 +17,7 @@ from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
 from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
+from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.precision import (
     ClusterfinderPSDCalculator,
     CmbPcaPerFieldCalculator,
@@ -25,7 +26,6 @@ from polarized_beam_fitting.precision import (
     ParametricPrecisionCalculator,
     PcaMultiBandCalculator,
 )
-from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.utils import (
     calculate_tod_nyquist_radial_mask_smooth,
     compute_2d_asd,

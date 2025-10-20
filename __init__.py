@@ -19,20 +19,20 @@ from .bootstrap import BootstrapBeamFitter
 from .config import BeamFittingConfig
 from .fields import FieldCatalog
 from .fitter import PolarizedBeamFitter
+from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
 from .precision import (
     ClusterfinderPSDCalculator,
     CmbPcaPerFieldCalculator,
     EnsembleAsdMeanCalculator,
     KxAveragedCalculator,
     MultiBandCovarianceCalculator,
-    PrecisionCalculator,
     ParametricPrecisionCalculator,
     PcaMultiBandCalculator,
     PcaPsdSeparateTQUCalculator,
+    PrecisionCalculator,
     WhiteNoiseCalculator,
     create_precision_calculator,
 )
-from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
 from .source_fitting import fit_map_amplitude, gaussfit_source
 from .utils import (
     check_zero_fraction,

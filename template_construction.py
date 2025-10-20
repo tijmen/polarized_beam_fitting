@@ -110,7 +110,7 @@ def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitte
     """Extract raw T/Q/U maps from the G3 file for sources present in the fitter state."""
     raw_maps_data: Dict[str, Dict[str, np.ndarray]] = {}
     band = config.bands[0]
-    source_ids = set(fitter.state.source_ids)
+    source_ids = set(fitter.source_ids)
 
     filenames = config.coadd_file_list
     if not filenames:
@@ -156,7 +156,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
 
     fitter = PolarizedBeamFitter(config)
     best_fit_params = fitter.run_fit()
-    all_source_ids = np.asarray(fitter.state.source_ids)
+    all_source_ids = np.asarray(fitter.source_ids)
 
     map_shape = (config.map_size_pix, config.map_size_pix)
     y_coords = np.arange(-map_shape[0] // 2, map_shape[0] // 2)

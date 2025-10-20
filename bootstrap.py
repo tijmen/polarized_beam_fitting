@@ -225,7 +225,7 @@ class BootstrapBeamFitter:
 
     def _prepare_bootstrap_weights(self):
         """Prepare bootstrap weight arrays."""
-        n_sources = len(self.base_fitter.state.source_ids)
+        n_sources = len(self.base_fitter.source_ids)
 
         # Generate all bootstrap indices at once
         self.rng_key, subkey = jax.random.split(self.rng_key)
@@ -294,16 +294,14 @@ class BootstrapBeamFitter:
             return build_bootstrap_chi2_fourier(
                 self.config,
                 self.base_fitter.beam_models,
-                self.base_fitter.state.y_grid,
-                self.base_fitter.state.x_grid,
-                self.base_fitter.state.apod_mask_broadcast,
-                self.base_fitter.state.k_indices_y,
-                self.base_fitter.state.k_indices_x,
+                self.base_fitter.y_grid,
+                self.base_fitter.x_grid,
+                self.base_fitter.apod_mask_broadcast,
+                self.base_fitter.k_indices_y,
+                self.base_fitter.k_indices_x,
             )
         else:
-            return build_bootstrap_chi2_real(
-                self.config, self.base_fitter.beam_models, self.base_fitter.state.y_grid, self.base_fitter.state.x_grid
-            )
+            return build_bootstrap_chi2_real(self.config, self.base_fitter.beam_models, self.base_fitter.y_grid, self.base_fitter.x_grid)
 
     def _run_bootstrap_fits(self):
         """Run all bootstrap fits with smart warm-starting."""
@@ -409,7 +407,7 @@ class BootstrapBeamFitter:
 
     @property
     def source_ids(self):
-        return self.base_fitter.state.source_ids
+        return self.base_fitter.source_ids
 
     @property
     def latest_chi2s(self):
@@ -421,7 +419,7 @@ class BootstrapBeamFitter:
 
     @property
     def precision_numpy(self):
-        return np.array(self.base_fitter.state.precision_jax) if self.base_fitter.state.precision_jax is not None else None
+        return np.array(self.base_fitter.precision_jax) if self.base_fitter.precision_jax is not None else None
 
     @property
     def noise_psd_numpy(self):
@@ -435,4 +433,4 @@ class BootstrapBeamFitter:
 
     @property
     def maps_numpy(self):
-        return np.array(self.base_fitter.state.maps_jax)
+        return np.array(self.base_fitter.maps_jax)

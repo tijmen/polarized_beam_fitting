@@ -1077,7 +1077,9 @@ class PcaMultiBandCalculator(PrecisionCalculator):
             components_real = pca.components_[:, :n_features]
             components_imag = pca.components_[:, n_features:]
             components_complex = (
-                (components_real + 1j * components_imag).reshape(n_components, ny, nx, n_bands, n_stokes).astype(self.config.dtype_np_complex)
+                (components_real + 1j * components_imag)
+                .reshape(n_components, ny, nx, n_bands, n_stokes)
+                .astype(self.config.dtype_np_complex)
             )
 
             eigenvalues = pca.explained_variance_ * n_src

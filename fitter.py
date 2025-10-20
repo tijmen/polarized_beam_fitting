@@ -32,6 +32,7 @@ from .utils import (
     params_to_logit,
 )
 
+
 class ObjectiveFunctions:
     """Encapsulates objective function logic."""
 
@@ -375,11 +376,6 @@ class PolarizedBeamFitter:
         }
 
         return params
-
-    @property
-    def state(self):
-        """Backward-compatible alias exposing fitter attributes under `.state`."""
-        return self
 
     def run_fit(self) -> Dict:
         """
