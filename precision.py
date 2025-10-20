@@ -9,8 +9,9 @@ differences is whether the noise PSD is fully diagonal (each ky,kx,band,stokes
 is separate) or only diagonal in Fourier space (ky,ky independent, but band-band
 and stokes-stokes off-diagonals).
 We will use config.noise_psd_method to decide.
-Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pca_psd, pca_psd_separate_tqu, cmb_pca_perfield] are fully diagonal,
-and [multiband_covariance] is only diagonal in Fourier space. # TODO update this docstring
+Currently, [clusterfinder_psd, kx_averaged, white_noise, ensemble_asd_mean, pca_psd, pca_psd_separate_tqu]
+are fully diagonal in (band, stokes). [multiband_covariance, cmb_pca_perfield]
+are not, as they model band and/or Stokes correlations.
 """
 
 from abc import ABC, abstractmethod
@@ -1238,7 +1239,7 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         diag_regularized = self._regularize_diagonals(diag_original, ell_x_grid, ell_y_grid)
         print("PCA regularization complete.")
 
-        residual = cov_no_cmb.copy()
+        residual = np.zeros_like(cov_no_cmb)
         for band in range(n_bands):
             for stokes in range(3):
                 residual[:, :, :, band, stokes, band, stokes] = diag_regularized[:, :, :, band, stokes]
@@ -1280,26 +1281,37 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         """PCA-regularize diagonals per band, stokes, field and apply white-noise floor clipping."""
         n_src, ny, nx, n_bands, n_stokes = diagonals.shape
         field_labels = self._resolve_field_labels(n_src)
-        regularized = np.empty_like(diagonals)
+        # convert from complex to real
+        diagonals = np.real(diagonals).astype(np.float64)  # real part of input
+        regularized = np.zeros_like(diagonals, dtype=np.float64)  # output
 
         for field in np.unique(field_labels):
             indices = np.where(field_labels == field)[0]
             if indices.size == 0:
-                continue
+                print(f"Warning, no sources found for field {field}!")
             print(f"  PCA regularization for field {field} with {indices.size} sources.")
             for band in range(n_bands):
                 for stokes in range(n_stokes):
                     samples = diagonals[indices, :, :, band, stokes].reshape(indices.size, -1)
                     mean = samples.mean(axis=0, dtype=np.float64)
                     centered = samples - mean
-                    n_components = min(self.config.n_pca_components, indices.size - 1)
+                    n_components = self.config.n_pca_components
+                    if n_components >= indices.size:
+                        print(
+                            f"Warning: n_pca_components ({n_components}) is >= number of sources ({indices.size}) for field {field}. "
+                            f"Reducing to {indices.size - 1} to avoid overfitting."
+                        )
+                        n_components = indices.size - 1
                     if n_components > 0:
+                        print(f"Applying PCA order {n_components} to field {field} band {band} stokes {stokes}.")
                         pca = PCA(n_components=n_components, svd_solver="randomized", random_state=42)
-                        centered_float = centered.astype(np.float64, copy=False)
-                        transformed = pca.fit_transform(centered_float)
+                        transformed = pca.fit_transform(centered)
                         reconstructed = pca.inverse_transform(transformed)
                     else:  # allow for no PCA
+                        print(f"No PCA applied to field {field} band {band} stokes {stokes}.")
                         reconstructed = np.zeros_like(centered)
+
+                    reconstructed = np.clip(reconstructed, 0.0, 0.0)  # this models the non-CMB sources of noise, must be positive
                     samples_reconstructed = reconstructed + mean
                     regularized[indices, :, :, band, stokes] = samples_reconstructed.reshape(indices.size, ny, nx)
 

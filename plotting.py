@@ -764,7 +764,7 @@ class BeamPlotter:
             log_asd_ratio = np.log10(asd_ratio + 1e-20)
             vmin = 0.9 * np.min(log_asd_ratio)
             vmax = 1.1 * np.max(log_asd_ratio)
-            im_ratio = axes[i, 3].imshow(log_asd_ratio, cmap="RdBu_r", vmin=vmin, vmax=vmax)
+            im_ratio = axes[i, 3].imshow(log_asd_ratio, cmap="viridis", vmin=vmin, vmax=vmax)
 
             fig.colorbar(im_d, ax=axes[i, 0], label="log10(ASD)")
             fig.colorbar(im_m, ax=axes[i, 1], label="log10(ASD)")
