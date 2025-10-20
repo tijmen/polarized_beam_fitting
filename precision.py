@@ -20,12 +20,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import camb
 import numpy as np
 from astropy.io import fits
+from scipy.ndimage import convolve
 from sklearn.decomposition import PCA
 
 from .utils import (
     compute_fourier_frequency_axes,
     compute_rectangular_ell_cut_indices,
     make_apod_mask_center_excised,
+    make_apodization_mask,
 )
 
 PARAMETRIC_PRECISION_SUPERSAMPLING = 8
@@ -216,7 +218,7 @@ def _compute_cmb_covariance(
     cl_bb_raw = powers["total"][:, 2]
     cl_te_raw = powers["total"][:, 3]
 
-    hp_filter = _smooth_highpass_1d(ell_camb, 360.0, 420.0)
+    hp_filter = _smooth_highpass_1d(ell_camb, 360.0, 720.0)
     cl_tt = cl_tt_raw * hp_filter
     cl_ee = cl_ee_raw * hp_filter
     cl_bb = cl_bb_raw * hp_filter
@@ -252,15 +254,27 @@ def _compute_cmb_covariance(
     cov_tqu_highres[..., 1, 1] = C_EE * c2phi**2 + C_BB * s2phi**2
     cov_tqu_highres[..., 2, 2] = C_EE * s2phi**2 + C_BB * c2phi**2
     cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (C_EE - C_BB) * s2phi * c2phi
-
-    # convolve with the FFT of the full apod mask
-
+    print("Calculated CMB covariance on high-resolution grid...")
     cov_shifted = np.fft.fftshift(cov_tqu_highres, axes=(0, 1))
-    cov_shifted = cov_shifted.reshape(ny, PARAMETRIC_PRECISION_SUPERSAMPLING, nx, PARAMETRIC_PRECISION_SUPERSAMPLING, 3, 3).mean(
-        axis=(1, 3)
-    )
-    cov_tqu = np.fft.ifftshift(cov_shifted, axes=(0, 1))
+    # convolve with the FFT of the full apod mask
+    print("Building apod mask for CMB covariance convolution...")
+    apod_mask = make_apodization_mask((ny_highres, nx_highres), config.apodization_width_pix * PARAMETRIC_PRECISION_SUPERSAMPLING)
+    apod_mask_fft = np.fft.fft2(apod_mask)
+    power_window = (np.abs(apod_mask_fft) ** 2) / (
+        ny_highres * nx_highres
+    )  # NOTE: this takes care of the effective area not being exactly ny x nx, don't repeat this correction!
+    cov_shifted_convolved_hires = np.zeros_like(cov_shifted)
+    print("Convolving CMB covariance with apodization mask...")
+    for s1 in range(3):
+        for s2 in range(3):
+            print(f"Convolving {s1}, {s2}...")
+            cov_shifted_convolved_hires[:, :, s1, s2] = convolve(cov_shifted[:, :, s1, s2], power_window, mode="constant", cval=0.0)
+    cov_shifted_convolved = cov_shifted_convolved_hires.reshape(
+        ny, PARAMETRIC_PRECISION_SUPERSAMPLING, nx, PARAMETRIC_PRECISION_SUPERSAMPLING, 3, 3
+    ).mean(axis=(1, 3))
+    cov_tqu = np.fft.ifftshift(cov_shifted_convolved, axes=(0, 1))
 
+    print("Applying CMB calibration factors...")
     cov_cmb = np.zeros((ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
     for iband in range(n_bands):
         for istokes in range(3):
@@ -1199,19 +1213,17 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
         ) / (omega_eff * omega_pix)
 
         print(f"Largest ell_x value in covariance: {float(np.max(ell_x_grid)):.2f}")
-        print(f"Data covariance diag mean (mK^2) before CMB subtraction: {float(np.mean(covariance[..., 0, 0, 0, 0])):.6e}")
-        _print_rms_summary("Total covariance RMS", covariance, self.config)
+        _print_rms_summary("Average noise (all ell modes)", covariance, self.config)
 
         ny, nx = ell_x_grid.shape
         print("Calculating expected CMB covariance...")
         cov_cmb = _compute_cmb_covariance(self.config, ny, nx, ell_x_grid, ell_y_grid, ell_radial, n_bands)
         cov_cmb = cov_cmb / omega_pix
         cov_cmb *= 1e-6  # Convert CAMB µK^2 spectrum to mK^2 in our discrete normalization.
-        print(f"CMB covariance diag mean (mK^2): {float(np.mean(cov_cmb[..., 0, 0, 0, 0])):.6e}")
-        _print_rms_summary("CMB covariance RMS", cov_cmb[None, ...], self.config)
+        _print_rms_summary("Average CMB noise (all ell modes)", cov_cmb[None, ...], self.config)
 
         cov_no_cmb = covariance - cov_cmb[None, :, :, :, :, :, :]
-        _print_rms_summary("Residual covariance RMS (pre-regularization)", cov_no_cmb, self.config)
+        _print_rms_summary("Average noise (after CMB subtraction)", cov_no_cmb, self.config)
 
         diag_original = self._extract_diagonals(cov_no_cmb)
         print("Applying PCA to regularize band-stokes diagonal noise PSDs...")
@@ -1228,8 +1240,8 @@ class CmbPcaPerFieldCalculator(PrecisionCalculator):
                 residual[:, :, :, band, stokes, band, stokes] = diag_bounded[:, :, :, band, stokes]
 
         covariance_model = residual + cov_cmb[None, :, :, :, :, :, :]
-        _print_rms_summary("Regularized residual covariance RMS", residual, self.config)
-        _print_rms_summary("Final covariance RMS", covariance_model, self.config)
+        _print_rms_summary("Average noise (after PCA regularization)", residual, self.config)
+        _print_rms_summary("Average noise (after PCA regularization and adding CMB)", covariance_model, self.config)
         print("Covariance matrix calculation complete.")
 
         precision = self._covariance_to_precision(covariance_model)
