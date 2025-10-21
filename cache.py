@@ -31,7 +31,7 @@ class CacheManager:
             "use_precomputed_leakage_templates": self.config.use_precomputed_leakage_templates,  # leakage template subtraction happens before caching
             "leakage_template_dir": self.config.leakage_template_dir,  # leakage template subtraction detail
             "chi2_method": self.config.chi2_method,  # different chi2 calculation. if this is real_space, we don't need to take FFTs
-            "noise_psd_method": self.config.noise_psd_method,  # different covariances/PSDs/precision matrices
+            "covariance_method": self.config.covariance_method,  # different covariance/precision
         }
         # Create a stable string representation
         param_string = str(sorted(relevant_params.items()))

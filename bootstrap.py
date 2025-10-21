@@ -422,15 +422,5 @@ class BootstrapBeamFitter:
         return np.array(self.base_fitter.precision_jax) if self.base_fitter.precision_jax is not None else None
 
     @property
-    def noise_psd_numpy(self):
-        precision = self.precision_numpy
-        if precision is None:
-            return None
-        with np.errstate(divide="ignore", invalid="ignore"):
-            psd = np.reciprocal(precision)
-        psd = np.where(np.isfinite(psd), psd, np.inf)
-        return psd
-
-    @property
     def maps_numpy(self):
         return np.array(self.base_fitter.maps_jax)

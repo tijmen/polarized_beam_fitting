@@ -78,7 +78,7 @@ class DataLoader:
     def _build_noise_bundle(self, maps_clean: np.ndarray, maps_fft: Optional[np.ndarray], source_fields: np.ndarray):
         """Compute and package noise-model artifacts for caching."""
         bundle: Dict[str, Any] = {
-            "method": self.config.noise_psd_method,
+            "method": self.config.covariance_method,
             "precision": None,
             "k_indices_y": None,
             "k_indices_x": None,

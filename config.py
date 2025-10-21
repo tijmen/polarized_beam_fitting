@@ -65,11 +65,10 @@ class BeamFittingConfig:
     knot_spacing_arcmin = 0.4
     spline_k = 4  # Cubic B-spline
     spline_rmax_arcmin = 10.0
-    beam_model_type = "beta_pol"  # 'bsplines', 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
+    beam_model_type = "beta_pol"  # 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
     bsplines_gaussian_rmin_arcmin = 0.5
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
     beam_model_bounds = {
-        "bsplines": {"T_coeffs": (-0.5, 1.5), "P_coeffs": (-0.5, 1.5)},
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
         "beta_pol": {"beta_pol": (-0.5, 2.0)},
         "beta_T": {"beta_T": (-0.5, 2.0)},
@@ -123,22 +122,18 @@ class BeamFittingConfig:
 
     # === Noise and chi-squared evaluation ===
     chi2_method = "fourier"  # "fourier" or "real_space"
-    # noise_psd_method options:
-    #   "clusterfinder_psd"          : load fixed PSD from FITS (single-band only).
-    #   "kx_averaged"                : 1D PSD averaged along kx, diagonal in (band, stokes).
-    #   "ensemble_asd_mean"          : take ASD per source, average, square back to PSD per band/stokes.
-    #   "white_noise"                : unit PSD with 2× scaling for Q/U (simple test case).
-    #   "multiband_covariance"       : full (band × stokes) covariance estimated from source ensemble.
-    #   "pca_multiband_covariance"   : PCA-regularized multiband covariance (complex precision output).
-    #   "parametric_precision"       : CAMB + analytic noise model yielding dense precision matrices.
-    #   "pca_psd_separate_tqu"       : log-space PCA per stokes, diagonal in band; default.
-    #   "cmb_pca_perfield"           : PCA-regularized CMB precision estimator.
-    noise_psd_method = "cmb_pca_perfield"
+    # covariance_method options:
+    #   "clusterfinder_psd"        : load fixed instrument covariance from FITS (single-band only).
+    #   "kx_averaged"              : diagonal covariance with k_y-averaged k_x statistics.
+    #   "mean_amplitude_spectrum"  : diagonal covariance from ensemble-averaged amplitude spectra.
+    #   "pca"                      : log-space PCA per Stokes parameter (diagonal model).
+    #   "cmb_pca"                  : subtract CAMB CMB covariance and PCA-regularize residuals.
+    #   "white_noise"              : unit covariance with 2× scaling for Q/U (test helper).
+    covariance_method = "cmb_pca"
     n_pca_components = 0  # How many components to use to model the per-source variation in noise properties. 0 assumes all sources sharing a field have the same noise properties
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data
-    parametric_precision_perfield_median = False  # Pool parametric precision tensors per field by median when enabled.
 
     # === Optimization and convergence ===
     solver = "tuned"  # "optimistix_bfgs", "optax_adam", "newton_pcg", "tuned"
