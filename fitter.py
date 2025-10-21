@@ -121,7 +121,7 @@ class ObjectiveFunctions:
         precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
         weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)
         chi2_per_k = jnp.einsum("yxv,yxv->yx", jnp.conj(residual_vec), weighted_vec)
-        return jnp.mean(jnp.real(chi2_per_k))
+        return jnp.sum(jnp.real(chi2_per_k))
 
     def _build_model(self, beam_params_list, yoff, xoff, flux):
         """Build beam model for all bands."""
