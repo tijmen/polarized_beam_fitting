@@ -421,9 +421,10 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         constraint_rows.append(np.array([bf.derivative()(r_min) for bf in basis_functions]))
         constraint_values.append(0.0)
 
-        # B(r_max) = 0
+        rmax_val = 1e-4
+        # B(r_max) = rmax_val
         constraint_rows.append(np.array([bf(r_max) for bf in basis_functions]))
-        constraint_values.append(0.0)
+        constraint_values.append(rmax_val)
 
         A = np.vstack(constraint_rows)
         _ = np.array(constraint_values)  # we don't actually need this if the boundary conditions are all zero
@@ -497,7 +498,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         # Check value at r_max
         boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
-        max_rmax_violation = np.max(np.abs(boundary_check_rmax))
+        max_rmax_violation = np.max(np.abs(boundary_check_rmax - rmax_val))
 
         print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
         print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")

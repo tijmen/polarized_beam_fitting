@@ -84,7 +84,7 @@ def _ensure_fft_cut_indices(map_shape: Tuple[int, int], config) -> Tuple[Optiona
     return idx_y, idx_x
 
 
-def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 360.0, ell1: float = 720.0) -> np.ndarray:
+def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 600.0, ell1: float = 800.0) -> np.ndarray:
     """Raised-cosine high-pass filter used to suppress large-scale CMB power."""
     print(f"Creating high-pass filter turning on between {ell0} and {ell1}...")
     hp_filter = np.ones_like(ell_vals, dtype=float)
@@ -547,7 +547,7 @@ class KxAveragedCalculator(PrecisionCalculator):
         precision = self._truncate_fourier_numpy(precision, idx_y, idx_x, axis_y=1, axis_x=2)
         return precision, None
 
-    def _calculate_individual_covariance(self, map_2d, noise_mask, sentinel_value=1e12):
+    def _calculate_individual_covariance(self, map_2d, noise_mask):
         """
         Calculate a single-map Fourier covariance using k_y averaging.
 
@@ -580,9 +580,6 @@ class KxAveragedCalculator(PrecisionCalculator):
             # Average this column (constant k_x) over all k_y
             col_avg = np.mean(covariance_2d[:, i])
             averaged_covariance[:, i] = col_avg
-
-        # Set k_x=0 modes to sentinel value to avoid division by zero
-        averaged_covariance[:, 0] = sentinel_value
 
         # Take element-wise maximum to avoid scattered low values (heuristic)
         covariance = np.maximum(averaged_covariance, covariance_2d)

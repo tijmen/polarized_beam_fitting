@@ -111,12 +111,12 @@ class BeamFittingConfig:
         "J032046-3837.4",  # too faint at 150
         "J034838-2749.2",  # second noisiest-source. Don't know why.
         "J045703-2324.8",  # noisiest source by a factor of 3! Definitely don't know why.
+        "J021046-5101.0",  # "focus quasar" Lots of S/N, but strong residuals
     ]
 
     # === Source selection & leakage handling ===
     min_t_amplitude = 300 * core.G3Units.uK
     max_zero_fraction = 0.05
-    exclude_from_leakage_template = None
     leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
     use_precomputed_leakage_templates = True  # Use offline templates stored on disk
 

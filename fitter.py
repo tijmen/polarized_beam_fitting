@@ -497,7 +497,6 @@ class PolarizedBeamFitter:
         This tuned procedure first aggressively allows this phenomenon to occur, then
         detects it and finishes the optimization with a gentle and robust completion using amsgrad.
         """
-        print("Starting tuned optimization...")
         self.config.adam_variant = "adam"  # start with aggressive Adam
         self.config.adam_kwargs = {"learning_rate": 5e-3}  # aggressive learning rate
         self.config.loss_history_length = 100  # go until Adam isn't improving anymore
