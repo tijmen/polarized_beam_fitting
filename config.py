@@ -110,8 +110,10 @@ class BeamFittingConfig:
         "J002430-2928.8",  # too faint at 150
         "J032046-3837.4",  # too faint at 150
         "J034838-2749.2",  # second noisiest-source. Don't know why.
-        "J045703-2324.8",  # noisiest source by a factor of 3! Definitely don't know why.
-        "J021046-5101.0",  # "focus quasar" Lots of S/N, but strong residuals
+        "J045703-2324.8",  # 3x noisier cutout map than others from this field?!
+        # "J021046-5101.0",  # "focus quasar" Lots of S/N, but strong residuals
+        # "J231544-5018.6",  # outlier rejection
+        # "J025329-5441.8",  # outlier rejection
     ]
 
     # === Source selection & leakage handling ===

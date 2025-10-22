@@ -248,6 +248,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
             for stokes_idx in range(n_stokes):
                 covariance_model[:, :, band_idx, stokes_idx, band_idx, stokes_idx] = white_noise_floors[band_idx, stokes_idx]
     elif config.precision_model_cmb:
+        raise NotImplementedError("Model CMB covariance is currently broken. Needs to be debugged.")
         print("Creating covariance from combining average data covariance and expected CMB covariance...")
         covariance_cmb = _compute_cmb_covariance(config, ny, nx)
         for band_idx_i in range(n_bands):
