@@ -28,9 +28,10 @@ from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
 from polarized_beam_fitting.utils import (
     apply_radial_lowpass,
+    ell_grid,
     make_apodization_mask,
     parse_declination,
-    predict_nyquist_kx,
+    predict_nyquist_ell_x,
     shift_map_bilinear,
 )
 
@@ -86,14 +87,17 @@ def safe_float(value) -> float:
 
 
 def prepare_frequency_grids(map_shape: Tuple[int, int], reso_arcmin: float) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Pre-compute |k| grid and taper width for filtering."""
+    """Pre-compute |ell| grid and taper width for filtering."""
     ny, nx = map_shape
     reso_deg = reso_arcmin / 60.0
+
+    # Get ell coordinates
+    _, _, ell_y_grid, ell_x_grid = ell_grid(map_shape, reso_arcmin)
+    ell_radius = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
+
+    # Compute frequency steps in k-space for taper width conversion
     ky_freq = np.fft.fftfreq(ny, d=reso_deg)
     kx_freq = np.fft.fftfreq(nx, d=reso_deg)
-    ky_grid, kx_grid = np.meshgrid(ky_freq, kx_freq, indexing="ij")
-    k_radius = np.sqrt(kx_grid**2 + ky_grid**2)
-
     freq_steps: Iterable[float] = []
     if ny > 1:
         freq_steps = [abs(ky_freq[1] - ky_freq[0])]
@@ -103,7 +107,8 @@ def prepare_frequency_grids(map_shape: Tuple[int, int], reso_arcmin: float) -> T
     taper_width_cpd = 0.0
     if freq_steps:
         taper_width_cpd = 5.0 * min(freq_steps)
-    return k_radius, reso_deg, taper_width_cpd
+
+    return ell_radius, reso_deg, taper_width_cpd
 
 
 def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitter) -> Dict[str, Dict[str, np.ndarray]]:
@@ -166,7 +171,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
     band_beam_params = best_fit_params["beams"][0]
 
     apod_mask = make_apodization_mask(map_shape, config.apodization_width_pix)
-    k_radius, _, taper_width_cpd = prepare_frequency_grids(map_shape, config.reso_arcmin)
+    ell_radius, _, taper_width_cpd = prepare_frequency_grids(map_shape, config.reso_arcmin)
     raw_maps_data = load_raw_maps_for_band(config, fitter)
 
     normalized_q_maps = []
@@ -202,12 +207,13 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
         u_residual = raw_maps["U"] - u_model
 
         declination = parse_declination(source_base)
-        nyquist_kx = predict_nyquist_kx(declination)
-        k_max_cpd = 0.85 * nyquist_kx if np.isfinite(nyquist_kx) else np.inf
-        source_kmax[source_base] = None if not np.isfinite(k_max_cpd) else float(k_max_cpd)
+        nyquist_ell_x = predict_nyquist_ell_x(declination)
+        ellmax = 0.85 * nyquist_ell_x if np.isfinite(nyquist_ell_x) else np.inf
+        source_kmax[source_base] = None if not np.isfinite(ellmax) else float(ellmax / 360.0)  # Keep as k for compatibility
 
-        q_filtered = apply_radial_lowpass(q_residual, apod_mask, k_radius, k_max_cpd, taper_width_cpd)
-        u_filtered = apply_radial_lowpass(u_residual, apod_mask, k_radius, k_max_cpd, taper_width_cpd)
+        taper_width_ell = 360.0 * taper_width_cpd
+        q_filtered = apply_radial_lowpass(q_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
+        u_filtered = apply_radial_lowpass(u_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
 
         q_normalized = q_filtered / t_amp
         u_normalized = u_filtered / t_amp

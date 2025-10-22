@@ -19,20 +19,10 @@ from .config import BeamFittingConfig
 from .fields import FieldCatalog
 from .fitter import PolarizedBeamFitter
 from .plotting import BeamPlotter, create_diagnostic_plots, create_mclmc_plots, create_nuts_plots
-from .precision import (
-    ClusterfinderPSDCalculator,
-    CmbPcaCalculator,
-    KxAveragedCalculator,
-    MeanAmplitudeSpectrumCalculator,
-    PcaCalculator,
-    PrecisionCalculator,
-    WhiteNoiseCalculator,
-    create_precision_calculator,
-)
+from .precision import calculate_precision
 from .source_fitting import fit_map_amplitude, gaussfit_source
 from .utils import (
     check_zero_fraction,
-    compute_2d_asd,
     from_logit,
     make_apod_mask_center_excised,
     make_apodization_mask,
@@ -55,7 +45,6 @@ __all__ = [
     "make_apodization_mask",
     "make_apod_mask_center_excised",
     "check_zero_fraction",
-    "compute_2d_asd",
     "safe_filename",
     "to_logit",
     "from_logit",
@@ -67,14 +56,7 @@ __all__ = [
     "BeamModelBetaPol",
     "BeamModelBetaTest",
     "BeamModelBSplinesGaussian",
-    "ClusterfinderPSDCalculator",
-    "KxAveragedCalculator",
-    "MeanAmplitudeSpectrumCalculator",
-    "PcaCalculator",
-    "CmbPcaCalculator",
-    "WhiteNoiseCalculator",
-    "PrecisionCalculator",
-    "create_precision_calculator",
+    "calculate_precision",
     "create_nuts_plots",
     "create_mclmc_plots",
 ]

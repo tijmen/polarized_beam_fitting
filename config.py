@@ -122,15 +122,13 @@ class BeamFittingConfig:
 
     # === Noise and chi-squared evaluation ===
     chi2_method = "fourier"  # "fourier" or "real_space"
-    # covariance_method options:
-    #   "clusterfinder_psd"        : load fixed instrument covariance from FITS (single-band only).
-    #   "kx_averaged"              : diagonal covariance with k_y-averaged k_x statistics.
-    #   "mean_amplitude_spectrum"  : diagonal covariance from ensemble-averaged amplitude spectra.
-    #   "pca"                      : log-space PCA per Stokes parameter (diagonal model).
-    #   "cmb_pca"                  : subtract CAMB CMB covariance and PCA-regularize residuals.
-    #   "white_noise"              : unit covariance with 2× scaling for Q/U (test helper).
-    covariance_method = "cmb_pca"
-    n_pca_components = 0  # How many components to use to model the per-source variation in noise properties. 0 assumes all sources sharing a field have the same noise properties
+
+    # === Precision estimation settings ===
+    precision_n_pca = 0  # Number of PCA components for modeling per-source noise variation. 0 = simple mean
+    precision_model_cmb = False  # Use CAMB to estimate CMB contribution to off-diagonals
+    precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
+    precision_white_noise = False  # Use simple white noise precision
+
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data

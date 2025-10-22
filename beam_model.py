@@ -502,7 +502,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
         print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
-        print(f"Boundary condition B(r_max) = 0: max violation = {max_rmax_violation:.2e}")
+        print(f"Boundary condition B(r_max) = {rmax_val}: max violation = {max_rmax_violation:.2e}")
 
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]

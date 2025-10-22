@@ -21,20 +21,17 @@ from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
 from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
 from polarized_beam_fitting.precision import (
-    ClusterfinderPSDCalculator,
-    CmbPcaCalculator,
     _compute_cmb_covariance,
-    _compute_covariance,
     _smooth_highpass_1d,
 )
 from polarized_beam_fitting.utils import (
     calculate_tod_nyquist_radial_mask_smooth,
-    compute_2d_asd,
-    compute_fourier_frequency_axes,
+    compute_rectangular_ell_cut_indices,
+    ell_grid,
     linear_interp_differentiable,
     make_apodization_mask,
     parse_declination,
-    predict_nyquist_kx,
+    predict_nyquist_ell_x,
     safe_filename,
     shift_map_bilinear,
 )
@@ -113,14 +110,14 @@ def _normalize_true_params(config, true_beam_params):
     raise TypeError("true_beam_params must be a dict or list of dicts.")
 
 
-def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None):
+def generate_mock_data(config, true_beam_params, n_sources=3):
     """
     Generate mock data based on a specific beam model and true parameters.
     """
     np.random.seed(42)
     shape = (config.map_size_pix, config.map_size_pix)
-    ny, nx = shape
-    y_grid, x_grid = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
+    ny_full, nx_full = shape
+    y_grid, x_grid = np.ogrid[-ny_full // 2 : ny_full // 2, -nx_full // 2 : nx_full // 2]
 
     band_params = _normalize_true_params(config, true_beam_params)
     n_bands = len(config.bands)
@@ -132,8 +129,8 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
     amp_high = np.array([1.1, 0.05, 0.05])
     true_amps = amp_low + (amp_high - amp_low) * np.random.uniform(size=(n_sources, n_bands, 3))
 
-    maps_numpy = np.zeros((n_sources, ny, nx, n_bands, 3), dtype=config.dtype_np_real)
-    weights_numpy = np.zeros((n_sources, ny, nx, n_bands, 3, 3), dtype=config.dtype_np_real)
+    maps_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3), dtype=config.dtype_np_real)
+    weights_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3, 3), dtype=config.dtype_np_real)
 
     for i in range(n_sources):
         for band_idx, beam_model in enumerate(beam_models):
@@ -171,30 +168,27 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
     gaussfit_initial_amp = true_amps
 
     raw_maps = np.zeros_like(maps_numpy)
-    qu_templates = np.zeros((ny, nx, n_bands, 2))
+    qu_templates = np.zeros((ny_full, nx_full, n_bands, 2))
     source_ids = np.array([f"mock_source_{i}" for i in range(n_sources)])
     source_fields = np.array(["mock_field" for _ in range(n_sources)], dtype=object)
 
-    if noise_payload is None:
-        if config.chi2_method == "fourier":
-            precision_placeholder = np.ones((n_sources, ny, nx, n_bands, 3), dtype=config.dtype_np_real)
-            noise_payload = {
-                "method": config.covariance_method,
-                "precision": precision_placeholder,
-                "k_indices_y": None,
-                "k_indices_x": None,
-                "calculator_payload": None,
-                "debug": None,
-            }
+    if config.chi2_method == "fourier":
+        # Apply the same ell truncation as the real data loader
+        idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), config.reso_arcmin, config.ellmax)
+        if idx_y is not None and idx_x is not None:
+            ny, nx = len(idx_y), len(idx_x)
+            # Truncate maps to match precision matrix size
+            maps_numpy = maps_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
+            maps_fft_numpy = maps_fft_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
+            weights_numpy = weights_numpy[:, idx_y, :, :, :, :][:, :, idx_x, :, :, :]
+            qu_templates = qu_templates[idx_y, :, :, :][:, idx_x, :, :]
+            precision_placeholder = np.ones((n_sources, ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
         else:
-            noise_payload = {
-                "method": config.covariance_method,
-                "precision": None,
-                "k_indices_y": None,
-                "k_indices_x": None,
-                "calculator_payload": None,
-                "debug": None,
-            }
+            precision_placeholder = np.ones((n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
+        debug_placeholder = None
+    else:
+        precision_placeholder = None
+        debug_placeholder = None
 
     return (
         gaussfit_yoff,
@@ -208,7 +202,8 @@ def generate_mock_data(config, true_beam_params, n_sources=3, noise_payload=None
         source_ids,
         source_fields,
         n_sources,
-        noise_payload,
+        precision_placeholder,
+        debug_placeholder,
     )
 
 
@@ -276,14 +271,13 @@ class TestEndToEndRecovery(unittest.TestCase):
         config,
         true_params,
         assertion_func,
-        noise_payload=None,
     ):
         if config.double_precision:
             jax.config.update("jax_enable_x64", True)
         else:
             jax.config.update("jax_enable_x64", False)
 
-        mock_data = generate_mock_data(config, true_params, noise_payload=noise_payload)
+        mock_data = generate_mock_data(config, true_params)
         mock_data_loader.return_value.load_and_prepare.return_value = mock_data
 
         fitter = PolarizedBeamFitter(config=config)
@@ -518,12 +512,10 @@ class TestCmbCovarianceNormalization(unittest.TestCase):
         reso_deg = config.reso_arcmin / 60.0
 
         apod_mask = make_apodization_mask((ny, nx), config.apodization_width_pix).astype(config.dtype_np_real)
-        _, _, ky_grid, kx_grid = compute_fourier_frequency_axes((ny, nx), config.reso_arcmin)
-        ell_x_grid = 360.0 * kx_grid
-        ell_y_grid = 360.0 * ky_grid
+        _, _, ell_y_grid, ell_x_grid = ell_grid((ny, nx), config.reso_arcmin)
         ell_radial = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
 
-        cov_cmb = _compute_cmb_covariance(config, ny, nx, ell_x_grid, ell_y_grid, ell_radial, len(config.bands))
+        cov_cmb = _compute_cmb_covariance(config, ny, nx)
         expected_tt = cov_cmb[:, :, 0, 0, 0, 0]
 
         pars = camb.CAMBparams()
@@ -610,8 +602,8 @@ class TestUtilsFunctions(unittest.TestCase):
     def test_parse_declination_and_nyquist(self):
         decl = parse_declination("J123456-1234.5")
         self.assertAlmostEqual(decl, -12 - 34.5 / 60.0)
-        kx = predict_nyquist_kx(decl)
-        self.assertTrue(np.isfinite(kx))
+        ell_x = predict_nyquist_ell_x(decl)
+        self.assertTrue(np.isfinite(ell_x))
 
     def test_calculate_tod_mask_smooth(self):
         config = get_test_config(map_size_pix=8)
@@ -631,13 +623,6 @@ class TestUtilsFunctions(unittest.TestCase):
         grad_fn = jax.grad(lambda z: jnp.sum(linear_interp_differentiable(z, xp, fp, config)))
         grads = grad_fn(x_query)
         self.assertTrue(np.all(np.isfinite(np.array(grads))))
-
-    def test_compute_2d_asd(self):
-        grid = np.zeros((8, 8))
-        grid[4, 4] = 1.0
-        asd = compute_2d_asd(grid)
-        self.assertEqual(asd.shape, grid.shape)
-        self.assertGreater(asd[4, 4], 0.0)
 
     def test_safe_filename(self):
         self.assertEqual(safe_filename("J123456-1234.5"), "J123456_1234_5")

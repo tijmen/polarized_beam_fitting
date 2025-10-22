@@ -25,6 +25,7 @@ from .utils import (
     build_whitening_transform,
     calculate_tod_nyquist_radial_mask_smooth,
     check_convergence,
+    compute_rectangular_ell_cut_indices,
     init_convergence_state,
     make_apodization_mask,
     newton_step_pcg_whitened,
@@ -102,9 +103,9 @@ class ObjectiveFunctions:
         model = self._build_model(beam_params_list, yoff, xoff, flux)
         model_apod = model * self.fitter.apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
-        if self.fitter.k_indices_y is not None and self.fitter.k_indices_x is not None:
-            model_fft = jnp.take(model_fft, self.fitter.k_indices_y, axis=0)
-            model_fft = jnp.take(model_fft, self.fitter.k_indices_x, axis=1)
+        if self.fitter.idx_y is not None and self.fitter.idx_x is not None:
+            model_fft = jnp.take(model_fft, self.fitter.idx_y, axis=0)
+            model_fft = jnp.take(model_fft, self.fitter.idx_x, axis=1)
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
             # chi2 = (jnp.abs(residual_fft)**2) * precision
@@ -226,10 +227,9 @@ class PolarizedBeamFitter:
         self.weights_jax: Optional[jnp.ndarray] = None
         self.maps_fft_jax: Optional[jnp.ndarray] = None
         self.precision_jax: Optional[jnp.ndarray] = None
-        self.k_indices_y: Optional[jnp.ndarray] = None
-        self.k_indices_x: Optional[jnp.ndarray] = None
+        self.idx_y, self.idx_x = compute_rectangular_ell_cut_indices((ny, nx), self.config.reso_arcmin, self.config.ellmax)
         self.raw_maps_numpy: Optional[np.ndarray] = None
-        self.noise_bundle: Optional[Dict[str, Any]] = None
+        self.precision_numpy: Optional[np.ndarray] = None
 
         # Source metadata
         self.source_ids: Optional[np.ndarray] = None
@@ -258,10 +258,6 @@ class PolarizedBeamFitter:
 
         data = cache.load_or_create(loader.load_and_prepare)
         data_list = list(data)
-        if len(data_list) == 11:
-            data_list.append(None)
-        if len(data_list) != 12:
-            raise ValueError(f"Expected cached data with 12 entries, received {len(data_list)}.")
 
         (
             gaussfit_yoff,
@@ -275,7 +271,8 @@ class PolarizedBeamFitter:
             source_ids,
             source_fields,
             n_src,
-            noise_bundle,
+            precision, 
+            debug_precision,
         ) = data_list
 
         self._cache_manager = cache
@@ -289,35 +286,25 @@ class PolarizedBeamFitter:
         self.init_flux = gaussfit_amp
         self.fields = source_fields
         self.raw_maps_numpy = raw_maps
-        self.noise_bundle = noise_bundle
+        self.precision_numpy = precision
+        self.debug_precision = debug_precision
 
         # Convert to JAX arrays
         self.maps_jax = jnp.asarray(maps, dtype=self.config.dtype_jax_real)
 
         # Setup for specific chi2 method
         if self.config.chi2_method == "fourier":
-            self._setup_fourier_data(maps_fft, noise_bundle)
+            self._setup_fourier_data(maps_fft, precision)
         else:
             self._setup_real_space_data(weights)
 
-    def _setup_fourier_data(self, maps_fft, noise_bundle: Dict[str, Any]):
+    def _setup_fourier_data(self, maps_fft, precision: np.ndarray):
         """Setup cached Fourier-space arrays for optimization."""
         if maps_fft is None:
             raise ValueError("Fourier-space chi2 requested but cached FFT maps are missing.")
 
         self.maps_fft_jax = jnp.asarray(maps_fft, dtype=self.config.dtype_jax_complex)
-
-        k_indices_y = noise_bundle.get("k_indices_y")
-        k_indices_x = noise_bundle.get("k_indices_x")
-        self.k_indices_y = None if k_indices_y is None else jnp.asarray(k_indices_y, dtype=jnp.int32)
-        self.k_indices_x = None if k_indices_x is None else jnp.asarray(k_indices_x, dtype=jnp.int32)
-
-        precision_np = noise_bundle.get("precision")
-        if precision_np is None:
-            raise ValueError("Cached Fourier precision matrix missing from prepared data.")
-        dtype = self.config.dtype_jax_complex if np.iscomplexobj(precision_np) else self.config.dtype_jax_real
-        self.precision_jax = jnp.asarray(precision_np, dtype=dtype)
-
+        self.precision_jax = jnp.asarray(precision, dtype=self.config.dtype_jax_real)
         self.objective_data = (self.maps_fft_jax, self.precision_jax)
 
     def _setup_real_space_data(self, weights):

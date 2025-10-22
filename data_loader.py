@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from spt3g import core, maps
 
-from .precision import create_precision_calculator
+from .precision import calculate_precision
 from .source_fitting import gaussfit_source
 from .utils import check_zero_fraction, compute_rectangular_ell_cut_indices, make_apodization_mask, shift_map_bilinear
 
@@ -58,7 +58,11 @@ class DataLoader:
             template_flux_array,
         )
 
-        maps_fft_prepared, noise_bundle = self._build_noise_bundle(maps_clean, maps_fft, source_fields)
+        if self.config.chi2_method == "fourier":
+            precision, debug = self._build_precision(maps_clean, source_fields)
+        else:
+            precision = None
+            debug = None
 
         return (
             source_data["gaussfit_yoff"],
@@ -68,55 +72,40 @@ class DataLoader:
             qu_templates,
             maps_clean,
             source_data["weights"],
-            maps_fft_prepared,
+            maps_fft,
             source_data["source_ids"],
             source_data["fields"],
             source_data["n_src"],
-            noise_bundle,
+            precision,
+            debug,
         )
 
-    def _build_noise_bundle(self, maps_clean: np.ndarray, maps_fft: Optional[np.ndarray], source_fields: np.ndarray):
+    def _build_precision(self, maps_clean: np.ndarray, source_fields: np.ndarray):
         """Compute and package noise-model artifacts for caching."""
-        bundle: Dict[str, Any] = {
-            "method": self.config.covariance_method,
-            "precision": None,
-            "k_indices_y": None,
-            "k_indices_x": None,
-            "calculator_payload": None,
-            "fields": None,
-            "debug": None,
-        }
+        n_src, ny_full, nx_full, n_bands, n_stokes = maps_clean.shape
 
-        if self.config.chi2_method != "fourier" or maps_fft is None:
-            return maps_fft, bundle
+        idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), self.config.reso_arcmin, self.config.ellmax)
+        ny, nx = len(idx_y), len(idx_x)
+        precision = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=self.config.dtype_np_real)
 
-        idx_y, idx_x = compute_rectangular_ell_cut_indices(
-            (maps_fft.shape[1], maps_fft.shape[2]),
-            self.config.reso_arcmin,
-            getattr(self.config, "ellmax", None),
-        )
+        # Group sources by field and calculate precision per field
+        unique_fields = np.unique(source_fields)
+        all_debug = {}
 
-        precision_calc = create_precision_calculator(self.config, self.map_shape)
-        if hasattr(precision_calc, "set_source_fields"):
-            precision_calc.set_source_fields(source_fields)
-        precision, debug = precision_calc.calculate_precision(maps_clean, idx_y=idx_y, idx_x=idx_x)
+        for field in unique_fields:
+            field_mask = source_fields == field
+            field_indices = np.where(field_mask)[0]
 
-        if precision is not None:
-            dtype = self.config.dtype_np_complex if np.iscomplexobj(precision) else self.config.dtype_np_real
-            bundle["precision"] = np.asarray(precision, dtype=dtype)
+            assert len(field_indices) > 0, f"No sources found for field '{field}'."
 
-        if idx_y is not None and idx_x is not None:
-            maps_fft_prepared = np.take(maps_fft, idx_y, axis=1)
-            maps_fft_prepared = np.take(maps_fft_prepared, idx_x, axis=2)
-        else:
-            maps_fft_prepared = maps_fft
+            field_maps_clean = maps_clean[field_indices]
+            field_precision, field_debug = calculate_precision(field_maps_clean, self.config)
+            precision[field_indices] = field_precision
 
-        bundle["k_indices_y"] = idx_y
-        bundle["k_indices_x"] = idx_x
-        bundle["calculator_payload"] = getattr(precision_calc, "payload", None)
-        bundle["fields"] = None if source_fields is None else np.asarray(source_fields, dtype=object)
-        bundle["debug"] = debug
-        return maps_fft_prepared, bundle
+            if self.config.debug:
+                all_debug[field] = field_debug
+
+        return precision, all_debug
 
     def _validate_skip_sources(self):
         """Check that skip_sources exist in data files."""
@@ -530,12 +519,11 @@ class DataLoader:
         if self.config.chi2_method == "fourier":
             apod_mask = make_apodization_mask(self.map_shape, self.config.apodization_width_pix)
             apod_mask = apod_mask.astype(self.config.dtype_np_real)
-            maps_fft = np.zeros((n_src, ny, nx, n_bands, 3), dtype=self.config.dtype_np_complex)
-
-            for i in range(n_src):
-                for j in range(n_bands):
-                    apodized = maps_clean[i, :, :, j, :] * apod_mask[:, :, None]
-                    maps_fft[i, :, :, j, :] = np.fft.fft2(apodized, axes=(0, 1))
+            ny_full, nx_full = apod_mask.shape
+            idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), self.config.reso_arcmin, self.config.ellmax)
+            ny, nx = len(idx_y), len(idx_x)
+            apodized = maps_clean * apod_mask[None, :, :, None, None]
+            maps_fft = np.fft.fft2(apodized, axes=(1, 2))[:, idx_y, :, :, :][:, :, idx_x, :, :]
 
         print(f"Prepared {n_src} sources for fitting.")
         return maps_clean, maps_fft

@@ -63,123 +63,6 @@ def _diag_block(arr_ellphi_bsbS, iband, istokes):
     return np.real(arr_ellphi_bsbS[:, :, iband, istokes, iband, istokes])
 
 
-def plot_cmb_pca_covariance(fitter, save=True, output_dir=None, nbins=50):
-    """
-    Plot CMB PCA covariance analysis showing raw, CMB, residual, and total covariance components.
-
-    Parameters:
-    ----------
-    fitter : PolarizedBeamFitter or BootstrapBeamFitter
-        The fitted beam fitter object
-    save : bool
-        Whether to save the plot
-    output_dir : str, optional
-        Output directory for plots. If None, uses fitter's config.
-    nbins : int
-        Number of radial bins for ell binning
-
-    Returns:
-    --------
-    str or None
-        Filename if saved, None otherwise
-    """
-    print("\n--- Generating CMB PCA Covariance Analysis ---")
-
-    # Check if noise_bundle debug data is available
-    if not hasattr(fitter, 'noise_bundle') or fitter.noise_bundle is None:
-        print("Warning: No noise_bundle found in fitter. Skipping CMB PCA covariance plot.")
-        return None
-
-    if 'debug' not in fitter.noise_bundle:
-        print("Warning: No 'debug' data in noise_bundle. Skipping CMB PCA covariance plot.")
-        return None
-
-    try:
-        d = fitter.noise_bundle["debug"]
-
-        # Extract required data
-        cov_cmb = d["covariance_cmb"]
-        cov_res = d["covariance_noncmb"]
-        cov_total = d["covariance_total"]
-        ell_x_grid = d["ell_x_grid"]
-        ell_radial = d["ell_radial"]
-
-    except KeyError as e:
-        print(f"Warning: Missing required data in noise_bundle debug: {e}. Skipping CMB PCA covariance plot.")
-        return None
-
-    # Determine ellmax from grid if provided, else from ell_radial
-    if ell_x_grid is not None:
-        ellmax = float(np.nanmax(ell_x_grid))
-    else:
-        ellmax = float(np.nanmax(ell_radial))
-
-    # Field means (over src if present)
-    cmb_mean = _field_mean(cov_cmb)      # handles both with/without src axis
-    res_mean = _field_mean(cov_res)
-    tot_mean = _field_mean(cov_total)
-
-    stokes_list = ["T", "Q", "U"]
-    bands = list(fitter.config.bands)  # assume length 3, e.g. ["90GHz","150GHz","220GHz"]
-
-    fig, axes = plt.subplots(
-        nrows=3, ncols=3, figsize=(12, 10), sharex=True, sharey=True
-    )
-
-    # For a clean, consistent legend label ordering
-    curve_order = [
-        ("CMB model", cmb_mean),
-        ("Residual model", res_mean),
-        ("Total model", tot_mean),
-    ]
-
-    for iband, band in enumerate(bands):
-        for istokes, stokes in enumerate(stokes_list):
-            ax = axes[istokes, iband]
-
-            # Extract diagonal blocks (ℓ, φ) for each component
-            curves = []
-            for label, arr in curve_order:
-                block = _diag_block(arr, iband, istokes)
-                c_ell, c_val, c_cnt = bin_ell_radial(ell_radial, block, ellmax, nbins=nbins)
-                # keep NaNs for empty bins; semilogy will skip them
-                curves.append((label, c_ell, c_val, c_cnt))
-
-            # Plot — semilogy, default styles, consistent label order
-            for (label, c_ell, c_val, c_cnt) in curves:
-                ax.semilogy(c_ell, c_val, label=label)
-
-            ax.set_ylim((1e1,1e7))
-            ax.set_xlim((0,10000))
-
-            ax.set_title(f"{band} • {stokes}")
-            if iband == 0:
-                ax.set_ylabel("Variance per mode (mK$^2$)")
-            if istokes == 2:
-                ax.set_xlabel(r"$\ell$")
-            ax.grid(True, which="both", alpha=0.2)
-
-    # Shared legend (single, outside plot)
-    # Grab handles/labels from the last axes that has them
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels)
-
-    plt.tight_layout()
-
-    if save:
-        if output_dir is None:
-            output_dir = fitter.config.output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        plot_filename = os.path.join(output_dir, "cmb_pca_covariance.png")
-        plt.savefig(plot_filename, dpi=200)
-        plt.close(fig)
-        print(f"Saved CMB PCA covariance plot to: {plot_filename}")
-        return plot_filename
-    else:
-        plt.show()
-        return None
-
-
 class BeamPlotter:
     """
     Class for creating various plots and visualizations for beam analysis.
@@ -229,8 +112,8 @@ class BeamPlotter:
 
     def _apply_ell_cut_indices(self, array_2d):
         """Apply fitter's ell truncation indices to a 2D Fourier array if needed."""
-        idx_y = getattr(self.base_fitter, "k_indices_y", None)
-        idx_x = getattr(self.base_fitter, "k_indices_x", None)
+        idx_y = getattr(self.base_fitter, "idx_y", None)
+        idx_x = getattr(self.base_fitter, "idx_x", None)
         if idx_y is None or idx_x is None:
             return array_2d
         if array_2d.shape[0] != len(idx_y) or array_2d.shape[1] != len(idx_x):
@@ -1255,24 +1138,6 @@ class BeamPlotter:
         """
         return self.plot_sampling_corner(mclmc_output, sampler_type="mclmc", chain_descriptions=chain_descriptions)
 
-    def plot_cmb_pca_covariance(self, save=True, nbins=50):
-        """
-        Plot CMB PCA covariance analysis showing raw, CMB, residual, and total covariance components.
-
-        Parameters:
-        ----------
-        save : bool
-            Whether to save the plot
-        nbins : int
-            Number of radial bins for ell binning
-
-        Returns:
-        --------
-        str or None
-            Filename if saved, None otherwise
-        """
-        return plot_cmb_pca_covariance(self.fitter, save=save, output_dir=self.output_dir, nbins=nbins)
-
 
 def create_diagnostic_plots(
     fitter,
@@ -1280,7 +1145,6 @@ def create_diagnostic_plots(
     output_dir=None,
     include_template_analysis=False,
     central_crop=None,
-    include_cmb_pca_covariance=False,
 ):
     """
     Convenience function to create all diagnostic plots.
@@ -1297,8 +1161,6 @@ def create_diagnostic_plots(
         Whether to include template projection analysis
     central_crop : int, optional
         Option to crop source diagnostic plots to central `central_crop` x `central_crop` pixels (default: None, no cropping)
-    include_cmb_pca_covariance : bool, optional
-        Whether to include CMB PCA covariance analysis plot
 
     Returns:
     --------
@@ -1328,12 +1190,6 @@ def create_diagnostic_plots(
     # Template projection analysis (optional, now for all bands)
     if include_template_analysis:
         filenames["template_projection"] = plotter.plot_template_projection_analysis(best_fit_params)
-
-    # CMB PCA covariance analysis (optional)
-    if include_cmb_pca_covariance:
-        filename = plotter.plot_cmb_pca_covariance()
-        if filename:
-            filenames["cmb_pca_covariance"] = filename
 
     print("\n--- All plotting complete. ---")
     return filenames

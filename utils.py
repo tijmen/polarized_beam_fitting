@@ -26,8 +26,8 @@ def parse_declination(source_id):
     return None  # Return None if pattern not found
 
 
-def predict_nyquist_kx(declination_deg):
-    """Predicts the k_x of the TOD Nyquist frequency feature."""
+def predict_nyquist_ell_x(declination_deg):
+    """Predicts the ell_x of the TOD Nyquist frequency feature."""
     if declination_deg is None or np.isnan(declination_deg):
         return np.inf
 
@@ -38,77 +38,83 @@ def predict_nyquist_kx(declination_deg):
     # Effective scan speed on the sky depends on declination
     on_sky_scan_speed_deg_s = scan_speed_az_deg_s * np.cos(np.deg2rad(declination_deg))
 
-    # Convert temporal frequency (Hz) to spatial frequency (cycles/deg)
-    return nyquist_hz / on_sky_scan_speed_deg_s
+    # Convert temporal frequency (Hz) to spatial frequency (cycles/deg), then to ell
+    nyquist_kx_cpd = nyquist_hz / on_sky_scan_speed_deg_s
+    return 360.0 * nyquist_kx_cpd
 
 
-def build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd):
-    """Construct a cosine-tapered radial low-pass mask."""
-    mask = np.ones_like(k_radius, dtype=float)
+def build_radial_lowpass_mask(ell_radius, ellmax, taper_width_ell):
+    """Construct a cosine-tapered radial low-pass mask in ell space."""
+    mask = np.ones_like(ell_radius, dtype=float)
 
-    if not np.isfinite(k_max_cpd):
+    if not np.isfinite(ellmax):
         return mask
 
-    if taper_width_cpd <= 0:
+    if taper_width_ell <= 0:
         mask = mask.copy()
-        mask[k_radius > k_max_cpd] = 0.0
+        mask[ell_radius > ellmax] = 0.0
         return mask
 
-    start = max(k_max_cpd - taper_width_cpd, 0.0)
+    start = max(ellmax - taper_width_ell, 0.0)
     mask = mask.copy()
-    mask[k_radius > k_max_cpd] = 0.0
+    mask[ell_radius > ellmax] = 0.0
 
-    transition = (k_radius >= start) & (k_radius <= k_max_cpd)
+    transition = (ell_radius >= start) & (ell_radius <= ellmax)
     if np.any(transition):
-        mask[transition] = 0.5 * (1.0 + np.cos(np.pi * (k_radius[transition] - start) / taper_width_cpd))
+        mask[transition] = 0.5 * (1.0 + np.cos(np.pi * (ell_radius[transition] - start) / taper_width_ell))
 
     return mask
 
 
-def apply_radial_lowpass(map_2d, apod_mask, k_radius, k_max_cpd, taper_width_cpd):
+def apply_radial_lowpass(map_2d, apod_mask, ell_radius, ellmax, taper_width_ell):
     """
     Apply a radial low-pass filter with cosine taper in Fourier space.
 
     Note that this effectively applied the mask, and doesn't unapply it. Therefore,
     this should only be used for building a leakage template.
     """
-    if not np.isfinite(k_max_cpd):
+    if not np.isfinite(ellmax):
         return map_2d
 
     tapered_map = map_2d * apod_mask
     fourier_map = np.fft.fft2(tapered_map)
-    lowpass_mask = build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd)
+    lowpass_mask = build_radial_lowpass_mask(ell_radius, ellmax, taper_width_ell)
     filtered = np.fft.ifft2(fourier_map * lowpass_mask)
     return np.real(filtered)
 
 
-def compute_fourier_frequency_axes(map_shape, reso_arcmin):
-    """Return Fourier frequency axes (cycles/degree) for the given map geometry."""
+def ell_grid(map_shape, reso_arcmin):
+    """Return ell coordinate grids for the given map geometry."""
 
     ny, nx = map_shape
     reso_deg = reso_arcmin / 60.0
     ky = np.fft.fftfreq(ny, d=reso_deg)
     kx = np.fft.fftfreq(nx, d=reso_deg)
-    ky_grid, kx_grid = np.meshgrid(ky, kx, indexing="ij")
-    return ky, kx, ky_grid, kx_grid
+
+    # Convert from cycles/degree to ell (ell = 360 * k_cpd)
+    ell_y = 360.0 * ky
+    ell_x = 360.0 * kx
+
+    ell_y_grid, ell_x_grid = np.meshgrid(ell_y, ell_x, indexing="ij")
+    return ell_y, ell_x, ell_y_grid, ell_x_grid
 
 
 def compute_rectangular_ell_cut_indices(map_shape, reso_arcmin, ellmax):
-    """Return ky/kx indices satisfying |ell_x|, |ell_y| <= ellmax; None if no cutoff."""
+    """Return ell_y/ell_x indices satisfying |ell_x|, |ell_y| <= ellmax; None if no cutoff."""
 
     if ellmax is None or not np.isfinite(ellmax) or ellmax <= 0:
         return None, None
 
-    ky, kx, _, _ = compute_fourier_frequency_axes(map_shape, reso_arcmin)
-    k_max_cpd = ellmax / 360.0
+    ell_y, ell_x, _, _ = ell_grid(map_shape, reso_arcmin)
 
-    idx_y = np.where(np.abs(ky) <= k_max_cpd)[0]
-    idx_x = np.where(np.abs(kx) <= k_max_cpd)[0]
+    idx_y = np.where(np.abs(ell_y) <= ellmax)[0]
+    idx_x = np.where(np.abs(ell_x) <= ellmax)[0]
 
-    if idx_y.size == 0 or idx_x.size == 0:
-        raise ValueError("ellmax is too small for the current map geometry; increase ellmax or decrease map resolution.")
+    assert idx_y.size > 0, f"no indices found below ellmax={ellmax} in y-direction."
+    assert idx_x.size > 0, f"no indices found below ellmax={ellmax} in x-direction."
 
-    if idx_y.size == len(ky) and idx_x.size == len(kx):
+    if idx_y.size == len(ell_y) and idx_x.size == len(ell_x):
+        print(f"Warning, asked to cut based on ell<{ellmax}, but no modes found above this value to cut.")
         return None, None
 
     return idx_y, idx_x
@@ -119,11 +125,13 @@ def calculate_tod_nyquist_radial_mask_smooth(source_id, map_shape, config, taper
     ny, nx = map_shape
     reso_deg = config.reso_arcmin / 60.0
 
+    # Get ell coordinates
+    ell_y, ell_x, ell_y_grid, ell_x_grid = ell_grid(map_shape, config.reso_arcmin)
+    ell_radius = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
+
+    # Compute frequency steps in k-space for taper width conversion
     ky_freq = np.fft.fftfreq(ny, d=reso_deg)
     kx_freq = np.fft.fftfreq(nx, d=reso_deg)
-    ky_grid, kx_grid = np.meshgrid(ky_freq, kx_freq, indexing="ij")
-    k_radius = np.sqrt(kx_grid**2 + ky_grid**2)
-
     freq_steps = []
     if ny > 1:
         freq_steps.append(abs(ky_freq[1] - ky_freq[0]))
@@ -132,10 +140,11 @@ def calculate_tod_nyquist_radial_mask_smooth(source_id, map_shape, config, taper
     taper_width_cpd = taper_width_pixels * min(freq_steps) if freq_steps else 0.0
 
     declination = parse_declination(source_id)
-    nyquist_kx_cpd = predict_nyquist_kx(declination)
-    k_max_cpd = 0.85 * nyquist_kx_cpd if np.isfinite(nyquist_kx_cpd) else np.inf
+    nyquist_ell_x = predict_nyquist_ell_x(declination)
+    ellmax = 0.85 * nyquist_ell_x if np.isfinite(nyquist_ell_x) else np.inf
+    taper_width_ell = 360.0 * taper_width_cpd
 
-    mask = build_radial_lowpass_mask(k_radius, k_max_cpd, taper_width_cpd)
+    mask = build_radial_lowpass_mask(ell_radius, ellmax, taper_width_ell)
     return mask.astype(config.dtype_np_real)
 
 
@@ -266,30 +275,6 @@ def check_zero_fraction(t_map, source_id, max_zero_fraction=0.05):
 def shift_map_bilinear(map_2d, y_shift, x_shift, mode="nearest"):
     """Shift a 2D map using bilinear interpolation."""
     return nd_shift(map_2d, shift=(y_shift, x_shift), order=1, mode=mode, prefilter=False)
-
-
-def compute_2d_asd(map_2d):
-    """
-    Compute 2D amplitude spectral density from FFT.
-
-    Parameters:
-    -----------
-    map_2d : array_like
-        2D map to analyze
-
-    Returns:
-    --------
-    asd_2d : array_like
-        2D amplitude spectral density (|FFT|)
-    """
-    # Take FFT and get amplitude
-    fft_2d = np.fft.fft2(map_2d)
-    asd_2d = np.abs(fft_2d)
-
-    # Shift zero frequency to center
-    asd_2d = np.fft.fftshift(asd_2d)
-
-    return asd_2d
 
 
 def safe_filename(source_id):
