@@ -40,9 +40,7 @@ def get_test_config(**kwargs):
     config.map_size_pix = 64
     config.reso_arcmin = 0.25
     config.apodization_width_pix = 8
-    config.n_steps = 100_000
     config.bands = ["150GHz"]
-    config.precision_white_noise = True
     config.min_t_amplitude = 0
     config.cache_dir = tempfile.mkdtemp()
     config.coadd_filenames = {"test_field": ["mock_file.g3"]}
@@ -58,7 +56,7 @@ def get_test_config(**kwargs):
     if config.beam_model_type == "beta_pol":
         dummy_betapol_file = os.path.join(config.cache_dir, "betapol_tests.npz")
         r_fine = np.linspace(0, 10, 100)
-        sigma_main, sigma_bt = 1.0 / 2.355, 1.2 / 2.355
+        sigma_main, sigma_bt = 2.0 / 2.355, 3.2 / 2.355
         bmain = np.exp(-0.5 * (r_fine / sigma_main) ** 2)
         bt = np.exp(-0.5 * (r_fine / sigma_bt) ** 2)
         betapol_payload = {"r_fine_arcmin": r_fine}
@@ -125,6 +123,8 @@ def generate_mock_data(config, true_beam_params, n_sources=10):
 
     maps_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3), dtype=config.dtype_np_real)
     weights_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3, 3), dtype=config.dtype_np_real)
+    noise_sigma_T = 1e-4
+    noise_sigma_P = noise_sigma_T * np.sqrt(2.0)
 
     for i in range(n_sources):
         for band_idx, beam_model in enumerate(beam_models):
@@ -140,20 +140,19 @@ def generate_mock_data(config, true_beam_params, n_sources=10):
                 axis=-1,
             )
 
-            noise_level = 1e-4  # pol is 5%, beta difference is say 10% of that, for (10% error) need S/N 500
             noise_maps = np.stack(
                 [
-                    np.random.normal(0, noise_level, shape),
-                    np.random.normal(0, noise_level * np.sqrt(2), shape),
-                    np.random.normal(0, noise_level * np.sqrt(2), shape),
+                    np.random.normal(0, noise_sigma_T, shape),
+                    np.random.normal(0, noise_sigma_P, shape),
+                    np.random.normal(0, noise_sigma_P, shape),
                 ],
                 axis=-1,
             )
 
             maps_numpy[i, :, :, band_idx, :] = signal_maps + noise_maps
-            weights_numpy[i, :, :, band_idx, 0, 0] = 1.0 / (noise_level**2)
-            weights_numpy[i, :, :, band_idx, 1, 1] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
-            weights_numpy[i, :, :, band_idx, 2, 2] = 1.0 / ((noise_level * np.sqrt(2)) ** 2)
+            weights_numpy[i, :, :, band_idx, 0, 0] = 1.0 / (noise_sigma_T**2)
+            weights_numpy[i, :, :, band_idx, 1, 1] = 1.0 / (noise_sigma_P**2)
+            weights_numpy[i, :, :, band_idx, 2, 2] = 1.0 / (noise_sigma_P**2)
 
     apod_mask = make_apodization_mask(shape, config.apodization_width_pix)
     maps_apodized = maps_numpy * apod_mask[np.newaxis, :, :, np.newaxis, np.newaxis]
@@ -172,13 +171,23 @@ def generate_mock_data(config, true_beam_params, n_sources=10):
     if config.chi2_method == "fourier":
         # Apply the same ell truncation as the real data loader
         idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), config.reso_arcmin, config.ellmax)
+        precision_template = np.zeros((n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
+        for band_idx in range(n_bands):
+            precision_template[band_idx, 0, band_idx, 0] = 1.0
+            precision_template[band_idx, 1, band_idx, 1] = 1.0
+            precision_template[band_idx, 2, band_idx, 2] = 1.0
+
         if idx_y is not None and idx_x is not None:
             ny, nx = len(idx_y), len(idx_x)
             # Truncate ONLY the FFT maps - real-space maps stay full size
             maps_fft_numpy = maps_fft_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
-            precision_placeholder = np.ones((n_sources, ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
+            precision_placeholder = np.broadcast_to(
+                precision_template, (n_sources, ny, nx, n_bands, 3, n_bands, 3)
+            ).copy()
         else:
-            precision_placeholder = np.ones((n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
+            precision_placeholder = np.broadcast_to(
+                precision_template, (n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3)
+            ).copy()
         debug_placeholder = None
     else:
         precision_placeholder = None
@@ -371,7 +380,7 @@ class TestEndToEndRecovery(unittest.TestCase):
 
     def test_chi2_method_real_space(self, *mocks):
         print("\n--- Testing Chi2 Method: Real Space ---")
-        config = get_test_config(chi2_method="real_space", n_steps=150000)
+        config = get_test_config(chi2_method="real_space")
         true_params = {"beta_pol": 0.75}
         self.run_test_and_assert(
             *mocks,
@@ -395,7 +404,7 @@ class TestEndToEndRecovery(unittest.TestCase):
 
     def test_solver_bfgs(self, *mocks):
         print("\n--- Testing Solver: Optimistix BFGS ---")
-        config = get_test_config(solver="optimistix_bfgs", n_steps=300)
+        config = get_test_config(solver="optimistix_bfgs")
         config.bfgs_kwargs = {"atol": 1e-18, "rtol": 1e-18, "verbose": frozenset({})}
         true_params = {"beta_pol": 0.75}
         self.run_test_and_assert(
@@ -444,7 +453,7 @@ class TestPlottingOutputs(unittest.TestCase):
     """Exercise plotting helpers on tiny synthetic fits."""
 
     def test_create_diagnostic_plots(self, mock_data_loader):
-        config = get_test_config(map_size_pix=12, n_steps=800)
+        config = get_test_config(map_size_pix=12)
         config.n_diagnostic_plots = 1
         config.skip_sources = []
 
@@ -455,7 +464,7 @@ class TestPlottingOutputs(unittest.TestCase):
                 config,
                 {"beta_pol": 0.72},
                 n_sources=2,
-            )
+            )[:-1]
 
             fitter = PolarizedBeamFitter(config=config)
             best_fit_params = fitter.run_fit()

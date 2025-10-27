@@ -298,5 +298,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
 
     if config.debug:
         debug["precision"] = precision
+    else:
+        debug = None
 
     return precision, debug
