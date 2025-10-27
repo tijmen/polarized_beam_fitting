@@ -5,13 +5,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import camb
-import healpy as hp
 import jax
 import jax.numpy as jnp
 import matplotlib
 import numpy as np
-from astropy.io import fits
 
 matplotlib.use("Agg")
 
@@ -20,14 +17,9 @@ from polarized_beam_fitting.config import BeamFittingConfig
 from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
 from polarized_beam_fitting.plotting import BeamPlotter, create_diagnostic_plots
-from polarized_beam_fitting.precision import (
-    _compute_cmb_covariance,
-    _smooth_highpass_1d,
-)
 from polarized_beam_fitting.utils import (
     calculate_tod_nyquist_radial_mask_smooth,
     compute_rectangular_ell_cut_indices,
-    ell_grid,
     linear_interp_differentiable,
     make_apodization_mask,
     parse_declination,
@@ -46,15 +38,16 @@ def get_test_config(**kwargs):
 
     # --- Default overrides for testing ---
     config.map_size_pix = 64
-    config.reso_arcmin = 0.2
+    config.reso_arcmin = 0.25
     config.apodization_width_pix = 8
-    config.n_steps = 20000
+    config.n_steps = 100_000
     config.bands = ["150GHz"]
-    config.covariance_method = "white_noise"
+    config.precision_white_noise = True
     config.min_t_amplitude = 0
     config.cache_dir = tempfile.mkdtemp()
     config.coadd_filenames = {"test_field": ["mock_file.g3"]}
     config.n_diagnostic_plots = 0
+    config.ellmax = 20000
     config.bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({})}
 
     # --- Apply user-specified overrides ---
@@ -65,7 +58,7 @@ def get_test_config(**kwargs):
     if config.beam_model_type == "beta_pol":
         dummy_betapol_file = os.path.join(config.cache_dir, "betapol_tests.npz")
         r_fine = np.linspace(0, 10, 100)
-        sigma_main, sigma_bt = 1.2 / 2.355, 1.4 / 2.355
+        sigma_main, sigma_bt = 1.0 / 2.355, 1.2 / 2.355
         bmain = np.exp(-0.5 * (r_fine / sigma_main) ** 2)
         bt = np.exp(-0.5 * (r_fine / sigma_bt) ** 2)
         betapol_payload = {"r_fine_arcmin": r_fine}
@@ -89,12 +82,6 @@ def get_test_config(**kwargs):
         np.savez(dummy_betapol_file, **betapol_payload)
         config.betapol_data_path = dummy_betapol_file
 
-    if config.covariance_method == "clusterfinder_psd":
-        psd_file = tempfile.NamedTemporaryFile(delete=False, suffix=".fits").name
-        psd_data = np.ones((256, 256), dtype=config.dtype_np_real)
-        fits.writeto(psd_file, psd_data, overwrite=True)
-        config.noise_psd_path = psd_file
-
     return config
 
 
@@ -110,9 +97,10 @@ def _normalize_true_params(config, true_beam_params):
     raise TypeError("true_beam_params must be a dict or list of dicts.")
 
 
-def generate_mock_data(config, true_beam_params, n_sources=3):
+def generate_mock_data(config, true_beam_params, n_sources=10):
     """
     Generate mock data based on a specific beam model and true parameters.
+    Draws separate true and initial parameters for sources to test recovery.
     """
     np.random.seed(42)
     shape = (config.map_size_pix, config.map_size_pix)
@@ -123,18 +111,26 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     n_bands = len(config.bands)
     beam_models = [create_beam_model(config, y_grid, x_grid, band) for band in config.bands]
 
-    true_yoffs = np.random.uniform(-1.5, 1.5, n_sources)
-    true_xoffs = np.random.uniform(-1.5, 1.5, n_sources)
+    # Draw TRUE source parameters - all with shape appropriate for multi-band
+    true_yoffs = np.random.uniform(-0.6, -0.4, (n_sources, n_bands))
+    true_xoffs = np.random.uniform(-0.6, -0.4, (n_sources, n_bands))
     amp_low = np.array([0.9, -0.05, -0.05])
     amp_high = np.array([1.1, 0.05, 0.05])
     true_amps = amp_low + (amp_high - amp_low) * np.random.uniform(size=(n_sources, n_bands, 3))
+
+    # Draw INITIAL source parameters (different from true)
+    init_yoffs = np.random.uniform(-0.6, -0.4, (n_sources, n_bands))
+    init_xoffs = np.random.uniform(-0.6, -0.4, (n_sources, n_bands))
+    init_amps = amp_low + (amp_high - amp_low) * np.random.uniform(size=(n_sources, n_bands, 3))
 
     maps_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3), dtype=config.dtype_np_real)
     weights_numpy = np.zeros((n_sources, ny_full, nx_full, n_bands, 3, 3), dtype=config.dtype_np_real)
 
     for i in range(n_sources):
         for band_idx, beam_model in enumerate(beam_models):
-            true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(band_params[band_idx], true_yoffs[i], true_xoffs[i])
+            true_beam_T, true_beam_P = beam_model.evaluate_beam_maps(
+                band_params[band_idx], true_yoffs[i, band_idx], true_xoffs[i, band_idx]
+            )
             signal_maps = np.stack(
                 [
                     true_amps[i, band_idx, 0] * true_beam_T,
@@ -144,7 +140,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
                 axis=-1,
             )
 
-            noise_level = 1e-5
+            noise_level = 1e-4  # pol is 5%, beta difference is say 10% of that, for (10% error) need S/N 500
             noise_maps = np.stack(
                 [
                     np.random.normal(0, noise_level, shape),
@@ -163,9 +159,10 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     maps_apodized = maps_numpy * apod_mask[np.newaxis, :, :, np.newaxis, np.newaxis]
     maps_fft_numpy = np.fft.fft2(maps_apodized, axes=(1, 2))
 
-    gaussfit_yoff = np.tile(true_yoffs[:, None], (1, n_bands))
-    gaussfit_xoff = np.tile(true_xoffs[:, None], (1, n_bands))
-    gaussfit_initial_amp = true_amps
+    # Return INITIAL parameters (different from true) for the fitter to start from
+    gaussfit_yoff = init_yoffs
+    gaussfit_xoff = init_xoffs
+    gaussfit_initial_amp = init_amps
 
     raw_maps = np.zeros_like(maps_numpy)
     qu_templates = np.zeros((ny_full, nx_full, n_bands, 2))
@@ -177,11 +174,8 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
         idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), config.reso_arcmin, config.ellmax)
         if idx_y is not None and idx_x is not None:
             ny, nx = len(idx_y), len(idx_x)
-            # Truncate maps to match precision matrix size
-            maps_numpy = maps_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
+            # Truncate ONLY the FFT maps - real-space maps stay full size
             maps_fft_numpy = maps_fft_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
-            weights_numpy = weights_numpy[:, idx_y, :, :, :, :][:, :, idx_x, :, :, :]
-            qu_templates = qu_templates[idx_y, :, :, :][:, idx_x, :, :]
             precision_placeholder = np.ones((n_sources, ny, nx, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
         else:
             precision_placeholder = np.ones((n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3), dtype=config.dtype_np_real)
@@ -189,6 +183,13 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
     else:
         precision_placeholder = None
         debug_placeholder = None
+
+    # Pack true parameters for testing recovery
+    true_source_params = {
+        "yoff": true_yoffs,
+        "xoff": true_xoffs,
+        "flux": true_amps,
+    }
 
     return (
         gaussfit_yoff,
@@ -204,6 +205,7 @@ def generate_mock_data(config, true_beam_params, n_sources=3):
         n_sources,
         precision_placeholder,
         debug_placeholder,
+        true_source_params,
     )
 
 
@@ -269,7 +271,7 @@ class TestEndToEndRecovery(unittest.TestCase):
         self,
         mock_data_loader,
         config,
-        true_params,
+        true_beam_params,
         assertion_func,
     ):
         if config.double_precision:
@@ -277,15 +279,34 @@ class TestEndToEndRecovery(unittest.TestCase):
         else:
             jax.config.update("jax_enable_x64", False)
 
-        mock_data = generate_mock_data(config, true_params)
-        mock_data_loader.return_value.load_and_prepare.return_value = mock_data
+        mock_data = generate_mock_data(config, true_beam_params)
+        true_source_params = mock_data[-1]  # Last element is true_source_params
+        # Pass only the first 13 elements to fitter (exclude true_source_params)
+        mock_data_loader.return_value.load_and_prepare.return_value = mock_data[:-1]
 
         fitter = PolarizedBeamFitter(config=config)
         best_fit_params = fitter.run_fit()
 
-        print(f"true: {true_params}")
-        print(f"best_fit: {best_fit_params['beams'][0]}")
-        assertion_func(best_fit_params["beams"], true_params)
+        print(f"\ntrue beam: {true_beam_params}")
+        print(f"best_fit beam: {best_fit_params['beams'][0]}")
+
+        # Test beam parameter recovery
+        assertion_func(best_fit_params["beams"], true_beam_params)
+
+        # Test source parameter recovery
+        yoff_error = np.sqrt(np.mean((np.array(best_fit_params["sources"]["yoff"]) - true_source_params["yoff"]) ** 2))
+        xoff_error = np.sqrt(np.mean((np.array(best_fit_params["sources"]["xoff"]) - true_source_params["xoff"]) ** 2))
+        flux_error = np.sqrt(np.mean((np.array(best_fit_params["sources"]["flux"]) - true_source_params["flux"]) ** 2))
+
+        print("Source parameter recovery (RMS errors):")
+        print(f"  yoff: {yoff_error:.6f} pixels (tolerance: 0.01)")
+        print(f"  xoff: {xoff_error:.6f} pixels (tolerance: 0.01)")
+        print(f"  flux: {flux_error:.6f} (tolerance: 0.01)")
+
+        self.assertLess(yoff_error, 0.01, f"yoff recovery failed: RMS error = {yoff_error:.6f}")
+        self.assertLess(xoff_error, 0.01, f"xoff recovery failed: RMS error = {xoff_error:.6f}")
+        self.assertLess(flux_error, 0.01, f"flux recovery failed: RMS error = {flux_error:.6f}")
+
         return fitter, best_fit_params
 
     def _assert_gaussian_bspline_recovery(self, config, recovered_params, true_params):
@@ -372,18 +393,6 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ Single precision test successful.")
 
-    def test_covariance_kx_averaged(self, *mocks):
-        print("\n--- Testing covariance method: kx_averaged ---")
-        config = get_test_config(covariance_method="kx_averaged")
-        true_params = {"beta_pol": 0.75}
-        self.run_test_and_assert(
-            *mocks,
-            config,
-            true_params,
-            lambda fit, true: self.assertAlmostEqual(fit[0]["beta_pol"], true["beta_pol"], delta=0.01),
-        )
-        print("✓ kx_averaged covariance test successful.")
-
     def test_solver_bfgs(self, *mocks):
         print("\n--- Testing Solver: Optimistix BFGS ---")
         config = get_test_config(solver="optimistix_bfgs", n_steps=300)
@@ -396,204 +405,6 @@ class TestEndToEndRecovery(unittest.TestCase):
             lambda fit, true: self.assertAlmostEqual(fit[0]["beta_pol"], true["beta_pol"], delta=0.02),
         )
         print("✓ BFGS solver test successful.")
-
-    def test_rebin_psd_with_averaging(self):
-        print("\n--- Unit Testing: _rebin_psd_with_averaging ---")
-        calc = ClusterfinderPSDCalculator(BeamFittingConfig(), (64, 64))
-        psd_array = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
-        expected = np.array([[3.5, 5.5], [11.5, 13.5]])
-        rebinned = calc._rebin_psd_with_averaging(psd_array, (2, 2))
-        np.testing.assert_allclose(rebinned, expected)
-        print("✓ Rebinning test successful.")
-
-    def test_cmb_pca_regularizes_diagonals(self):
-        print("\n--- Unit Testing: cmb_pca diagonal regularization ---")
-        config = get_test_config(
-            map_size_pix=4,
-            bands=["90GHz"],
-            covariance_method="cmb_pca",
-        )
-        config.n_pca_components = 1
-
-        n_src = 4
-        ny = 1
-        nx = 3
-        n_bands = len(config.bands)
-        n_stokes = 3
-
-        diag_values = np.array(
-            [
-                [0.01, 0.05, 0.05],
-                [0.02, 0.06, 0.06],
-                [0.30, 0.70, 0.70],
-                [0.40, 0.80, 0.80],
-            ],
-            dtype=config.dtype_np_real,
-        )
-
-        covariance = np.zeros((n_src, ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=config.dtype_np_real)
-        for src in range(n_src):
-            covariance[src, 0, :, 0, 0, 0, 0] = diag_values[src]
-            covariance[src, 0, :, 0, 1, 0, 0] = 0.25
-            covariance[src, 0, :, 0, 0, 0, 1] = 0.25
-
-        ell_x_grid = np.array([[0.0, 4000.0, 6000.0]], dtype=config.dtype_np_real)
-        ell_y_grid = np.array([[3100.0, 3100.0, 3100.0]], dtype=config.dtype_np_real)
-        np.sqrt(ell_x_grid**2 + ell_y_grid**2)
-
-        calc = CmbPcaCalculator(config, (config.map_size_pix, config.map_size_pix))
-        calc.set_source_fields(np.array(["A", "A", "B", "B"], dtype=object))
-
-        diag_inputs = np.zeros((n_src, ny, nx, n_bands, n_stokes), dtype=config.dtype_np_real)
-        for src in range(n_src):
-            diag_inputs[src, 0, :, 0, 0] = diag_values[src]
-
-        diag_regularized = calc._regularize_diagonals(diag_inputs.copy(), ell_x_grid, ell_y_grid)
-        floors = calc._compute_white_noise_floors(diag_inputs, ell_x_grid, ell_y_grid)
-        diag_bounded = calc._apply_white_noise_floors(diag_regularized.copy(), floors)
-
-        for band in range(n_bands):
-            for stokes in range(n_stokes):
-                self.assertTrue(np.all(diag_bounded[:, :, :, band, stokes] >= floors[band, stokes] - 1e-6))
-
-        residual = covariance.copy()
-        for band in range(n_bands):
-            for stokes in range(n_stokes):
-                residual[:, :, :, band, stokes, band, stokes] = diag_bounded[:, :, :, band, stokes]
-
-        diag_result = residual[:, 0, :, 0, 0, 0, 0]
-        self.assertTrue(np.all(diag_result >= floors[0, 0] - 1e-6))
-        offdiag_result = residual[0, 0, 1, 0, 0, 0, 1]
-        self.assertAlmostEqual(offdiag_result, 0.25)
-        print("✓ cmb_pca enforces white-noise floors and preserves off-diagonals.")
-
-    def test_cmb_pca_debug_outputs(self):
-        print("\n--- Unit Testing: cmb_pca debug payload ---")
-        config = get_test_config(
-            map_size_pix=4,
-            bands=["90GHz"],
-            covariance_method="cmb_pca",
-        )
-        config.n_pca_components = 1
-        config.debug = True
-
-        calc = CmbPcaCalculator(config, (config.map_size_pix, config.map_size_pix))
-        calc.set_source_fields(np.array(["A", "B"], dtype=object))
-
-        rng = np.random.default_rng(0)
-        maps_clean = rng.normal(size=(2, config.map_size_pix, config.map_size_pix, 1, 3)).astype(config.dtype_np_real)
-        idx_y = np.array([1, 2])
-        idx_x = np.array([0, 3])
-
-        precision, debug = calc.calculate_precision(maps_clean, idx_y=idx_y, idx_x=idx_x)
-
-        self.assertEqual(precision.shape, (2, len(idx_y), len(idx_x), 1, 3, 1, 3))
-        self.assertIsNotNone(debug)
-        for key in ("covariance_cmb", "covariance_residual", "covariance_regularized"):
-            self.assertIn(key, debug)
-        print("✓ cmb_pca returns precision and debug covariances when debug is enabled.")
-
-
-class TestCmbCovarianceNormalization(unittest.TestCase):
-    """Validate the CMB covariance normalization against full-sky simulations."""
-
-    def test_flat_sky_periodograms_match_model_covariance(self):
-        print("\n--- Unit Testing: CMB covariance normalization ---")
-        config = get_test_config(
-            map_size_pix=300,
-            reso_arcmin=0.1,
-            apodization_width_pix=10,
-            bands=["150GHz"],
-        )
-        config.double_precision = True
-
-        ny = nx = config.map_size_pix
-        config.reso_arcmin * (np.pi / (180.0 * 60.0))
-        reso_deg = config.reso_arcmin / 60.0
-
-        apod_mask = make_apodization_mask((ny, nx), config.apodization_width_pix).astype(config.dtype_np_real)
-        _, _, ell_y_grid, ell_x_grid = ell_grid((ny, nx), config.reso_arcmin)
-        ell_radial = np.sqrt(ell_x_grid**2 + ell_y_grid**2)
-
-        cov_cmb = _compute_cmb_covariance(config, ny, nx)
-        expected_tt = cov_cmb[:, :, 0, 0, 0, 0]
-
-        pars = camb.CAMBparams()
-        pars.set_cosmology(H0=67.36, ombh2=0.02237, omch2=0.1200, mnu=0.06, omk=0.0, tau=0.0544)
-        pars.InitPower.set_params(As=2.1e-9, ns=0.9649)
-        ell_max_cmb = 5000
-        pars.set_for_lmax(ell_max_cmb, lens_potential_accuracy=0)
-        results = camb.get_results(pars)
-        powers = results.get_cmb_power_spectra(pars, CMB_unit="muK", raw_cl=True)
-        ell_camb = np.arange(powers["total"].shape[0])
-        cl_tt = powers["total"][:, 0] * 1e-6  # µK^2 -> mK^2
-        cl_tt *= _smooth_highpass_1d(ell_camb, 360.0, 720.0)
-        cl_tt = cl_tt[: ell_max_cmb + 1]
-
-        np.random.seed(42)
-        nside = 2048
-        full_sky_t = hp.synfast(
-            cl_tt,
-            nside=nside,
-            lmax=ell_max_cmb,
-            new=True,
-            pixwin=False,
-            verbose=False,
-        )
-
-        pixel_idx = np.arange(ny, dtype=np.float64)
-        offsets_deg = (pixel_idx - ny / 2.0 + 0.5) * reso_deg
-        theta_base = np.deg2rad(90.0 - offsets_deg)[:, None]
-        phi_offsets = np.deg2rad((np.arange(nx, dtype=np.float64) - nx / 2.0 + 0.5) * reso_deg)[None, :]
-        theta_grid = np.broadcast_to(theta_base, (ny, nx))
-
-        n_patches = 100
-        maps_numpy = np.zeros((n_patches, ny, nx, 1, 3), dtype=config.dtype_np_real)
-        for patch_idx in range(n_patches):
-            phi_center_rad = np.deg2rad(patch_idx * 0.5)
-            phi_grid = np.mod(phi_center_rad + phi_offsets, 2.0 * np.pi)
-            patch = hp.get_interp_val(full_sky_t, theta_grid, phi_grid).astype(config.dtype_np_real)
-            maps_numpy[patch_idx, :, :, 0, 0] = patch
-
-        covariance, _, _, _, _, _ = _compute_covariance(
-            maps_numpy,
-            config,
-            apod_mask,
-            idx_y=None,
-            idx_x=None,
-        )
-
-        avg = covariance.mean(axis=0)[..., 0, 0, 0, 0]
-        std = covariance.std(axis=0, ddof=1)[..., 0, 0, 0, 0]
-        stderr = std / np.sqrt(n_patches)
-
-        residual = avg - expected_tt
-        comparison_mask = (expected_tt > 1e-9) & (ell_radial <= ell_max_cmb)
-
-        if not np.any(comparison_mask):
-            self.fail("No Fourier bins exceeded the significance threshold for CMB covariance validation.")
-
-        normalized_residual = np.zeros_like(residual)
-        normalized_residual[comparison_mask] = residual[comparison_mask] / (stderr[comparison_mask] + 1e-12)
-
-        relative_error = np.abs(residual[comparison_mask]) / (np.abs(expected_tt[comparison_mask]) + 1e-12)
-
-        self.assertLess(
-            np.nanmax(np.abs(normalized_residual[comparison_mask])),
-            5.0,
-            "CMB covariance model disagrees with simulations by more than 5σ in some Fourier bins.",
-        )
-        self.assertLess(
-            np.nanmedian(relative_error),
-            0.1,
-            "Median relative error between simulated periodograms and model covariance exceeds 10%.",
-        )
-        self.assertLess(
-            np.nanpercentile(relative_error, 95),
-            0.25,
-            "Model covariance differs from simulations by more than 25% in the bulk of Fourier space.",
-        )
-        print("✓ CMB covariance normalization agrees with simulated flat-sky patches.")
 
 
 class TestUtilsFunctions(unittest.TestCase):

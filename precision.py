@@ -172,7 +172,9 @@ def _invert_covariance(covariance: np.ndarray, config) -> np.ndarray:
             if np.allclose(this_covariance, np.diag(np.diag(this_covariance))):
                 b_diag = np.arange(n_bands)[:, None]
                 s_diag = np.arange(n_stokes)[None, :]
-                precision[y_idx, x_idx, b_diag, s_diag, b_diag, s_diag] = 1 / this_covariance[b_diag*n_stokes + s_diag, b_diag*n_stokes + s_diag]
+                precision[y_idx, x_idx, b_diag, s_diag, b_diag, s_diag] = (
+                    1 / this_covariance[b_diag * n_stokes + s_diag, b_diag * n_stokes + s_diag]
+                )
             else:
                 n_dim = n_bands * n_stokes
                 cov = this_covariance.reshape(n_dim, n_dim)

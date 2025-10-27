@@ -7,7 +7,7 @@ efficient parallelization across devices.
 """
 
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import blackjax
 import jax
@@ -271,7 +271,7 @@ class PolarizedBeamFitter:
             source_ids,
             source_fields,
             n_src,
-            precision, 
+            precision,
             debug_precision,
         ) = data_list
 

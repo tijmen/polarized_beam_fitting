@@ -49,7 +49,7 @@ def mask_gradients_for_excluded_sources(grad_tree, weight_array):
     return masked_grads
 
 
-def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_broadcast, k_indices_y=None, k_indices_x=None):
+def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_broadcast, idx_y=None, idx_x=None):
     """
     Build a chi2 function for Fourier space that doesn't close over data.
 
@@ -79,17 +79,19 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
         # Apply apodization and FFT
         model_apod = model * apod_mask_broadcast
         model_fft = jnp.fft.fft2(model_apod, axes=(0, 1))
-        if k_indices_y is not None and k_indices_x is not None:
-            model_fft = jnp.take(model_fft, k_indices_y, axis=0)
-            model_fft = jnp.take(model_fft, k_indices_x, axis=1)
+        if idx_y is not None and idx_x is not None:
+            model_fft = jnp.take(model_fft, idx_y, axis=0)
+            model_fft = jnp.take(model_fft, idx_x, axis=1)
 
         # Calculate chi2 with support for diagonal or full covariance weighting
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
-            chi2 = (jnp.abs(residual_fft) ** 2) * precision
+            # chi2 = (jnp.abs(residual_fft)**2) * precision
+            chi2 = jnp.real(residual_fft * jnp.conj(residual_fft)) * precision  # better derivatives?
             chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
-            return jnp.mean(jnp.real(chi2_per_mode))
+            return jnp.mean(chi2_per_mode)
 
+        # Multi-band precision matrices arrive per source with axes (ny, nx, n_bands, n_stokes, n_bands, n_stokes)
         ny, nx = residual_fft.shape[:2]
         n_bands = residual_fft.shape[-2]
         n_stokes = residual_fft.shape[-1]
@@ -98,7 +100,7 @@ def build_bootstrap_chi2_fourier(config, beam_models, y_grid, x_grid, apod_mask_
         precision_matrix = precision.reshape(ny, nx, n_bands * n_stokes, n_bands * n_stokes)
         weighted_vec = jnp.einsum("yxvw,yxw->yxv", precision_matrix, residual_vec)
         chi2_per_k = jnp.einsum("yxv,yxv->yx", jnp.conj(residual_vec), weighted_vec)
-        return jnp.mean(jnp.real(chi2_per_k))
+        return jnp.sum(jnp.real(chi2_per_k))
 
     def bootstrap_objective(params_logit, data, weight_array):
         """Bootstrap objective for Fourier space."""
@@ -297,8 +299,8 @@ class BootstrapBeamFitter:
                 self.base_fitter.y_grid,
                 self.base_fitter.x_grid,
                 self.base_fitter.apod_mask_broadcast,
-                self.base_fitter.k_indices_y,
-                self.base_fitter.k_indices_x,
+                self.base_fitter.idx_y,
+                self.base_fitter.idx_x,
             )
         else:
             return build_bootstrap_chi2_real(self.config, self.base_fitter.beam_models, self.base_fitter.y_grid, self.base_fitter.x_grid)

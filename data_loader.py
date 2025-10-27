@@ -2,7 +2,7 @@
 
 import os
 import pickle
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from spt3g import core, maps
@@ -521,7 +521,7 @@ class DataLoader:
             apod_mask = apod_mask.astype(self.config.dtype_np_real)
             ny_full, nx_full = apod_mask.shape
             idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), self.config.reso_arcmin, self.config.ellmax)
-            ny, nx = len(idx_y), len(idx_x)
+            _ny, _nx = len(idx_y), len(idx_x)
             apodized = maps_clean * apod_mask[None, :, :, None, None]
             maps_fft = np.fft.fft2(apodized, axes=(1, 2))[:, idx_y, :, :, :][:, :, idx_x, :, :]
 
