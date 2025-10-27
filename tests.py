@@ -181,13 +181,9 @@ def generate_mock_data(config, true_beam_params, n_sources=10):
             ny, nx = len(idx_y), len(idx_x)
             # Truncate ONLY the FFT maps - real-space maps stay full size
             maps_fft_numpy = maps_fft_numpy[:, idx_y, :, :, :][:, :, idx_x, :, :]
-            precision_placeholder = np.broadcast_to(
-                precision_template, (n_sources, ny, nx, n_bands, 3, n_bands, 3)
-            ).copy()
+            precision_placeholder = np.broadcast_to(precision_template, (n_sources, ny, nx, n_bands, 3, n_bands, 3)).copy()
         else:
-            precision_placeholder = np.broadcast_to(
-                precision_template, (n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3)
-            ).copy()
+            precision_placeholder = np.broadcast_to(precision_template, (n_sources, ny_full, nx_full, n_bands, 3, n_bands, 3)).copy()
         debug_placeholder = None
     else:
         precision_placeholder = None

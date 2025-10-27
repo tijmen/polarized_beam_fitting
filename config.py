@@ -114,7 +114,7 @@ class BeamFittingConfig:
         "J021046-5101.0",  # "focus quasar" Lots of S/N, but weird stuff in the residual maps
         "J044017-4333.1",  # also weird stuff in the residual maps
         "J231544-5018.6",  # outlier
-        "J052257-3627.5",  # outlier 
+        "J052257-3627.5",  # outlier
     ]
 
     # === Source selection & leakage handling ===
