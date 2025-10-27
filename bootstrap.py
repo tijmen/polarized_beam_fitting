@@ -331,6 +331,15 @@ class BootstrapBeamFitter:
         Run the tuned two-stage optimizer for a single bootstrap iteration.
         """
         params_logit = params_to_logit(initial_params_physical, self.config)
+
+        # Optional workaround to sticky optimizer (but better to fix the optimizer itself)
+        # # Add small random perturbation to escape immediate local minima
+        # def add_noise(x, key):
+        #     return x + jax.random.normal(key, x.shape, dtype=x.dtype) * 0.01
+
+        # self.rng_key, *subkeys = jax.random.split(self.rng_key, 1 + len(jax.tree.leaves(params_logit)))
+        # params_logit = jax.tree.map(add_noise, params_logit, jax.tree.unflatten(jax.tree.structure(params_logit), subkeys))
+
         self.config.adam_variant = "adam"
         self.config.adam_kwargs = {"learning_rate": 1e-2}
         self.config.loss_history_length = 100

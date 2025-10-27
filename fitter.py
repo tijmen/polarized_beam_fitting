@@ -108,10 +108,11 @@ class ObjectiveFunctions:
             model_fft = jnp.take(model_fft, self.fitter.idx_x, axis=1)
         residual_fft = data_fft - model_fft
         if precision.ndim == 4:
-            # chi2 = (jnp.abs(residual_fft)**2) * precision
-            chi2 = jnp.real(residual_fft * jnp.conj(residual_fft)) * precision  # better derivatives?
-            chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
-            return jnp.mean(chi2_per_mode)
+            raise ValueError("Precision is 4D, which is no longer supported.")
+            # # chi2 = (jnp.abs(residual_fft)**2) * precision
+            # chi2 = jnp.real(residual_fft * jnp.conj(residual_fft)) * precision  # better derivatives?
+            # chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
+            # return jnp.mean(chi2_per_mode)
 
         # Multi-band precision matrices arrive per source with axes (ny, nx, n_bands, n_stokes, n_bands, n_stokes)
         ny, nx = residual_fft.shape[:2]
