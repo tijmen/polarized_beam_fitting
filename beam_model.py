@@ -146,6 +146,7 @@ class BeamModelBetaPol(BeamModelBase):
         data_path = config.betapol_data_path
         try:
             beam_data = np.load(data_path)
+            print(f"Loaded betapol data from {data_path}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Could not find the betapol data file at {data_path}.")
 
@@ -156,8 +157,6 @@ class BeamModelBetaPol(BeamModelBase):
         if bt_key not in beam_data:
             available_bands = [key.split("_")[-1] for key in beam_data.keys() if key.startswith("BT_r_norm_")]
             raise KeyError(f"Band {self.band_GHz} GHz not found in betapol data. Available bands: {available_bands} GHz")
-
-        print(f"Loading betapol beam model for {self.band_GHz} GHz")
 
         # Store JAX arrays for fast computation
         self.r_fine_jax = jax.device_put(beam_data["r_fine_arcmin"].astype(self.config.dtype_jax_real))

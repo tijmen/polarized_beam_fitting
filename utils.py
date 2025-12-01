@@ -100,12 +100,11 @@ def ell_grid(map_shape, reso_arcmin):
 
 
 def compute_rectangular_ell_cut_indices(map_shape, reso_arcmin, ellmax):
-    """Return ell_y/ell_x indices satisfying |ell_x|, |ell_y| <= ellmax; None if no cutoff."""
+    """Return ell_y/ell_x indices satisfying |ell_x|, |ell_y| <= ellmax; all indices if no cutoff."""
+    ell_y, ell_x, _, _ = ell_grid(map_shape, reso_arcmin)
 
     if ellmax is None or not np.isfinite(ellmax) or ellmax <= 0:
-        return None, None
-
-    ell_y, ell_x, _, _ = ell_grid(map_shape, reso_arcmin)
+        return np.arange(len(ell_y)), np.arange(len(ell_x))
 
     idx_y = np.where(np.abs(ell_y) <= ellmax)[0]
     idx_x = np.where(np.abs(ell_x) <= ellmax)[0]
@@ -115,7 +114,7 @@ def compute_rectangular_ell_cut_indices(map_shape, reso_arcmin, ellmax):
 
     if idx_y.size == len(ell_y) and idx_x.size == len(ell_x):
         print(f"Warning, asked to cut based on ell<{ellmax}, but no modes found above this value to cut.")
-        return None, None
+        return np.arange(len(ell_y)), np.arange(len(ell_x))
 
     return idx_y, idx_x
 

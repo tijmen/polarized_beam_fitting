@@ -27,9 +27,10 @@ CMB_CALIBRATION_FACTORS = {
     "Q": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
     "U": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
 }
+CMB_CORRELATION_MAX = 0.95
 
 
-def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 600.0, ell1: float = 800.0) -> np.ndarray:
+def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 360.0, ell1: float = 1080.0) -> np.ndarray:
     """Raised-cosine high-pass filter used to suppress large-scale CMB power."""
     print(f"Creating high-pass filter turning on between {ell0} and {ell1}...")
     hp_filter = np.ones_like(ell_vals, dtype=float)
@@ -114,7 +115,7 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = cl_te_grid * s2phi
     cov_tqu_highres[..., 1, 1] = cl_ee_grid * c2phi**2 + cl_bb_grid * s2phi**2
     cov_tqu_highres[..., 2, 2] = cl_ee_grid * s2phi**2 + cl_bb_grid * c2phi**2
-    cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi
+    cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi # confirmed data cov matches this sign. x axis points west
 
     cov_tqu_highres_shifted = np.fft.fftshift(cov_tqu_highres)
     cov_tqu_highres_shifted = 0.5 * np.roll(cov_tqu_highres_shifted, (-1, -1), axis=(0, 1)) + 0.5 * cov_tqu_highres_shifted
@@ -250,7 +251,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
             for stokes_idx in range(n_stokes):
                 covariance_model[:, :, band_idx, stokes_idx, band_idx, stokes_idx] = white_noise_floors[band_idx, stokes_idx]
     elif config.precision_model_cmb:
-        raise NotImplementedError("Model CMB covariance is currently broken. Needs to be debugged.")
+        # raise NotImplementedError("Model CMB covariance is currently broken. Needs to be debugged.")
         print("Creating covariance from combining average data covariance and expected CMB covariance...")
         covariance_cmb = _compute_cmb_covariance(config, ny, nx)
         for band_idx_i in range(n_bands):
@@ -258,9 +259,13 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
                 for band_idx_j in range(n_bands):
                     for stokes_idx_j in range(n_stokes):
                         if band_idx_i == band_idx_j and stokes_idx_i == stokes_idx_j:
-                            # diagonals: take the element-wise maximum of the CMB and data-mean
+                            # diagonals: take the element-wise maximum of (CMB + white noise floor) and data-mean
+                            cmb_plus_white = (
+                                covariance_cmb[:, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j]
+                                + white_noise_floors[band_idx_i, stokes_idx_i]
+                            )
                             covariance_model[:, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j] = np.maximum(
-                                covariance_cmb[:, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j],
+                                cmb_plus_white,
                                 covariance_data[:, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j],
                             )
                         else:
@@ -268,6 +273,22 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
                             covariance_model[:, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j] = covariance_cmb[
                                 :, :, band_idx_i, stokes_idx_i, band_idx_j, stokes_idx_j
                             ]
+        # clip the correlation matrix
+        for iy in range(ny):
+            for ix in range(nx):
+                this_covariance = covariance_model[iy, ix].reshape(n_bands * n_stokes, n_bands * n_stokes)
+                this_covariance_symm = 0.5 * (this_covariance + this_covariance.T)
+
+                # Build correlation matrix R = D^{-1/2} C D^{-1/2}
+                d = np.diag(this_covariance_symm)
+                dsqrt = np.sqrt(d)
+                invdsqrt = 1.0 / dsqrt
+                correlation = this_covariance_symm * (invdsqrt[:, None] * invdsqrt[None, :])
+                correlation = np.clip(correlation, -CMB_CORRELATION_MAX, CMB_CORRELATION_MAX)
+                np.fill_diagonal(correlation, 1.0) # restore the unit diagonal
+                this_covariance = correlation * (dsqrt[:, None] * dsqrt[None, :])
+                covariance_model[iy, ix] = this_covariance.reshape(n_bands, n_stokes, n_bands, n_stokes)
+
     elif config.precision_datadriven_offdiagonals:
         print("Using average data covariance...")
         covariance_model[:] = covariance_data[:]

@@ -80,7 +80,7 @@ class BeamFittingConfig:
     }
 
     source_param_names = ["yoff", "xoff", "flux"]
-    source_flux_bounds = (-5.0, 100.0)  # T, Q, U flux in uK
+    source_flux_bounds = (-5.0, 100.0)  # T, Q, U flux in mK
     source_position_bounds = (
         (-5.0, 5.0),  # yoff (source center y offset in pixels)
         (-5.0, 5.0),  # xoff (source center x offset in pixels)
@@ -111,10 +111,12 @@ class BeamFittingConfig:
         "J032046-3837.4",  # too faint at 150
         "J034838-2749.2",  # second noisiest-source. Don't know why.
         "J045703-2324.8",  # 3x noisier cutout map than others from this field?!
-        "J021046-5101.0",  # "focus quasar" Lots of S/N, but weird stuff in the residual maps
+        "J021046-5101.0",  # "focus quasar" Lots of S/N, but non-uniform cov and weird residuals
         "J044017-4333.1",  # also weird stuff in the residual maps
-        "J231544-5018.6",  # outlier
-        "J052257-3627.5",  # outlier
+        "J231544-5018.6",  # non-uniform coverage
+        "J052257-3627.5",  # Might be slightly extended according to radio imaging
+        "J010645-4034.3",  # Alternative ID for J010644-4034.4
+        #"J023653-6136.2",  # outlier in the real-space/white-noise comparison, and digs into the map edge at the bottom
     ]
 
     # === Source selection & leakage handling ===
@@ -128,7 +130,7 @@ class BeamFittingConfig:
 
     # === Precision estimation settings ===
     precision_n_pca = 0  # Number of PCA components for modeling per-source noise variation. 0 = simple mean
-    precision_model_cmb = False  # Use CAMB to estimate CMB contribution to off-diagonals
+    precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
 
@@ -165,7 +167,7 @@ class BeamFittingConfig:
 
     mclmc_num_warmup = 2000
     mclmc_num_samples = 2000
-    mclmc_desired_energy_var = 5e-4
+    mclmc_desired_energy_var = 0.01
 
     @property
     def dtype_np_real(self):

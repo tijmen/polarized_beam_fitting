@@ -107,6 +107,22 @@ class DataLoader:
 
         return precision, all_debug
 
+    def _normalize_source_id(self, source_id: str) -> str:
+        """Extract coordinate portion of source ID, stripping prefixes and band suffixes.
+
+        Examples:
+            'J142756-4206.3' -> '142756-4206.3'
+            'CoaddSPT-S J142756-4206.3' -> '142756-4206.3'
+            'J142756-4206.3-90GHz' -> '142756-4206.3'
+            '142756-4206.3-90GHz' -> '142756-4206.3'
+        """
+        s = source_id
+        if "J" in s:
+            s = s.split("J", 1)[1]
+        for band in self.config.bands:
+            s = s.replace(f"-{band}", "")
+        return s.strip()
+
     def _validate_skip_sources(self):
         """Check that skip_sources exist in data files."""
         all_source_ids = set()
@@ -119,7 +135,10 @@ class DataLoader:
                     if any(band in frame["Id"] for band in self.config.bands):
                         all_source_ids.add(frame["Id"])
 
-        missing = [s for s in self.config.skip_sources if not any(s in sid for sid in all_source_ids)]
+        normalized_data_ids = {self._normalize_source_id(sid) for sid in all_source_ids}
+        normalized_skip_ids = {self._normalize_source_id(s) for s in self.config.skip_sources}
+
+        missing = [s for s in self.config.skip_sources if self._normalize_source_id(s) not in normalized_data_ids]
 
         if missing:
             print(f"WARNING: Skip sources not found: {missing}")
@@ -165,7 +184,11 @@ class DataLoader:
 
     def _should_skip_source(self, source_id: str) -> bool:
         """Check if source should be skipped."""
-        return any(skip in source_id for skip in self.config.skip_sources)
+        normalized_id = self._normalize_source_id(source_id)
+        for skip_source in self.config.skip_sources:
+            if self._normalize_source_id(skip_source) == normalized_id:
+                return True
+        return False
 
     def _extract_maps_from_frame(self, frame):
         """Remove weights and validate a frame's maps."""
@@ -519,11 +542,10 @@ class DataLoader:
         if self.config.chi2_method == "fourier":
             apod_mask = make_apodization_mask(self.map_shape, self.config.apodization_width_pix)
             apod_mask = apod_mask.astype(self.config.dtype_np_real)
-            ny_full, nx_full = apod_mask.shape
-            idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), self.config.reso_arcmin, self.config.ellmax)
-            _ny, _nx = len(idx_y), len(idx_x)
             apodized = maps_clean * apod_mask[None, :, :, None, None]
-            maps_fft = np.fft.fft2(apodized, axes=(1, 2))[:, idx_y, :, :, :][:, :, idx_x, :, :]
+            maps_fft = np.fft.fft2(apodized, axes=(1, 2))
+            idx_y, idx_x = compute_rectangular_ell_cut_indices(self.map_shape, self.config.reso_arcmin, self.config.ellmax)
+            maps_fft = maps_fft[:, idx_y, :, :, :][:, :, idx_x, :, :]
 
         print(f"Prepared {n_src} sources for fitting.")
         return maps_clean, maps_fft
