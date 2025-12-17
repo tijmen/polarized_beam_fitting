@@ -65,8 +65,9 @@ class BeamFittingConfig:
     knot_spacing_arcmin = 0.4
     spline_k = 4  # Cubic B-spline
     spline_rmax_arcmin = 10.0
-    beam_model_type = "beta_pol"  # 'gaussian', 'beta_pol', 'beta_T', or 'bsplines_plus_gaussian'
+    beam_model_type = "beta_pol"  # 'gaussian', 'beta_pol', 'beta_T', 'bsplines_plus_gaussian', or 'bsplines_plus_main'
     bsplines_gaussian_rmin_arcmin = 0.5
+    bsplines_main_rmin_arcmin = 0.75
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
     beam_model_bounds = {
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
@@ -75,6 +76,9 @@ class BeamFittingConfig:
         "bsplines_plus_gaussian": {
             "gaussian_sigma_arcmin": (0.1, 1.0),
             "bspline_coeffs_T": (-0.5, 1.5),
+            "bspline_coeffs_P": (-0.5, 1.5),
+        },
+        "bsplines_plus_main": {
             "bspline_coeffs_P": (-0.5, 1.5),
         },
     }

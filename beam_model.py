@@ -646,6 +646,102 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         return r_fine, profile_T_fine, profile_P_fine, info
 
 
+class BeamModelBSplinesPlusMain(BeamModelBase):
+    """
+    Hybrid beam model using the betapol "full" beam for temperature and
+    the "main" beam plus B-splines (starting at 0.75 arcmin) for polarization.
+    """
+
+    def __init__(self, config, y_grid, x_grid, band):
+        super().__init__(config, y_grid, x_grid, band)
+        self.param_names = ["bspline_coeffs_P"]
+        self.spline_k = config.spline_k
+        self.spline_rmax_arcmin = config.spline_rmax_arcmin
+        self.knot_spacing_arcmin = config.knot_spacing_arcmin
+        self.spline_rmin_arcmin = getattr(config, "bsplines_main_rmin_arcmin", 0.75)
+
+        # Load the pre-calculated beam profiles
+        data_path = config.betapol_data_path
+        try:
+            beam_data = np.load(data_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Could not find the betapol data file at {data_path}.")
+
+        full_key = f"BT_r_norm_{self.band_GHz}"
+        main_key = f"Bmain_r_norm_{self.band_GHz}"
+        r_key = "r_fine_arcmin"
+
+        if full_key not in beam_data or main_key not in beam_data or r_key not in beam_data:
+            available_bands = [key.split("_")[-1] for key in beam_data.keys() if key.startswith("BT_r_norm_")]
+            raise KeyError(
+                f"Band {self.band_GHz} GHz not found in betapol data. "
+                f"Available bands: {available_bands} GHz, required keys: {full_key}, {main_key}, {r_key}"
+            )
+
+        self.r_fine_betapol_jax = jax.device_put(beam_data[r_key].astype(self.config.dtype_jax_real))
+        self.BT_r_norm_jax = jax.device_put(beam_data[full_key].astype(self.config.dtype_jax_real))
+        self.Bmain_r_norm_jax = jax.device_put(beam_data[main_key].astype(self.config.dtype_jax_real))
+
+        self.r_fine_np = beam_data[r_key]
+        self.BT_r_norm_np = beam_data[full_key]
+        self.Bmain_r_norm_np = beam_data[main_key]
+
+        (
+            r_fine_jax,
+            self.ortho_basis_funcs_jax,
+            self.n_bspline_coeffs,
+            self.r_knots,
+        ) = BeamModelBSplinesGaussian._setup_bspline_lut(self)
+        self.r_fine_jax = r_fine_jax  # B-spline lookup grid
+        self.n_fittable_coeffs = self.n_bspline_coeffs
+
+    def get_initial_physical_params(self):
+        """Initialize B-spline coefficients to zero (perturbations around the main beam)."""
+        return {"bspline_coeffs_P": jnp.zeros(self.n_bspline_coeffs, dtype=self.config.dtype_jax_real)}
+
+    def evaluate_beam_profile_P(self, params, r_values):
+        """
+        Calculate the polarization beam profile: Bmain(r) + Σ c_i φ_i(r).
+        """
+        r_values = jnp.asarray(r_values, dtype=self.config.dtype_jax_real)
+        bspline_coeffs = jnp.asarray(params["bspline_coeffs_P"], dtype=self.config.dtype_jax_real)
+
+        bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
+        bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
+        base_profile = linear_interp_differentiable(r_values, self.r_fine_betapol_jax, self.Bmain_r_norm_jax, self.config)
+
+        return base_profile + bspline_component
+
+    def evaluate_beam_maps(self, params, dy, dx):
+        r_map_arcmin = self._calculate_r_map(dy, dx)
+        beam_T_map = linear_interp_differentiable(r_map_arcmin, self.r_fine_betapol_jax, self.BT_r_norm_jax, self.config)
+        beam_P_map = self.evaluate_beam_profile_P(params, r_map_arcmin)
+        return beam_T_map, beam_P_map
+
+    def get_human_readable_params(self, params, prefix=""):
+        """Returns a human-readable dictionary of the B-spline coefficients."""
+        result = {}
+        for i, c in enumerate(params["bspline_coeffs_P"]):
+            result[f"{prefix}bspline_coeff_P_{i}"] = float(c)
+        return result
+
+    def get_profiles_for_plotting(self, params):
+        bspline_coeffs = np.array(params["bspline_coeffs_P"])
+        r_fine = np.array(self.r_fine_jax)
+        ortho_funcs = np.array(self.ortho_basis_funcs_jax)
+        bspline_component = ortho_funcs @ bspline_coeffs
+        base_profile = np.interp(r_fine, self.r_fine_np, self.Bmain_r_norm_np)
+        profile_P_fine = base_profile + bspline_component
+        profile_T_fine = np.interp(r_fine, self.r_fine_np, self.BT_r_norm_np)
+        info = {
+            "t_label": "T-Beam Profile (BT_r, fixed)",
+            "p_label": "P-Beam Profile (Bmain + B-splines above 0.75 arcmin)",
+            "ylabel": "Beam Amplitude",
+            "normalization": "pre-normalized",
+        }
+        return r_fine, profile_T_fine, profile_P_fine, info
+
+
 def create_beam_model(config, y_grid, x_grid, band):
     """Factory function to create a beam model instance."""
     if config.beam_model_type == "gaussian":
@@ -656,5 +752,7 @@ def create_beam_model(config, y_grid, x_grid, band):
         return BeamModelBetaTest(config, y_grid, x_grid, band)
     elif config.beam_model_type == "bsplines_plus_gaussian":
         return BeamModelBSplinesGaussian(config, y_grid, x_grid, band)
+    elif config.beam_model_type == "bsplines_plus_main":
+        return BeamModelBSplinesPlusMain(config, y_grid, x_grid, band)
     else:
         raise ValueError(f"Unknown beam model type: {config.beam_model_type}")
