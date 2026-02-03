@@ -242,7 +242,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
     s_diag = np.arange(n_stokes)[None, :]
     variance_data = covariance_data[:, :, b_diag, s_diag, b_diag, s_diag]
     white_noise_floors = _compute_white_noise_floors(variance_data, ell_y_grid, ell_x_grid)
-
+    print(f"White noise floors: {white_noise_floors}")
     covariance_model = np.zeros((ny, nx, n_bands, n_stokes, n_bands, n_stokes), dtype=config.dtype_np_real)
 
     if config.precision_white_noise:
@@ -250,6 +250,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
         for band_idx in range(n_bands):
             for stokes_idx in range(n_stokes):
                 covariance_model[:, :, band_idx, stokes_idx, band_idx, stokes_idx] = white_noise_floors[band_idx, stokes_idx]
+                covariance_model[0, 0, band_idx, stokes_idx, band_idx, stokes_idx] = 1e12 # kill the DC mode
     elif config.precision_model_cmb:
         # raise NotImplementedError("Model CMB covariance is currently broken. Needs to be debugged.")
         print("Creating covariance from combining average data covariance and expected CMB covariance...")

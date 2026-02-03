@@ -187,6 +187,7 @@ class DataLoader:
         normalized_id = self._normalize_source_id(source_id)
         for skip_source in self.config.skip_sources:
             if self._normalize_source_id(skip_source) == normalized_id:
+                print(f"Skipping source {source_id} because it is in the skip_sources list.")
                 return True
         return False
 
