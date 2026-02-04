@@ -26,6 +26,30 @@ def parse_declination(source_id):
     return None  # Return None if pattern not found
 
 
+def parse_subfield_declination(subfield_name: str) -> Optional[float]:
+    """Parse a declination in degrees from a subfield name like 'ra0hdec-44.75'."""
+    match = re.search(r"dec(-?\d+(?:\.\d+)?)", str(subfield_name))
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def match_subfield_by_declination(source_id: str, subfield_names) -> str:
+    """Return the subfield name with declination closest to the source declination."""
+    source_dec = parse_declination(source_id)
+    if source_dec is None:
+        raise ValueError(f"Could not parse declination from source ID '{source_id}'.")
+
+    subfield_decs = {}
+    for name in subfield_names:
+        dec = parse_subfield_declination(name)
+        if dec is None:
+            raise ValueError(f"Could not parse declination from subfield name '{name}'.")
+        subfield_decs[name] = dec
+
+    return min(subfield_decs, key=lambda name: abs(subfield_decs[name] - source_dec))
+
+
 def predict_nyquist_ell_x(declination_deg):
     """Predicts the ell_x of the TOD Nyquist frequency feature."""
     if declination_deg is None or np.isnan(declination_deg):

@@ -20,13 +20,6 @@ from .utils import (
 CMB_SUPERSAMPLING = 4
 COVARIANCE_EIGEN_EPS = 1e-4
 
-# Tcal https://sptlocal.grid.uchicago.edu/~yomori/20192020_lensing/Tcal/v3/spt3g20192020_tcal.html#updated-calibration
-# Pcal https://pole.uchicago.edu/spt3g/index.php/File:20231009_EETETT_Updates.pdf
-CMB_CALIBRATION_FACTORS = {
-    "T": {"90GHz": 1.07, "150GHz": 1.02, "220GHz": 1.01},
-    "Q": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
-    "U": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
-}
 CMB_CORRELATION_MAX = 0.95
 
 
@@ -138,10 +131,12 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
         for stokes_i_idx, stokes_i_label in enumerate(["T", "Q", "U"]):
             for band_j_idx, band_j_label in enumerate(config.bands):
                 for stokes_j_idx, stokes_j_label in enumerate(["T", "Q", "U"]):
+                    cal_i = 1.0 if config.use_cdrc else config.cmb_calibration_factors[stokes_i_label][band_i_label]
+                    cal_j = 1.0 if config.use_cdrc else config.cmb_calibration_factors[stokes_j_label][band_j_label]
                     cov_cmb[:, :, band_i_idx, stokes_i_idx, band_j_idx, stokes_j_idx] = (
                         cov_tqu_convolved[:, :, stokes_i_idx, stokes_j_idx]
-                        / CMB_CALIBRATION_FACTORS[stokes_i_label][band_i_label]
-                        / CMB_CALIBRATION_FACTORS[stokes_j_label][band_j_label]
+                        / cal_i
+                        / cal_j
                     )
 
     cov_cmb /= pixel_area_sr

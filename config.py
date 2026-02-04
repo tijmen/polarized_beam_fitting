@@ -129,6 +129,40 @@ class BeamFittingConfig:
     leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
     use_precomputed_leakage_templates = True  # Use offline templates stored on disk
 
+    # === CMB calibration factors ===
+    # Tcal https://sptlocal.grid.uchicago.edu/~yomori/20192020_lensing/Tcal/v3/spt3g20192020_tcal.html#updated-calibration
+    # Pcal https://pole.uchicago.edu/spt3g/index.php/File:20231009_EETETT_Updates.pdf
+    cmb_calibration_factors = {
+        "T": {"90GHz": 1.07, "150GHz": 1.02, "220GHz": 1.01},
+        "Q": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
+        "U": {"90GHz": 1.05, "150GHz": 1.06, "220GHz": 1.17},
+    }
+
+    # === CDRC deprojection/rotation/calibration ===
+    use_cdrc = False  # Enable Wei's CDRC procedure for deprojecting, rotating, and calibrating T/Q/U maps.
+    cdrc_winter_params = {
+        "ra0hdec-44.75": {
+            "90GHz": {"delta_psi": 0.0062, "epsilon_q_tt": 0.0025, "epsilon_u_tt": 0.0054},
+            "150GHz": {"delta_psi": 0.0051, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0072},
+            "220GHz": {"delta_psi": -0.0113, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0081},
+        },
+        "ra0hdec-52.25": {
+            "90GHz": {"delta_psi": 0.0080, "epsilon_q_tt": 0.0031, "epsilon_u_tt": 0.0060},
+            "150GHz": {"delta_psi": 0.0062, "epsilon_q_tt": 0.0030, "epsilon_u_tt": 0.0070},
+            "220GHz": {"delta_psi": -0.0122, "epsilon_q_tt": 0.0038, "epsilon_u_tt": 0.0065},
+        },
+        "ra0hdec-59.75": {
+            "90GHz": {"delta_psi": 0.0099, "epsilon_q_tt": 0.0076, "epsilon_u_tt": 0.0089},
+            "150GHz": {"delta_psi": 0.0087, "epsilon_q_tt": 0.0094, "epsilon_u_tt": 0.0130},
+            "220GHz": {"delta_psi": 0.0016, "epsilon_q_tt": 0.0186, "epsilon_u_tt": 0.0111},
+        },
+        "ra0hdec-67.25": {
+            "90GHz": {"delta_psi": 0.0093, "epsilon_q_tt": 0.0065, "epsilon_u_tt": 0.0087},
+            "150GHz": {"delta_psi": 0.0078, "epsilon_q_tt": 0.0088, "epsilon_u_tt": 0.0118},
+            "220GHz": {"delta_psi": 0.0060, "epsilon_q_tt": 0.0181, "epsilon_u_tt": 0.0132},
+        },
+    }
+
     # === Noise and chi-squared evaluation ===
     chi2_method = "fourier"  # "fourier" or "real_space"
 

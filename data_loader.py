@@ -9,7 +9,13 @@ from spt3g import core, maps
 
 from .precision import calculate_precision
 from .source_fitting import gaussfit_source
-from .utils import check_zero_fraction, compute_rectangular_ell_cut_indices, make_apodization_mask, shift_map_bilinear
+from .utils import (
+    check_zero_fraction,
+    compute_rectangular_ell_cut_indices,
+    make_apodization_mask,
+    match_subfield_by_declination,
+    shift_map_bilinear,
+)
 
 
 class DataLoader:
@@ -24,11 +30,22 @@ class DataLoader:
         self._validate_skip_sources()
 
         # Load raw data and perform gaussian fits
+        if self.config.use_cdrc and self.config.chi2_method != "fourier":
+            raise ValueError("CDRC is only supported with chi2_method='fourier'.")
+        if self.config.use_cdrc:
+            fields = set(self.config.coadd_filenames.keys())
+            if fields != {"winter"}:
+                raise ValueError(
+                    f"CDRC is only configured for winter coadds; expected coadd_filenames keys {{'winter'}}, got {sorted(fields)}."
+                )
         gaussfit_results = self._load_and_fit_sources()
 
         # Extract consistent sources across bands
         source_data = self._extract_consistent_sources(gaussfit_results)
         source_fields = source_data["fields"]
+
+        if self.config.use_cdrc:
+            self._apply_cdrc_to_source_data(source_data)
 
         # Create leakage template
         qu_templates, template_offsets, template_flux = self._create_leakage_template(
@@ -168,9 +185,9 @@ class DataLoader:
                 continue
 
             if self.config.use_precomputed_leakage_templates:
-                fit_result = self._build_precomputed_source_record(frame)
+                fit_result = self._build_precomputed_source_record(frame, band, field_name)
             else:
-                fit_result = self._fit_single_source(frame, band)
+                fit_result = self._fit_single_source(frame, band, field_name)
             if fit_result is not None:
                 fit_result["field"] = field_name
                 results[band][source_id] = fit_result
@@ -191,7 +208,7 @@ class DataLoader:
                 return True
         return False
 
-    def _extract_maps_from_frame(self, frame):
+    def _extract_maps_from_frame(self, frame, band: str, field_name: str):
         """Remove weights and validate a frame's maps."""
         t_map, q_map, u_map, weight = (frame["T"], frame["Q"], frame["U"], frame["Wpol"])
         maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
@@ -202,9 +219,61 @@ class DataLoader:
 
         return t_map, q_map, u_map, weight
 
-    def _fit_single_source(self, frame, band: str) -> Optional[Dict]:
+    def _get_cdrc_params(self, source_id: str, band: str, field_name: str) -> Tuple[Dict[str, float], str]:
+        """Return CDRC parameters and matched subfield name for a source."""
+        if field_name != "winter":
+            raise ValueError(f"CDRC is only configured for the winter field; got field='{field_name}'.")
+
+        subfield_name = match_subfield_by_declination(source_id, self.config.cdrc_winter_params.keys())
+        band_params = self.config.cdrc_winter_params[subfield_name].get(band)
+        if band_params is None:
+            raise ValueError(f"No CDRC parameters found for band '{band}' in subfield '{subfield_name}'.")
+
+        return band_params, subfield_name
+
+    def _build_cdrc_transform(self, band: str, params: Dict[str, float]) -> np.ndarray:
+        """Build the 3x3 CDRC transform matrix for (T, Q, U)."""
+        tcal = self.config.cmb_calibration_factors["T"][band]
+        pcal = self.config.cmb_calibration_factors["Q"][band]
+        eps_q = float(params["epsilon_q_tt"])
+        eps_u = float(params["epsilon_u_tt"])
+        psi = float(params["delta_psi"])
+
+        c = np.cos(psi)
+        s = np.sin(psi)
+        pscale = pcal / tcal
+
+        a1 = np.diag([tcal, tcal, tcal])
+        a2 = np.array([[1.0, 0.0, 0.0], [-eps_q, 1.0, 0.0], [-eps_u, 0.0, 1.0]], dtype=self.config.dtype_np_real)
+        a3 = np.array([[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]], dtype=self.config.dtype_np_real)
+        a4 = np.diag([1.0, pscale, pscale])
+        return a4 @ a3 @ a2 @ a1
+
+    def _apply_cdrc_to_source_data(self, source_data: Dict) -> None:
+        """Apply CDRC transforms to raw maps and per-band flux amplitudes in-place."""
+        source_ids = source_data["source_ids"]
+        source_fields = source_data["fields"]
+        raw_maps = source_data["raw_maps"]
+        gaussfit_amp = source_data["gaussfit_amp"]
+
+        n_src, _, _, n_bands, n_stokes = raw_maps.shape
+        if n_stokes != 3:
+            raise ValueError(f"Expected 3 stokes parameters for CDRC, got {n_stokes}.")
+
+        for i in range(n_src):
+            field = source_fields[i]
+            source_id = str(source_ids[i])
+            for j, band in enumerate(self.config.bands):
+                params, subfield_name = self._get_cdrc_params(source_id, band, field)
+                transform = self._build_cdrc_transform(band, params).astype(self.config.dtype_np_real)
+                raw_maps[i, :, :, j, :] = np.einsum("yxv,vw->yxw", raw_maps[i, :, :, j, :], transform, optimize=True)
+                gaussfit_amp[i, j, :] = gaussfit_amp[i, j, :] @ transform
+                if self.config.debug:
+                    print(f"Applied map-domain CDRC to {source_id} (field={field}, subfield={subfield_name}, band={band}).")
+
+    def _fit_single_source(self, frame, band: str, field_name: str) -> Optional[Dict]:
         """Fit Gaussian to a single source."""
-        extracted = self._extract_maps_from_frame(frame)
+        extracted = self._extract_maps_from_frame(frame, band, field_name)
         if extracted is None:
             return None
 
@@ -227,9 +296,9 @@ class DataLoader:
             "maps": (t_map, q_map, u_map, weight),
         }
 
-    def _build_precomputed_source_record(self, frame) -> Optional[Dict]:
+    def _build_precomputed_source_record(self, frame, band: str, field_name: str) -> Optional[Dict]:
         """Collect maps without running Gaussian fits (for precomputed templates)."""
-        extracted = self._extract_maps_from_frame(frame)
+        extracted = self._extract_maps_from_frame(frame, band, field_name)
         if extracted is None:
             return None
 
@@ -375,9 +444,10 @@ class DataLoader:
             field_fluxes: Dict[str, Dict[str, np.ndarray]] = template_fluxes.setdefault(field, {})
 
             for band_idx, band in enumerate(self.config.bands):
+                suffix = "_cdrc" if self.config.use_cdrc else ""
                 filename = os.path.join(
                     self.config.leakage_template_dir,
-                    f"leakage_template_{field}_{band}_{self.config.leakage_weighting}.pkl",
+                    f"leakage_template_{field}_{band}_{self.config.leakage_weighting}{suffix}.pkl",
                 )
 
                 if not os.path.exists(filename):

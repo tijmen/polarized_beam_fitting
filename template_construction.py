@@ -23,6 +23,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from spt3g import core, maps
 
+import sys
+sys.path.append("/home/tijmen/cmb_analysis/beam_analysis")
+
 from polarized_beam_fitting import PolarizedBeamFitter
 from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
@@ -30,6 +33,7 @@ from polarized_beam_fitting.utils import (
     apply_radial_lowpass,
     ell_grid,
     make_apodization_mask,
+    match_subfield_by_declination,
     parse_declination,
     predict_nyquist_ell_x,
     shift_map_bilinear,
@@ -49,6 +53,7 @@ FIELD_COADD_PATHS = {
 }
 OUTPUT_DIR = Path("cache/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
+USE_CDRC = False
 
 
 def plot_templates(templates: Dict[str, Dict[str, np.ndarray]], title: str, filename: Path) -> None:
@@ -111,7 +116,39 @@ def prepare_frequency_grids(map_shape: Tuple[int, int], reso_arcmin: float) -> T
     return ell_radius, reso_deg, taper_width_cpd
 
 
-def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitter) -> Dict[str, Dict[str, np.ndarray]]:
+def _get_cdrc_params(config: BeamFittingConfig, source_id: str, band: str, field: str) -> Tuple[Dict[str, float], str]:
+    """Return CDRC parameters and matched subfield name for a source."""
+    if field != "winter":
+        raise ValueError(f"CDRC is only configured for the winter field; got field='{field}'.")
+    subfield_name = match_subfield_by_declination(source_id, config.cdrc_winter_params.keys())
+    band_params = config.cdrc_winter_params[subfield_name].get(band)
+    if band_params is None:
+        raise ValueError(f"No CDRC parameters found for band '{band}' in subfield '{subfield_name}'.")
+    return band_params, subfield_name
+
+
+def _build_cdrc_transform(config: BeamFittingConfig, band: str, params: Dict[str, float]) -> np.ndarray:
+    """Build the 3x3 CDRC transform matrix for (T, Q, U)."""
+    tcal = config.cmb_calibration_factors["T"][band]
+    pcal = config.cmb_calibration_factors["Q"][band]
+    eps_q = float(params["epsilon_q_tt"])
+    eps_u = float(params["epsilon_u_tt"])
+    psi = float(params["delta_psi"])
+
+    c = np.cos(psi)
+    s = np.sin(psi)
+    pscale = pcal / tcal
+
+    a1 = np.diag([tcal, tcal, tcal])
+    a2 = np.array([[1.0, 0.0, 0.0], [-eps_q, 1.0, 0.0], [-eps_u, 0.0, 1.0]])
+    a3 = np.array([[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]])
+    a4 = np.diag([1.0, pscale, pscale])
+    return a4 @ a3 @ a2 @ a1
+
+
+def load_raw_maps_for_band(
+    config: BeamFittingConfig, fitter: PolarizedBeamFitter, field: str
+) -> Dict[str, Dict[str, np.ndarray]]:
     """Extract raw T/Q/U maps from the G3 file for sources present in the fitter state."""
     raw_maps_data: Dict[str, Dict[str, np.ndarray]] = {}
     band = config.bands[0]
@@ -139,11 +176,19 @@ def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitte
 
         t_map, q_map, u_map, weight = frame["T"], frame["Q"], frame["U"], frame["Wpol"]
         maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
-        raw_maps_data[source_base] = {
-            "T": np.array(t_map, copy=False),
-            "Q": np.array(q_map, copy=False),
-            "U": np.array(u_map, copy=False),
-        }
+        t_map_np = np.array(t_map, copy=False)
+        q_map_np = np.array(q_map, copy=False)
+        u_map_np = np.array(u_map, copy=False)
+
+        if config.use_cdrc:
+            params, subfield_name = _get_cdrc_params(config, source_base, band, field)
+            transform = _build_cdrc_transform(config, band, params)
+            stacked = np.stack((t_map_np, q_map_np, u_map_np), axis=-1)
+            stacked = np.einsum("yxv,vw->yxw", stacked, transform, optimize=True)
+            t_map_np, q_map_np, u_map_np = (stacked[:, :, 0], stacked[:, :, 1], stacked[:, :, 2])
+            print(f"Applied map-domain CDRC to {source_base} (field={field}, subfield={subfield_name}, band={band}).")
+
+        raw_maps_data[source_base] = {"T": t_map_np, "Q": q_map_np, "U": u_map_np}
 
     if not raw_maps_data:
         raise ValueError(f"No sources found in {filename} for band {band}.")
@@ -158,6 +203,10 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
     config.bands = [band]
     config.coadd_filenames = {field: [FIELD_COADD_PATHS[field]]}
     config.use_precomputed_leakage_templates = True  # for subsequent iterations. Set to False for the first run
+    config.use_cdrc = USE_CDRC
+    if config.use_cdrc and field != "winter":
+        print(f"Skipping field={field} for CDRC template construction (winter-only).")
+        return
 
     fitter = PolarizedBeamFitter(config)
     best_fit_params = fitter.run_fit()
@@ -172,7 +221,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
 
     apod_mask = make_apodization_mask(map_shape, config.apodization_width_pix)
     ell_radius, _, taper_width_cpd = prepare_frequency_grids(map_shape, config.reso_arcmin)
-    raw_maps_data = load_raw_maps_for_band(config, fitter)
+    raw_maps_data = load_raw_maps_for_band(config, fitter, field)
 
     normalized_q_maps = []
     normalized_u_maps = []
@@ -248,9 +297,10 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
         "U": np.sum(u_stack * weights_sq, axis=0) / np.sum(weights_sq),
     }
 
-    plotting_title = f"Filtered Leakage Templates\n{field} - {band}"
+    suffix = "_cdrc" if config.use_cdrc else ""
+    plotting_title = f"Filtered Leakage Templates\n{field} - {band}{suffix}"
     if make_plots:
-        plot_path = output_dir / f"templates_{field}_{band}.png"
+        plot_path = output_dir / f"templates_{field}_{band}{suffix}.png"
         plot_templates(templates, plotting_title, plot_path)
 
     metadata = {
@@ -259,6 +309,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
         "apod_width_pix": config.apodization_width_pix,
         "taper_width_pixels": 5,
         "reso_arcmin": config.reso_arcmin,
+        "use_cdrc": config.use_cdrc,
     }
 
     for scheme, scheme_maps in templates.items():
@@ -277,7 +328,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
             "metadata": metadata,
         }
 
-        output_path = output_dir / f"leakage_template_{field}_{band}_{scheme}.pkl"
+        output_path = output_dir / f"leakage_template_{field}_{band}_{scheme}{suffix}.pkl"
         with output_path.open("wb") as handle:
             pickle.dump(payload, handle)
         print(f"  Saved {scheme} template to {output_path}")
