@@ -420,13 +420,11 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         constraint_rows.append(np.array([bf.derivative()(r_min) for bf in basis_functions]))
         constraint_values.append(0.0)
 
-        rmax_val = 1e-4
-        # B(r_max) = rmax_val
+        # B(r_max) = 0
         constraint_rows.append(np.array([bf(r_max) for bf in basis_functions]))
-        constraint_values.append(rmax_val)
+        constraint_values.append(0.0)
 
         A = np.vstack(constraint_rows)
-        _ = np.array(constraint_values)  # we don't actually need this if the boundary conditions are all zero
 
         print(f"Constraint matrix condition number: {np.linalg.cond(A):.2e}")
 
@@ -497,11 +495,11 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         # Check value at r_max
         boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
-        max_rmax_violation = np.max(np.abs(boundary_check_rmax - rmax_val))
+        max_rmax_violation = np.max(np.abs(boundary_check_rmax))
 
         print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
         print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
-        print(f"Boundary condition B(r_max) = {rmax_val}: max violation = {max_rmax_violation:.2e}")
+        print(f"Boundary condition B(r_max) = 0: max violation = {max_rmax_violation:.2e}")
 
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]
@@ -535,10 +533,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
         print(f"  {self.n_bspline_coeffs} orthonormal basis functions")
-        print(
-            f"  B-splines start at r = {r_min:.1f} arcmin with B(r_min) = B'(r_min) = 0 and "
-            f"terminate with B(r_max={r_max:.1f} arcmin) = 0 constraints"
-        )
+        print(f"  B-splines: r in [{r_min:.1f}, {r_max:.1f}] arcmin, B(r_min) = B'(r_min) = B(r_max) = 0")
 
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
 

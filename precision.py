@@ -105,19 +105,20 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cov_tqu_highres = np.zeros((ny_highres, nx_highres, 3, 3), dtype=config.dtype_np_real)
     cov_tqu_highres[..., 0, 0] = cl_tt_grid
     cov_tqu_highres[..., 0, 1] = cov_tqu_highres[..., 1, 0] = cl_te_grid * c2phi
-    cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = cl_te_grid * s2phi
+    cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = -cl_te_grid * s2phi  # IAU convention
     cov_tqu_highres[..., 1, 1] = cl_ee_grid * c2phi**2 + cl_bb_grid * s2phi**2
     cov_tqu_highres[..., 2, 2] = cl_ee_grid * s2phi**2 + cl_bb_grid * c2phi**2
-    cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi # confirmed data cov matches this COSMO convention
+    cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = -(cl_ee_grid - cl_bb_grid) * s2phi * c2phi  # IAU convention
 
     cov_tqu_highres_shifted = np.fft.fftshift(cov_tqu_highres)
     cov_tqu_highres_shifted = 0.5 * np.roll(cov_tqu_highres_shifted, (-1, -1), axis=(0, 1)) + 0.5 * cov_tqu_highres_shifted
     cov_tqu_shifted = cov_tqu_highres_shifted.reshape(ny, ss, nx, ss, 3, 3).sum(axis=(1, 3))
     cov_tqu = np.fft.ifftshift(cov_tqu_shifted)
 
-    apod_mask = make_apodization_mask((ny, nx), config.apodization_width_pix)
+    ny_map, nx_map = config.map_size_pix, config.map_size_pix
+    apod_mask = make_apodization_mask((ny_map, nx_map), config.apodization_width_pix)
     apod_mask_fft = np.fft.fft2(apod_mask)
-    window_full = np.abs(apod_mask_fft) ** 2 / (ny * nx)
+    window_full = np.abs(apod_mask_fft) ** 2 / (ny_map * nx_map)
     inds_y = np.concatenate((np.arange(0, ny // 2 + 1), np.arange(-ny // 2 + 1, 0)))
     inds_x = np.concatenate((np.arange(0, nx // 2 + 1), np.arange(-nx // 2 + 1, 0)))
     window = window_full[np.ix_(inds_y, inds_x)]
