@@ -121,7 +121,7 @@ class BeamFittingConfig:
         "J231544-5018.6",  # non-uniform coverage
         "J052257-3627.5",  # Might be slightly extended according to radio imaging
         "J010645-4034.3",  # Alternative ID for J010644-4034.4
-        #"J023653-6136.2",  # outlier in the real-space/white-noise comparison, and slightly digs into the map edge at the bottom
+        # "J023653-6136.2",  # outlier in the real-space/white-noise comparison, and slightly digs into the map edge at the bottom
     ]
 
     # === Source selection & leakage handling ===

@@ -146,9 +146,7 @@ def _build_cdrc_transform(config: BeamFittingConfig, band: str, params: Dict[str
     return a4 @ a3 @ a2 @ a1
 
 
-def load_raw_maps_for_band(
-    config: BeamFittingConfig, fitter: PolarizedBeamFitter, field: str
-) -> Dict[str, Dict[str, np.ndarray]]:
+def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitter, field: str) -> Dict[str, Dict[str, np.ndarray]]:
     """Extract raw T/Q/U maps from the G3 file for sources present in the fitter state."""
     raw_maps_data: Dict[str, Dict[str, np.ndarray]] = {}
     band = config.bands[0]

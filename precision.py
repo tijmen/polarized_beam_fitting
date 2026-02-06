@@ -137,9 +137,7 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
                     cal_i = 1.0 if config.use_cdrc else config.cmb_calibration_factors[stokes_i_label][band_i_label]
                     cal_j = 1.0 if config.use_cdrc else config.cmb_calibration_factors[stokes_j_label][band_j_label]
                     cov_cmb[:, :, band_i_idx, stokes_i_idx, band_j_idx, stokes_j_idx] = (
-                        cov_tqu_convolved[:, :, stokes_i_idx, stokes_j_idx]
-                        / cal_i
-                        / cal_j
+                        cov_tqu_convolved[:, :, stokes_i_idx, stokes_j_idx] / cal_i / cal_j
                     )
 
     cov_cmb /= pixel_area_sr
@@ -248,7 +246,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
         for band_idx in range(n_bands):
             for stokes_idx in range(n_stokes):
                 covariance_model[:, :, band_idx, stokes_idx, band_idx, stokes_idx] = white_noise_floors[band_idx, stokes_idx]
-                covariance_model[0, 0, band_idx, stokes_idx, band_idx, stokes_idx] = 1e12 # kill the DC mode
+                covariance_model[0, 0, band_idx, stokes_idx, band_idx, stokes_idx] = 1e12  # kill the DC mode
     elif config.precision_model_cmb:
         # raise NotImplementedError("Model CMB covariance is currently broken. Needs to be debugged.")
         print("Creating covariance from combining average data covariance and expected CMB covariance...")
@@ -284,7 +282,7 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
                 invdsqrt = 1.0 / dsqrt
                 correlation = this_covariance_symm * (invdsqrt[:, None] * invdsqrt[None, :])
                 correlation = np.clip(correlation, -CMB_CORRELATION_MAX, CMB_CORRELATION_MAX)
-                np.fill_diagonal(correlation, 1.0) # restore the unit diagonal
+                np.fill_diagonal(correlation, 1.0)  # restore the unit diagonal
                 this_covariance = correlation * (dsqrt[:, None] * dsqrt[None, :])
                 covariance_model[iy, ix] = this_covariance.reshape(n_bands, n_stokes, n_bands, n_stokes)
 

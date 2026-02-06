@@ -11,8 +11,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.ndimage import map_coordinates
-from scipy.ndimage import shift as nd_shift
 from scipy.integrate import simpson
+from scipy.ndimage import shift as nd_shift
 from scipy.special import j0  # pylint: disable=no-name-in-module
 
 
