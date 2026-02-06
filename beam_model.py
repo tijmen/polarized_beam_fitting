@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy import interpolate
+from scipy.integrate import simpson
 
 from .utils import linear_interp_differentiable
 
@@ -325,6 +326,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         self.spline_rmax_arcmin = config.spline_rmax_arcmin
         self.knot_spacing_arcmin = config.knot_spacing_arcmin
         self.spline_rmin_arcmin = config.bsplines_gaussian_rmin_arcmin
+        self.baseline = config.bsplines_gaussian_baseline[self.band]
 
         # Setup the B-spline basis (area-normalized, no boundary conditions)
         (
@@ -381,14 +383,11 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
     def _setup_bspline_lut(self):
         """
-        Setup area-normalized orthogonal B-splines with boundary conditions
-        B(r_min) = 0, B'(r_min) = 0, and B(r_max) = 0.
-
-        The first knot is at r_min, but the B-spline basis functions are constrained
-        to evaluate to zero and have zero derivative at r_min, ensuring C1 continuity
-        with the Gaussian component.
+        Setup area-normalized orthogonal B-splines with endpoint constraints.
+        We enforce B(r_min) = B'(r_min) = B(r_max) = B'(r_max) = 0 so the
+        profile smoothly matches the Gaussian-only inner/outer regions.
         """
-        print("Setting up area-normalized orthogonal B-splines with B(r_min) = B'(r_min) = 0 and B(r_max) = 0 constraints...")
+        print("Setting up area-normalized orthogonal B-splines...")
         degree = self.spline_k - 1  # degree = 3 for cubic spline
         r_min = self.spline_rmin_arcmin
         r_max = self.spline_rmax_arcmin
@@ -408,35 +407,22 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         for i in range(n_coeffs_total):
             basis_functions.append(interpolate.BSpline(self.r_knots, identity_coeffs[i], degree))
 
-        # Build constraint matrix for boundary conditions at r_min and r_max
-        constraint_rows = []
-        constraint_values = []
+        # Constrain the spline correction to vanish smoothly at both boundaries:
+        #   B(r_min) = B'(r_min) = B(r_max) = B'(r_max) = 0.
+        value_row_rmin = np.array([bf(r_min) for bf in basis_functions])
+        deriv_row_rmin = np.array([bf.derivative()(r_min) for bf in basis_functions])
+        value_row_rmax = np.array([bf(r_max) for bf in basis_functions])
+        deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+        constraint_matrix = np.vstack([value_row_rmin, deriv_row_rmin, value_row_rmax, deriv_row_rmax])
 
-        # B(r_min) = 0
-        constraint_rows.append(np.array([bf(r_min) for bf in basis_functions]))
-        constraint_values.append(0.0)
-
-        # B'(r_min) = 0 (first derivative)
-        constraint_rows.append(np.array([bf.derivative()(r_min) for bf in basis_functions]))
-        constraint_values.append(0.0)
-
-        rmax_val = 1e-4
-        # B(r_max) = rmax_val
-        constraint_rows.append(np.array([bf(r_max) for bf in basis_functions]))
-        constraint_values.append(rmax_val)
-
-        A = np.vstack(constraint_rows)
-        _ = np.array(constraint_values)  # we don't actually need this if the boundary conditions are all zero
-
-        print(f"Constraint matrix condition number: {np.linalg.cond(A):.2e}")
-
-        # Find null space of A (these are the free directions)
-        U, s, Vt = np.linalg.svd(A)
-        tol = max(1e-10, s[0] * 1e-12)  # Relative tolerance
-        rank = np.sum(s > tol)
-        null_space_basis = Vt[rank:].T  # Columns are null space vectors
-
-        print(f"Null space dimension: {null_space_basis.shape[1]} free parameters")
+        _, singular_values, vh = np.linalg.svd(constraint_matrix)
+        if singular_values.size == 0:
+            raise ValueError("Failed to build endpoint constraint null space for B-splines.")
+        tol = max(1e-10, singular_values[0] * 1e-12)
+        rank = np.sum(singular_values > tol)
+        null_space_basis = vh[rank:].T
+        if null_space_basis.shape[1] == 0:
+            raise ValueError("Endpoint constraints remove all B-spline degrees of freedom.")
 
         # Define evaluation grid for area normalization
         n_eval = 2000
@@ -451,16 +437,16 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         # Weight function is 2πr for cylindrical coordinates
         weight_2d = 2 * np.pi * r_eval
 
-        # Compute Gram matrix for the null space vectors
-        n_null = null_space_basis.shape[1]
-        gram_matrix = np.zeros((n_null, n_null))
+        # Compute Gram matrix in the constrained coefficient space
+        n_free = null_space_basis.shape[1]
+        gram_matrix = np.zeros((n_free, n_free))
 
-        for i in range(n_null):
+        for i in range(n_free):
             func_i = basis_matrix @ null_space_basis[:, i]
-            for j in range(i, n_null):
+            for j in range(i, n_free):
                 func_j = basis_matrix @ null_space_basis[:, j]
                 # 2D area inner product: ∫f_i(r) * f_j(r) * 2π*r dr
-                inner_prod = np.trapezoid(func_i * func_j * weight_2d, r_eval)
+                inner_prod = simpson(func_i * func_j * weight_2d, x=r_eval)
                 gram_matrix[i, j] = inner_prod
                 gram_matrix[j, i] = inner_prod
 
@@ -470,7 +456,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         # Keep only positive eigenvalues
         mask = eigvals > 1e-10
         if not np.any(mask):
-            raise ValueError("Gram matrix is singular - check null space computation")
+            raise ValueError("Gram matrix is singular - check B-spline setup")
 
         # Create orthonormal basis with 2D area normalization
         orthogonal_coeffs = null_space_basis @ (eigvecs[:, mask] @ np.diag(1.0 / np.sqrt(eigvals[mask])))
@@ -481,27 +467,10 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             func_i = basis_matrix @ orthogonal_coeffs[:, i]
             for j in range(orthogonal_coeffs.shape[1]):
                 func_j = basis_matrix @ orthogonal_coeffs[:, j]
-                test_gram[i, j] = np.trapezoid(func_i * func_j * weight_2d, r_eval)
+                test_gram[i, j] = simpson(func_i * func_j * weight_2d, x=r_eval)
 
         off_diag_error = np.max(np.abs(test_gram - np.eye(test_gram.shape[0])))
         print(f"2D area orthonormality verification: max off-diagonal = {off_diag_error:.2e}")
-
-        # Verify boundary conditions are satisfied
-        boundary_check_rmin = basis_matrix[0, :] @ orthogonal_coeffs
-        max_rmin_violation = np.max(np.abs(boundary_check_rmin))
-
-        # Check derivative at boundary
-        derivative_at_boundary = np.array([bf.derivative()(r_min) for bf in basis_functions])
-        boundary_check_derivative = derivative_at_boundary @ orthogonal_coeffs
-        max_derivative_violation = np.max(np.abs(boundary_check_derivative))
-
-        # Check value at r_max
-        boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
-        max_rmax_violation = np.max(np.abs(boundary_check_rmax - rmax_val))
-
-        print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
-        print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
-        print(f"Boundary condition B(r_max) = {rmax_val}: max violation = {max_rmax_violation:.2e}")
 
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]
@@ -535,10 +504,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
         print(f"  {self.n_bspline_coeffs} orthonormal basis functions")
-        print(
-            f"  B-splines start at r = {r_min:.1f} arcmin with B(r_min) = B'(r_min) = 0 and "
-            f"terminate with B(r_max={r_max:.1f} arcmin) = 0 constraints"
-        )
+        print("  Endpoint constraints: B=B'=0 at r_min and r_max")
+        print(f"  B-splines active over r = [{r_min:.1f}, {r_max:.1f}] arcmin")
 
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
 
@@ -550,14 +517,14 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         if self.measured_beam_profile is not None:
             r_fine_np = np.array(self.r_fine_jax, dtype=self.config.dtype_np_real)
-            gaussian_component_np = np.exp(-0.5 * (r_fine_np / initial_sigma) ** 2)
+            gaussian_component_np = self.baseline + np.exp(-0.5 * (r_fine_np / initial_sigma) ** 2)
             basis_np = np.array(self.ortho_basis_funcs_jax, dtype=self.config.dtype_np_real)
 
             target_profile = self.measured_beam_profile - gaussian_component_np
 
             weight = 2.0 * np.pi * r_fine_np
             integrand = target_profile[:, None] * basis_np * weight[:, None]
-            coeffs_solution = np.trapezoid(integrand, r_fine_np, axis=0)
+            coeffs_solution = simpson(integrand, x=r_fine_np, axis=0)
             bounds = self.config.active_beam_model_bounds["bspline_coeffs_T"]
             eps = 1e-6
             coeffs_solution = np.clip(coeffs_solution, bounds[0] + eps, bounds[1] - eps)
@@ -600,11 +567,14 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         bspline_coeffs = jnp.asarray(bspline_coeffs, dtype=self.config.dtype_jax_real)
 
         # Gaussian component (shared)
-        gaussian_component = jnp.exp(-0.5 * (r_values / gaussian_sigma) ** 2)
+        gaussian_component = self.baseline + jnp.exp(-0.5 * (r_values / gaussian_sigma) ** 2)
 
         # B-spline component (beam-specific)
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
+        # Enforce compact support of the B-spline correction so the outer tail
+        # is controlled only by the Gaussian baseline model.
+        bspline_component = jnp.where(r_values >= self.spline_rmax_arcmin, 0.0, bspline_component)
 
         # Combined beam
         total_beam = gaussian_component + bspline_component
@@ -631,15 +601,15 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         bspline_coeffs_T = params["bspline_coeffs_T"]
         bspline_coeffs_P = params["bspline_coeffs_P"]
         r_fine = np.array(self.r_fine_jax)
-        gaussian_component = np.exp(-0.5 * (r_fine / gaussian_sigma) ** 2)
+        gaussian_component = self.baseline + np.exp(-0.5 * (r_fine / gaussian_sigma) ** 2)
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
         bspline_component_T = ortho_funcs @ bspline_coeffs_T
         bspline_component_P = ortho_funcs @ bspline_coeffs_P
         profile_T_fine = gaussian_component + bspline_component_T
         profile_P_fine = gaussian_component + bspline_component_P
         info = {
-            "t_label": f"T-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin + B-splines)",
-            "p_label": f"P-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin + B-splines)",
+            "t_label": f"T-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin, baseline={self.baseline:.3e} + B-splines)",
+            "p_label": f"P-Beam Profile (Gaussian σ={gaussian_sigma:.3f} arcmin, baseline={self.baseline:.3e} + B-splines)",
             "ylabel": "Beam Amplitude",
             "normalization": None,
         }

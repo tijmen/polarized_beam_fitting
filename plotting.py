@@ -10,6 +10,7 @@ import arviz as az
 import corner
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.integrate import simpson
 
 from .utils import safe_filename
 
@@ -530,7 +531,7 @@ class BeamPlotter:
 
         for i in range(n_check):
             for j in range(n_check):
-                gram_visual[i, j] = np.trapezoid(ortho_funcs[:, i] * ortho_funcs[:, j] * weight, r)
+                gram_visual[i, j] = simpson(ortho_funcs[:, i] * ortho_funcs[:, j] * weight, x=r)
 
         im = ax.imshow(gram_visual, cmap="RdBu_r", vmin=-0.1, vmax=1.1)
         ax.set_title("Gram Matrix of Basis Functions")

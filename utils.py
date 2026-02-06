@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.ndimage import map_coordinates
 from scipy.ndimage import shift as nd_shift
+from scipy.integrate import simpson
 from scipy.special import j0  # pylint: disable=no-name-in-module
 
 
@@ -398,7 +399,7 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
     # Initialize output array
     B_r = np.zeros_like(r_arcmin)
 
-    # Perform the integral using trapezoidal rule
+    # Perform the integral using Simpson's rule
     # Skip ell=0 to avoid issues with normalization
     mask = ell > 0
     ell_nonzero = ell[mask]
@@ -414,9 +415,9 @@ def hankel_transform_beam(ell, B_ell, r_arcmin, normalize=True):
         # Integrand: B_ell * J_0(ell * r) * ell
         integrand = B_ell_nonzero * bessel_values * ell_nonzero
 
-        # Integrate using trapezoidal rule
+        # Integrate using Simpson's rule
         # Factor of 1/(2π) from the Hankel transform definition
-        B_r[i] = np.trapezoid(integrand, ell_nonzero) / (2 * np.pi)
+        B_r[i] = simpson(integrand, ell_nonzero) / (2 * np.pi)
 
     if normalize:
         # Normalize to 1 at r=0

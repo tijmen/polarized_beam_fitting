@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -23,7 +24,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from spt3g import core, maps
 
-import sys
 sys.path.append("/home/tijmen/cmb_analysis/beam_analysis")
 
 from polarized_beam_fitting import PolarizedBeamFitter

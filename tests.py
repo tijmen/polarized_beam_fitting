@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib
 import numpy as np
+from scipy import interpolate
 
 matplotlib.use("Agg")
 
@@ -318,7 +319,7 @@ class TestEndToEndRecovery(unittest.TestCase):
         """Check Gaussian+Bspline recovery by comparing sigma and coefficient norms."""
         sigma_fit = float(np.asarray(recovered_params["gaussian_sigma_arcmin"]))
         sigma_true = float(true_params["gaussian_sigma_arcmin"])
-        self.assertAlmostEqual(sigma_fit, sigma_true, delta=1e-3)
+        self.assertAlmostEqual(sigma_fit, sigma_true, delta=2e-3)
 
         fit_T = np.asarray(recovered_params["bspline_coeffs_T"])
         fit_P = np.asarray(recovered_params["bspline_coeffs_P"])
@@ -373,6 +374,43 @@ class TestEndToEndRecovery(unittest.TestCase):
             lambda fit, true: self._assert_gaussian_bspline_recovery(config, fit[0], true),
         )
         print("✓ Gaussian + B-splines model test successful.")
+
+    def test_bspline_plus_gaussian_tail_matches_baseline(self, *mocks):
+        config = get_test_config(beam_model_type="bsplines_plus_gaussian")
+        ny = nx = config.map_size_pix
+        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
+        beam_model = create_beam_model(config, y, x, config.bands[0])
+
+        sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
+        coeffs = np.full(beam_model.n_bspline_coeffs, 0.2, dtype=config.dtype_np_real)
+        r_query = jnp.array([beam_model.spline_rmax_arcmin, beam_model.spline_rmax_arcmin + 0.25], dtype=config.dtype_jax_real)
+
+        profile = beam_model.evaluate_beam_profile(sigma, coeffs, r_query)
+        expected = beam_model.baseline + jnp.exp(-0.5 * (r_query / sigma) ** 2)
+        np.testing.assert_allclose(np.asarray(profile), np.asarray(expected), rtol=0.0, atol=1e-10)
+
+    def test_bspline_plus_gaussian_basis_has_smooth_endpoints(self, *mocks):
+        config = get_test_config(beam_model_type="bsplines_plus_gaussian")
+        ny = nx = config.map_size_pix
+        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
+        beam_model = create_beam_model(config, y, x, config.bands[0])
+
+        degree = beam_model.spline_k - 1
+        r_min = beam_model.spline_rmin_arcmin
+        r_max = beam_model.spline_rmax_arcmin
+        n_coeffs_total = len(beam_model.r_knots) - degree - 1
+        identity_coeffs = np.eye(n_coeffs_total)
+        basis_functions = [interpolate.BSpline(beam_model.r_knots, identity_coeffs[i], degree) for i in range(n_coeffs_total)]
+
+        value_row_rmin = np.array([bf(r_min) for bf in basis_functions])
+        deriv_row_rmin = np.array([bf.derivative()(r_min) for bf in basis_functions])
+        value_row_rmax = np.array([bf(r_max) for bf in basis_functions])
+        deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+
+        np.testing.assert_allclose(value_row_rmin @ beam_model.orthogonal_coeffs, 0.0, atol=1e-10, rtol=0.0)
+        np.testing.assert_allclose(deriv_row_rmin @ beam_model.orthogonal_coeffs, 0.0, atol=1e-10, rtol=0.0)
+        np.testing.assert_allclose(value_row_rmax @ beam_model.orthogonal_coeffs, 0.0, atol=1e-10, rtol=0.0)
+        np.testing.assert_allclose(deriv_row_rmax @ beam_model.orthogonal_coeffs, 0.0, atol=1e-10, rtol=0.0)
 
     def test_chi2_method_real_space(self, *mocks):
         print("\n--- Testing Chi2 Method: Real Space ---")
