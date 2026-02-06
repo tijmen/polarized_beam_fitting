@@ -153,8 +153,6 @@ class DataLoader:
                         all_source_ids.add(frame["Id"])
 
         normalized_data_ids = {self._normalize_source_id(sid) for sid in all_source_ids}
-        normalized_skip_ids = {self._normalize_source_id(s) for s in self.config.skip_sources}
-
         missing = [s for s in self.config.skip_sources if self._normalize_source_id(s) not in normalized_data_ids]
 
         if missing:
@@ -266,8 +264,8 @@ class DataLoader:
             for j, band in enumerate(self.config.bands):
                 params, subfield_name = self._get_cdrc_params(source_id, band, field)
                 transform = self._build_cdrc_transform(band, params).astype(self.config.dtype_np_real)
-                raw_maps[i, :, :, j, :] = np.einsum("yxv,vw->yxw", raw_maps[i, :, :, j, :], transform, optimize=True)
-                gaussfit_amp[i, j, :] = gaussfit_amp[i, j, :] @ transform
+                raw_maps[i, :, :, j, :] = np.einsum("wv,yxv->yxw", transform, raw_maps[i, :, :, j, :], optimize=True)
+                gaussfit_amp[i, j, :] = transform @ gaussfit_amp[i, j, :]
                 if self.config.debug:
                     print(f"Applied map-domain CDRC to {source_id} (field={field}, subfield={subfield_name}, band={band}).")
 

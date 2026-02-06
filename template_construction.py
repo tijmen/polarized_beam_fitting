@@ -53,7 +53,7 @@ FIELD_COADD_PATHS = {
 }
 OUTPUT_DIR = Path("cache/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
-USE_CDRC = False
+USE_CDRC = True
 
 
 def plot_templates(templates: Dict[str, Dict[str, np.ndarray]], title: str, filename: Path) -> None:
@@ -184,7 +184,7 @@ def load_raw_maps_for_band(
             params, subfield_name = _get_cdrc_params(config, source_base, band, field)
             transform = _build_cdrc_transform(config, band, params)
             stacked = np.stack((t_map_np, q_map_np, u_map_np), axis=-1)
-            stacked = np.einsum("yxv,vw->yxw", stacked, transform, optimize=True)
+            stacked = np.einsum("wv,yxv->yxw", transform, stacked, optimize=True)
             t_map_np, q_map_np, u_map_np = (stacked[:, :, 0], stacked[:, :, 1], stacked[:, :, 2])
             print(f"Applied map-domain CDRC to {source_base} (field={field}, subfield={subfield_name}, band={band}).")
 

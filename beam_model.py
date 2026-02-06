@@ -415,6 +415,8 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
         constraint_matrix = np.vstack([value_row_rmin, deriv_row_rmin, value_row_rmax, deriv_row_rmax])
 
+        print(f"Constraint matrix condition number: {np.linalg.cond(constraint_matrix):.2e}")
+
         _, singular_values, vh = np.linalg.svd(constraint_matrix)
         if singular_values.size == 0:
             raise ValueError("Failed to build endpoint constraint null space for B-splines.")
@@ -423,6 +425,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         null_space_basis = vh[rank:].T
         if null_space_basis.shape[1] == 0:
             raise ValueError("Endpoint constraints remove all B-spline degrees of freedom.")
+        print(f"Null space dimension: {null_space_basis.shape[1]} free parameters")
 
         # Define evaluation grid for area normalization
         n_eval = 2000
@@ -472,6 +475,26 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         off_diag_error = np.max(np.abs(test_gram - np.eye(test_gram.shape[0])))
         print(f"2D area orthonormality verification: max off-diagonal = {off_diag_error:.2e}")
 
+        # Verify boundary conditions are satisfied
+        boundary_check_rmin = basis_matrix[0, :] @ orthogonal_coeffs
+        max_rmin_violation = np.max(np.abs(boundary_check_rmin))
+
+        # Check derivative at boundary
+        derivative_at_boundary = np.array([bf.derivative()(r_min) for bf in basis_functions])
+        boundary_check_derivative = derivative_at_boundary @ orthogonal_coeffs
+        max_derivative_violation = np.max(np.abs(boundary_check_derivative))
+
+        # Check value at r_max
+        boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
+        max_rmax_violation = np.max(np.abs(boundary_check_rmax))
+        derivative_at_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+        boundary_check_derivative_rmax = derivative_at_rmax @ orthogonal_coeffs
+        max_derivative_rmax_violation = np.max(np.abs(boundary_check_derivative_rmax))
+
+        print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
+        print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
+        print(f"Boundary condition B(r_max) = 0: max violation = {max_rmax_violation:.2e}")
+        print(f"Boundary condition B'(r_max) = 0: max violation = {max_derivative_rmax_violation:.2e}")
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]
         self.orthogonal_coeffs = orthogonal_coeffs
