@@ -172,6 +172,7 @@ class BeamFittingConfig:
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
+    use_iau_phi_convention = False  # False reproduces dH26 paper results (legacy) but is objectively incorrect. Set to True for proper phi rotation to IAU convention.
 
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0
