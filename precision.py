@@ -23,6 +23,23 @@ COVARIANCE_EIGEN_EPS = 1e-4
 CMB_CORRELATION_MAX = 0.95
 
 
+def _apply_spt3g_nyquist_sine_fix(sine_grid: np.ndarray) -> np.ndarray:
+    """
+    Apply the SPT-3G Nyquist-row/column symmetry fix used in QU<->EB rotations.
+
+    For even map dimensions, FFT Nyquist modes are self-conjugate. Matching
+    spt3g.mapspectra.basicmaputils requires a sign flip on the half-row/column
+    portions below.
+    """
+    fixed = np.array(sine_grid, copy=True)
+    ny, nx = fixed.shape
+    if ny % 2 == 0:
+        fixed[ny // 2, nx // 2 + 1 :] *= -1.0
+    if nx % 2 == 0:
+        fixed[ny // 2 + 1 :, nx // 2] *= -1.0
+    return fixed
+
+
 def _smooth_highpass_1d(ell_vals: np.ndarray, ell0: float = 360.0, ell1: float = 1080.0) -> np.ndarray:
     """Raised-cosine high-pass filter used to suppress large-scale CMB power."""
     print(f"Creating high-pass filter turning on between {ell0} and {ell1}...")
@@ -102,7 +119,7 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     #   phi = atan2(-kx, ky)
     phi = np.arctan2(-ell_x_grid_highres, ell_y_grid_highres)
     c2phi = np.cos(2.0 * phi)
-    s2phi = np.sin(2.0 * phi)
+    s2phi = _apply_spt3g_nyquist_sine_fix(np.sin(2.0 * phi))
 
     cov_tqu_highres = np.zeros((ny_highres, nx_highres, 3, 3), dtype=config.dtype_np_real)
     cov_tqu_highres[..., 0, 0] = cl_tt_grid

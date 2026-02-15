@@ -42,16 +42,16 @@ from polarized_beam_fitting.utils import (
 # Default bands and coadd files to process
 BANDS: Tuple[str, ...] = ("90GHz", "150GHz", "220GHz")
 FIELD_COADD_PATHS = {
-    "winter": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
-    "summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
-    "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
-    "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
+    # "winter": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
+    # "summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
+    # "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
+    # "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
     "winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
-    "summer_a_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
-    "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
-    "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
+    # "summer_a_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
+    # "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
+    # "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
 }
-OUTPUT_DIR = Path("cache/leakage_templates")
+OUTPUT_DIR = Path("/home/tijmen/cmb_analysis/beam_analysis/cache/leakage_templates")
 WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
 USE_CDRC = True
 
@@ -118,7 +118,7 @@ def prepare_frequency_grids(map_shape: Tuple[int, int], reso_arcmin: float) -> T
 
 def _get_cdrc_params(config: BeamFittingConfig, source_id: str, band: str, field: str) -> Tuple[Dict[str, float], str]:
     """Return CDRC parameters and matched subfield name for a source."""
-    if field != "winter":
+    if field not in ["winter", "winter_nodecon"]:
         raise ValueError(f"CDRC is only configured for the winter field; got field='{field}'.")
     subfield_name = match_subfield_by_declination(source_id, config.cdrc_winter_params.keys())
     band_params = config.cdrc_winter_params[subfield_name].get(band)
@@ -202,7 +202,7 @@ def construct_templates_for_combination(field: str, band: str, output_dir: Path,
     config.coadd_filenames = {field: [FIELD_COADD_PATHS[field]]}
     config.use_precomputed_leakage_templates = True  # for subsequent iterations. Set to False for the first run
     config.use_cdrc = USE_CDRC
-    if config.use_cdrc and field != "winter":
+    if config.use_cdrc and field not in ["winter", "winter_nodecon"]:
         print(f"Skipping field={field} for CDRC template construction (winter-only).")
         return
 

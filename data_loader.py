@@ -34,9 +34,9 @@ class DataLoader:
             raise ValueError("CDRC is only supported with chi2_method='fourier'.")
         if self.config.use_cdrc:
             fields = set(self.config.coadd_filenames.keys())
-            if fields != {"winter"}:
+            if fields not in [{"winter"}, {"winter_nodecon"}]:
                 raise ValueError(
-                    f"CDRC is only configured for winter coadds; expected coadd_filenames keys {{'winter'}}, got {sorted(fields)}."
+                    f"CDRC is only configured for winter coadds; expected coadd_filenames keys {{'winter', 'winter_nodecon'}}, got {sorted(fields)}."
                 )
         gaussfit_results = self._load_and_fit_sources()
 
@@ -219,7 +219,7 @@ class DataLoader:
 
     def _get_cdrc_params(self, source_id: str, band: str, field_name: str) -> Tuple[Dict[str, float], str]:
         """Return CDRC parameters and matched subfield name for a source."""
-        if field_name != "winter":
+        if field_name not in ["winter", "winter_nodecon"]:
             raise ValueError(f"CDRC is only configured for the winter field; got field='{field_name}'.")
 
         subfield_name = match_subfield_by_declination(source_id, self.config.cdrc_winter_params.keys())
