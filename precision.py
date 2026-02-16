@@ -115,7 +115,7 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cl_bb_grid = interp(cl_bb)
     cl_te_grid = interp(cl_te)
 
-    if config.use_iau_phi_convention:
+    if config.use_legacy_phi_convention:
         # Match spt3g.mapspectra.basicmaputils IAU angle convention:
         #   phi = atan2(-kx, ky)
         phi = np.arctan2(-ell_x_grid_highres, ell_y_grid_highres)
@@ -146,10 +146,17 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cov_tqu_shifted = cov_tqu_highres_shifted.reshape(ny, ss, nx, ss, 3, 3).sum(axis=(1, 3))
     cov_tqu = np.fft.ifftshift(cov_tqu_shifted)
 
-    ny_map, nx_map = config.map_size_pix, config.map_size_pix
-    apod_mask = make_apodization_mask((ny_map, nx_map), config.apodization_width_pix)
+    if getattr(config, "use_legacy_cmb_window_norm", True):
+        apod_shape = (ny, nx)
+        window_norm = ny * nx
+    else:
+        apod_shape = (config.map_size_pix, config.map_size_pix)
+        window_norm = config.map_size_pix * config.map_size_pix
+
+    apod_mask = make_apodization_mask(apod_shape, config.apodization_width_pix)
     apod_mask_fft = np.fft.fft2(apod_mask)
-    window_full = np.abs(apod_mask_fft) ** 2 / (ny_map * nx_map)
+    window_full = np.abs(apod_mask_fft) ** 2 / window_norm
+
     inds_y = np.concatenate((np.arange(0, ny // 2 + 1), np.arange(-ny // 2 + 1, 0)))
     inds_x = np.concatenate((np.arange(0, nx // 2 + 1), np.arange(-nx // 2 + 1, 0)))
     window = window_full[np.ix_(inds_y, inds_x)]

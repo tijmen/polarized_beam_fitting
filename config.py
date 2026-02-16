@@ -52,7 +52,7 @@ class BeamFittingConfig:
         os.makedirs(this_dir, exist_ok=True)
 
     # === Run selection & numerics ===
-    bands = ["90GHz"]  # ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
+    bands = ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
     double_precision = True  # Use 64-bit precision for all calculations
     debug = False
 
@@ -172,7 +172,8 @@ class BeamFittingConfig:
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
-    use_iau_phi_convention = False  # False reproduces dH26 paper results (legacy) but is objectively incorrect. Set to True for proper phi rotation to IAU convention.
+    use_legacy_phi_convention = True  # True reproduces dH26 phi handling; False fixes the bug and enables IAU phi
+    use_legacy_cmb_window_norm = True  # True reproduces dH26 (ell-cut) apod-window normalization; False fixes this bug
 
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0

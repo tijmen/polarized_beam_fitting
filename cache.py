@@ -36,6 +36,8 @@ class CacheManager:
             "precision_model_cmb": self.config.precision_model_cmb,
             "precision_datadriven_offdiagonals": self.config.precision_datadriven_offdiagonals,
             "precision_white_noise": self.config.precision_white_noise,
+            "use_legacy_phi_convention": getattr(self.config, "use_legacy_phi_convention", True),
+            "use_legacy_cmb_window_norm": getattr(self.config, "use_legacy_cmb_window_norm", True),
         }
         # Create a stable string representation
         param_string = str(sorted(relevant_params.items()))
