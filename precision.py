@@ -130,13 +130,13 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cov_tqu_highres = np.zeros((ny_highres, nx_highres, 3, 3), dtype=config.dtype_np_real)
     cov_tqu_highres[..., 0, 0] = cl_tt_grid
     cov_tqu_highres[..., 0, 1] = cov_tqu_highres[..., 1, 0] = cl_te_grid * c2phi
-    if config.use_iau_phi_convention:
+    if config.use_legacy_phi_convention:
         cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = -cl_te_grid * s2phi
     else:
         cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = cl_te_grid * s2phi
     cov_tqu_highres[..., 1, 1] = cl_ee_grid * c2phi**2 + cl_bb_grid * s2phi**2
     cov_tqu_highres[..., 2, 2] = cl_ee_grid * s2phi**2 + cl_bb_grid * c2phi**2
-    if config.use_iau_phi_convention:
+    if config.use_legacy_phi_convention:
         cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = -(cl_ee_grid - cl_bb_grid) * s2phi * c2phi
     else:
         cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi
