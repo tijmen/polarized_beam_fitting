@@ -22,13 +22,13 @@ from typing import Dict, Iterable, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-from spt3g import core, maps
 
 sys.path.append("/home/tijmen/cmb_analysis/beam_analysis")
 
 from polarized_beam_fitting import PolarizedBeamFitter
 from polarized_beam_fitting.beam_model import create_beam_model
 from polarized_beam_fitting.config import BeamFittingConfig
+from polarized_beam_fitting.data_loader import load_g3_source_map_records
 from polarized_beam_fitting.utils import (
     apply_radial_lowpass,
     ell_grid,
@@ -43,17 +43,17 @@ from polarized_beam_fitting.utils import (
 BANDS: Tuple[str, ...] = ("90GHz", "150GHz", "220GHz")
 FIELD_COADD_PATHS = {
     "winter": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
-    #"summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
-    #"summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
-    #"summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
-    #"winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
+    # "summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
+    # "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
+    # "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
+    # "winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
     # "summer_a_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
     # "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
     # "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
 }
 OUTPUT_DIR = Path("/home/tijmen/cmb_analysis/beam_analysis/cache/leakage_templates")
-#WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
-WEIGHTING_SCHEMES = ("linear")
+# WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
+WEIGHTING_SCHEMES = ("linear",)
 USE_CDRC = False
 
 
@@ -158,36 +158,24 @@ def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitte
         raise ValueError("No coadd files configured for template construction.")
     filename = filenames[0]
     try:
-        g3_file = core.G3File(filename)
+        records = load_g3_source_map_records(filename, [band], source_bases=source_ids)
+        for record in records:
+            source_base = record.source_id.split(f"-{band}")[0]
+            t_map_np = record.t
+            q_map_np = record.q
+            u_map_np = record.u
+
+            if config.use_cdrc:
+                params, subfield_name = _get_cdrc_params(config, source_base, band, field)
+                transform = _build_cdrc_transform(config, band, params)
+                stacked = np.stack((t_map_np, q_map_np, u_map_np), axis=-1)
+                stacked = np.einsum("wv,yxv->yxw", transform, stacked, optimize=True)
+                t_map_np, q_map_np, u_map_np = (stacked[:, :, 0], stacked[:, :, 1], stacked[:, :, 2])
+                print(f"Applied map-domain CDRC to {source_base} (field={field}, subfield={subfield_name}, band={band}).")
+
+            raw_maps_data[source_base] = {"T": t_map_np, "Q": q_map_np, "U": u_map_np}
     except RuntimeError as err:
         raise RuntimeError(f"Could not open coadd file {filename}") from err
-
-    for frame in g3_file:
-        if frame.type != core.G3FrameType.Map or "Id" not in frame:
-            continue
-
-        if band not in frame["Id"]:
-            continue
-
-        source_base = frame["Id"].split(f"-{band}")[0]
-        if source_base not in source_ids:
-            continue
-
-        t_map, q_map, u_map, weight = frame["T"], frame["Q"], frame["U"], frame["Wpol"]
-        maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
-        t_map_np = np.array(t_map, copy=False)
-        q_map_np = np.array(q_map, copy=False)
-        u_map_np = np.array(u_map, copy=False)
-
-        if config.use_cdrc:
-            params, subfield_name = _get_cdrc_params(config, source_base, band, field)
-            transform = _build_cdrc_transform(config, band, params)
-            stacked = np.stack((t_map_np, q_map_np, u_map_np), axis=-1)
-            stacked = np.einsum("wv,yxv->yxw", transform, stacked, optimize=True)
-            t_map_np, q_map_np, u_map_np = (stacked[:, :, 0], stacked[:, :, 1], stacked[:, :, 2])
-            print(f"Applied map-domain CDRC to {source_base} (field={field}, subfield={subfield_name}, band={band}).")
-
-        raw_maps_data[source_base] = {"T": t_map_np, "Q": q_map_np, "U": u_map_np}
 
     if not raw_maps_data:
         raise ValueError(f"No sources found in {filename} for band {band}.")

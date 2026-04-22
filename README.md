@@ -1,12 +1,18 @@
-# SPT-3G Polarized Beam Characterization
+# Polarized Beam Fitting
 
-`polarized_beam_fitting` is a JAX-based fitter for the SPT-3G polarized beam. It models point-source cutout maps in temperature and polarization, subtracts T->Q/U leakage templates, and fits a shared beam model together with per-source position and flux parameters. It supports a number of beam models and minimizers/samplers.
+`polarized_beam_fitting` is a JAX-based fitter that fits a parametric radial beam profile to point source observations from mm-wave polarimeters such as SPT-3G. It models point-source cutout maps in temperature and polarization, subtracts T->Q/U leakage templates, and fits a shared beam model together with per-source position and flux parameters. It supports a number of beam models and minimizers/samplers.
 
-The package is not currently intended to be used as-is, but may contain useful reference code.
+### Note for SPT-3G Users
 
 To anyone inside the SPT-3G collaboration who does want to reproduce the results from *de Haan et al. (2026)*, the default configuration in [`config.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/config.py) points at SPT-3G data products, cache directories, and betapol reference files on my filesystem. Other users will need to override paths and run settings before using the package.
 
-For anyone outside the SPT-3G collaboration, as we stated in the paper, we are willing to share a usable version of this code upon reasonable request. Such a usable version would entail about one day of work by me to strip out SPT-3G-specific dependencies and assumptions. Please contact <tijmen.dehaan@gmail.com> if you wish to make this request.
+### Note for non-SPT Users
+
+Despite this code only having been used for SPT-3G and simulated data so far, the SPT-3G specific code is limited entirely to the data loader. In order to run this pipeline with your own experiment, follow these steps:
+
+1. Implement a loader subclass in the style of `ExampleExperimentDataLoader` in `data_loader.py`. Your loader should yield `SourceMapRecord` objects with T/Q/U maps in mK, weight maps in `1 / mK^2`, and pixel resolution in radians.
+2. Specify the configuration, including grouping input files by observing field in `config.coadd_filenames`, setting observing bands in `config.bands`, and setting `config.data_loader_class = YourExperimentDataLoader`.
+3. Choose a beam model. The `beta_pol` and `beta_T` models require a `betapol_data_path` file with two radial profiles to interpolate between; `gaussian` and B-spline-based models are easier starting points for new data.
 
 ## Paper
 
@@ -78,6 +84,10 @@ Useful methods:
 
 [`bootstrap.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/bootstrap.py) wraps the base fitter in `BootstrapBeamFitter`. It first finds the ML solution, then resamples sources with replacement.
 
+## Unit Conventions
+
+Unless a name or docstring explicitly says otherwise, map amplitudes and fluxes are in mK and angular quantities are in radians. Configuration fields ending in `_arcmin` are stored in arcminutes and converted at the boundary where radian-valued math requires it.
+
 ## Typical Usage
 
 This is the minimal package-level workflow:
@@ -118,9 +128,8 @@ This code frankly has too many dependencies. Important are:
 - `camb`
 - `arviz`
 - `corner`
-- `spt3g_software` as `spt3g`
 
-At the moment, `spt3g` is used mostly for reading `G3` files and dealing with their units. I do not make especially pervasive use of `spt3g_software`, so this dependency could be removed without too much work.
+`spt3g_software` is optional and only required for reading `.g3` coadd files. The data loader converts G3 containers into plain NumPy arrays before handing data to the rest of the package.
 
 ## File Guide
 
@@ -128,7 +137,7 @@ At the moment, `spt3g` is used mostly for reading `G3` files and dealing with th
 - [`config.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/config.py): run configuration
 - [`fitter.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/fitter.py): ML fitting and posterior sampling
 - [`beam_model.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/beam_model.py): beam parameterizations
-- [`data_loader.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data_loader.py): G3 loading and map preparation
+- [`data_loader.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data_loader.py): G3 loading, NumPy map preparation, and an example non-SPT data-loader adapter
 - [`precision.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/precision.py): Fourier covariance and precision construction
 - [`bootstrap.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/bootstrap.py): bootstrap resampling wrapper
 - [`plotting.py`](/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/plotting.py): diagnostics and summary figures

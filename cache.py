@@ -18,6 +18,7 @@ class CacheManager:
         # from the G3 files and re-calculate the leakage templates
         relevant_params = {
             "coadd_filenames": self.config.field_catalog.as_serializable(),  # different input data
+            "data_loader_class": getattr(self.config.data_loader_class, "__name__", None),  # different file interpretation
             "bands": self.config.bands,  # different data
             "map_size_pix": self.config.map_size_pix,  # different input data
             "reso_arcmin": self.config.reso_arcmin,  # different input data

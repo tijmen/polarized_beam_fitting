@@ -255,7 +255,8 @@ class PolarizedBeamFitter:
 
         # Use cache manager
         cache = CacheManager(self.config)
-        loader = DataLoader(self.config)
+        loader_class = self.config.data_loader_class or DataLoader
+        loader = loader_class(self.config)
 
         data = cache.load_or_create(loader.load_and_prepare)
         data_list = list(data)

@@ -5,7 +5,6 @@ from typing import Generator, Tuple
 
 import jax.numpy as jnp
 import numpy as np
-from spt3g import core
 
 from .fields import FieldCatalog
 
@@ -47,6 +46,7 @@ class BeamFittingConfig:
     noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
     leakage_template_dir = os.path.join(cache_dir, "leakage_templates")
+    data_loader_class = None  # Optional DataLoader subclass for non-SPT input formats
 
     for this_dir in [output_dir, cache_dir, leakage_template_dir]:
         os.makedirs(this_dir, exist_ok=True)
@@ -125,7 +125,7 @@ class BeamFittingConfig:
     ]
 
     # === Source selection & leakage handling ===
-    min_t_amplitude = 300 * core.G3Units.uK
+    min_t_amplitude = 0.3  # mK
     max_zero_fraction = 0.05
     leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
     use_precomputed_leakage_templates = True  # Use offline templates stored on disk

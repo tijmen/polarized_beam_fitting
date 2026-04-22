@@ -2,10 +2,10 @@
 
 import os
 import pickle
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterable, Iterator, Optional, Tuple
 
 import numpy as np
-from spt3g import core, maps
 
 from .precision import calculate_precision
 from .source_fitting import gaussfit_source
@@ -16,6 +16,124 @@ from .utils import (
     match_subfield_by_declination,
     shift_map_bilinear,
 )
+
+
+@dataclass
+class WeightMaps:
+    """Plain NumPy representation of the Stokes weight maps."""
+
+    TT: np.ndarray
+    QQ: np.ndarray
+    UU: np.ndarray
+    TQ: np.ndarray
+    TU: np.ndarray
+    QU: np.ndarray
+
+
+@dataclass
+class SourceMapRecord:
+    """A source cutout converted from G3 containers into plain arrays."""
+
+    source_id: str
+    band: str
+    t: np.ndarray
+    q: np.ndarray
+    u: np.ndarray
+    weight: WeightMaps
+    res: float
+
+
+def _require_spt3g():
+    """Import SPT3G lazily so package import and non-G3 workflows stay usable without it."""
+    try:
+        from spt3g import core, maps
+    except ImportError as err:
+        raise ImportError(
+            "Reading G3 coadd files requires spt3g_software. "
+            "Install it only for workflows that load .g3 files; the rest of polarized_beam_fitting uses NumPy arrays."
+        ) from err
+    return core, maps
+
+
+def _band_from_source_id(source_id: str, bands: Iterable[str]) -> Optional[str]:
+    """Extract the configured band label from a source ID."""
+    for band in bands:
+        if band in source_id:
+            return band
+    return None
+
+
+def _base_source_id(source_id: str, band: str) -> str:
+    """Strip the band suffix from a source ID if present."""
+    suffix = f"-{band}"
+    return source_id.split(suffix)[0] if suffix in source_id else source_id
+
+
+def _iter_g3_map_frames(filename: str) -> Iterator:
+    """Yield map frames from a G3 file."""
+    core, _ = _require_spt3g()
+    g3_file = core.G3File(filename)
+    for frame in g3_file:
+        if frame.type == core.G3FrameType.Map and "Id" in frame:
+            yield frame
+
+
+def iter_g3_source_ids(filename: str, bands: Iterable[str]) -> Iterator[str]:
+    """Yield source IDs from a G3 file without materializing map arrays."""
+    for frame in _iter_g3_map_frames(filename):
+        source_id = str(frame["Id"])
+        if _band_from_source_id(source_id, bands) is not None:
+            yield source_id
+
+
+def _extract_source_map_record(frame, band: str, max_zero_fraction: Optional[float] = None) -> Optional[SourceMapRecord]:
+    """Convert one G3 source frame to plain NumPy arrays after removing weights."""
+    _, maps = _require_spt3g()
+    source_id = str(frame["Id"])
+    t_map, q_map, u_map, weight = (frame["T"], frame["Q"], frame["U"], frame["Wpol"])
+    map_res = float(t_map.res)
+    maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
+
+    if max_zero_fraction is not None and not check_zero_fraction(t_map, source_id, max_zero_fraction=max_zero_fraction):
+        return None
+
+    weight_maps = WeightMaps(
+        TT=np.array(weight.TT, copy=True),
+        QQ=np.array(weight.QQ, copy=True),
+        UU=np.array(weight.UU, copy=True),
+        TQ=np.array(weight.TQ, copy=True),
+        TU=np.array(weight.TU, copy=True),
+        QU=np.array(weight.QU, copy=True),
+    )
+    return SourceMapRecord(
+        source_id=source_id,
+        band=band,
+        t=np.array(t_map, copy=True),
+        q=np.array(q_map, copy=True),
+        u=np.array(u_map, copy=True),
+        weight=weight_maps,
+        res=map_res,
+    )
+
+
+def load_g3_source_map_records(
+    filename: str,
+    bands: Iterable[str],
+    source_bases: Optional[Iterable[str]] = None,
+    max_zero_fraction: Optional[float] = None,
+) -> Iterator[SourceMapRecord]:
+    """Yield plain source-map records from a G3 file for the requested bands."""
+    source_base_set = None if source_bases is None else set(source_bases)
+    for frame in _iter_g3_map_frames(filename):
+        source_id = str(frame["Id"])
+        band = _band_from_source_id(source_id, bands)
+        if band is None:
+            continue
+        if source_base_set is not None and _base_source_id(source_id, band) not in source_base_set:
+            continue
+        record = _extract_source_map_record(frame, band, max_zero_fraction=max_zero_fraction)
+        if record is not None:
+            yield record
 
 
 class DataLoader:
@@ -140,17 +258,20 @@ class DataLoader:
             s = s.replace(f"-{band}", "")
         return s.strip()
 
+    def _iter_source_ids(self, filename: str) -> Iterator[str]:
+        """Yield source IDs from one configured input file."""
+        return iter_g3_source_ids(filename, self.config.bands)
+
+    def _iter_source_map_records(self, filename: str) -> Iterator[SourceMapRecord]:
+        """Yield source map records from one configured input file."""
+        return load_g3_source_map_records(filename, self.config.bands, max_zero_fraction=self.config.max_zero_fraction)
+
     def _validate_skip_sources(self):
         """Check that skip_sources exist in data files."""
         all_source_ids = set()
 
         for _, filename in self.config.iter_coadd_files():
-            g3_file = core.G3File(filename)
-
-            for frame in g3_file:
-                if frame.type == core.G3FrameType.Map and "Id" in frame:
-                    if any(band in frame["Id"] for band in self.config.bands):
-                        all_source_ids.add(frame["Id"])
+            all_source_ids.update(self._iter_source_ids(filename))
 
         normalized_data_ids = {self._normalize_source_id(sid) for sid in all_source_ids}
         missing = [s for s in self.config.skip_sources if self._normalize_source_id(s) not in normalized_data_ids]
@@ -170,32 +291,24 @@ class DataLoader:
 
     def _process_file(self, field_name: str, filename: str, results: Dict):
         """Process a single coadd file."""
-        g3_file = core.G3File(filename)
-
-        for frame in g3_file:
-            if frame.type != core.G3FrameType.Map or "Id" not in frame:
-                continue
-
-            source_id = frame["Id"]
-            band = self._get_band_from_id(source_id)
+        for source_maps in self._iter_source_map_records(filename):
+            source_id = source_maps.source_id
+            band = source_maps.band
 
             if band is None or self._should_skip_source(source_id):
                 continue
 
             if self.config.use_precomputed_leakage_templates:
-                fit_result = self._build_precomputed_source_record(frame, band, field_name)
+                fit_result = self._build_precomputed_source_record(source_maps, band, field_name)
             else:
-                fit_result = self._fit_single_source(frame, band, field_name)
+                fit_result = self._fit_single_source(source_maps, band, field_name)
             if fit_result is not None:
                 fit_result["field"] = field_name
                 results[band][source_id] = fit_result
 
     def _get_band_from_id(self, source_id: str) -> Optional[str]:
         """Extract band from source ID."""
-        for band in self.config.bands:
-            if band in source_id:
-                return band
-        return None
+        return _band_from_source_id(source_id, self.config.bands)
 
     def _should_skip_source(self, source_id: str) -> bool:
         """Check if source should be skipped."""
@@ -205,17 +318,6 @@ class DataLoader:
                 print(f"Skipping source {source_id} because it is in the skip_sources list.")
                 return True
         return False
-
-    def _extract_maps_from_frame(self, frame, band: str, field_name: str):
-        """Remove weights and validate a frame's maps."""
-        t_map, q_map, u_map, weight = (frame["T"], frame["Q"], frame["U"], frame["Wpol"])
-        maps.remove_weights(t_map, q_map, u_map, weight, zero_nans=False)
-
-        if not check_zero_fraction(t_map, frame["Id"], max_zero_fraction=self.config.max_zero_fraction):
-            print(f"Skipping source {frame['Id']} because of zero fraction is above {self.config.max_zero_fraction}.")
-            return None
-
-        return t_map, q_map, u_map, weight
 
     def _get_cdrc_params(self, source_id: str, band: str, field_name: str) -> Tuple[Dict[str, float], str]:
         """Return CDRC parameters and matched subfield name for a source."""
@@ -269,19 +371,21 @@ class DataLoader:
                 if self.config.debug:
                     print(f"Applied map-domain CDRC to {source_id} (field={field}, subfield={subfield_name}, band={band}).")
 
-    def _fit_single_source(self, frame, band: str, field_name: str) -> Optional[Dict]:
+    def _fit_single_source(self, source_maps: SourceMapRecord, band: str, field_name: str) -> Optional[Dict]:
         """Fit Gaussian to a single source."""
-        extracted = self._extract_maps_from_frame(frame, band, field_name)
-        if extracted is None:
-            return None
-
-        t_map, q_map, u_map, weight = extracted
-
-        fit = gaussfit_source(t_map, q_map, u_map, weight, config=self.config, band=band)
+        fit = gaussfit_source(
+            source_maps.t,
+            source_maps.q,
+            source_maps.u,
+            source_maps.weight,
+            config=self.config,
+            band=band,
+            map_res=source_maps.res,
+        )
         yoff, xoff, t_amp, meanoff, q_amp, u_amp = fit
 
         if t_amp < self.config.min_t_amplitude:
-            print(f"Skipping source {frame['Id']} because T amplitude is {t_amp}<{self.config.min_t_amplitude}.")
+            print(f"Skipping source {source_maps.source_id} because T amplitude is {t_amp}<{self.config.min_t_amplitude}.")
             return None
 
         return {
@@ -291,17 +395,11 @@ class DataLoader:
             "q_amp": q_amp,
             "u_amp": u_amp,
             "meanoff": meanoff,
-            "maps": (t_map, q_map, u_map, weight),
+            "maps": (source_maps.t, source_maps.q, source_maps.u, source_maps.weight),
         }
 
-    def _build_precomputed_source_record(self, frame, band: str, field_name: str) -> Optional[Dict]:
+    def _build_precomputed_source_record(self, source_maps: SourceMapRecord, band: str, field_name: str) -> Optional[Dict]:
         """Collect maps without running Gaussian fits (for precomputed templates)."""
-        extracted = self._extract_maps_from_frame(frame, band, field_name)
-        if extracted is None:
-            return None
-
-        t_map, q_map, u_map, weight = extracted
-
         zero = float(0.0)
         return {
             "yoff": zero,
@@ -310,7 +408,7 @@ class DataLoader:
             "q_amp": zero,
             "u_amp": zero,
             "meanoff": zero,
-            "maps": (t_map, q_map, u_map, weight),
+            "maps": (source_maps.t, source_maps.q, source_maps.u, source_maps.weight),
         }
 
     def _extract_consistent_sources(self, gaussfit_results: Dict) -> Dict:
@@ -618,3 +716,96 @@ class DataLoader:
 
         print(f"Prepared {n_src} sources for fitting.")
         return maps_clean, maps_fft
+
+
+class ExampleExperimentDataLoader(DataLoader):
+    """
+    Example adapter for a non-SPT experiment.
+
+    This class is not used by the SPT workflow. It is a concrete template for
+    users who want to feed another experiment's cutout maps into the same
+    fitter. Copy it, rename it, and replace the NPZ parsing with the relevant
+    experiment-specific file reader.
+
+    The example NPZ schema is:
+
+    - ``source_id``: ``(n_record,)`` strings. IDs should be stable across bands.
+      If the ID does not already end with ``-{band}``, the loader appends that
+      suffix because the fitter matches multiband sources by that convention.
+    - ``band``: optional ``(n_record,)`` strings such as ``150GHz``. If omitted,
+      the band is inferred from ``source_id``.
+    - ``T``, ``Q``, ``U``: ``(n_record, ny, nx)`` maps in mK.
+    - ``WTT``, ``WQQ``, ``WUU``: ``(n_record, ny, nx)`` inverse-variance weights
+      in 1 / mK^2.
+    - ``WTQ``, ``WTU``, ``WQU``: optional off-diagonal weights, also in 1 / mK^2.
+      Missing off-diagonal weights are treated as zero.
+    - ``res_rad``: scalar or ``(n_record,)`` pixel resolution in radians.
+    """
+
+    def _iter_source_ids(self, filename: str) -> Iterator[str]:
+        """Yield source IDs without loading full maps."""
+        with np.load(filename, allow_pickle=False) as data:
+            source_ids = np.asarray(data["source_id"]).astype(str)
+            bands = self._bands_from_npz(data, len(source_ids))
+            for source_id, band in zip(source_ids, bands):
+                if band is not None:
+                    yield self._ensure_band_suffix(source_id, band)
+
+    def _iter_source_map_records(self, filename: str) -> Iterator[SourceMapRecord]:
+        """Yield ``SourceMapRecord`` objects from the example NPZ schema."""
+        with np.load(filename, allow_pickle=False) as data:
+            source_ids = np.asarray(data["source_id"]).astype(str)
+            bands = self._bands_from_npz(data, len(source_ids))
+
+            for idx, raw_source_id in enumerate(source_ids):
+                band = bands[idx]
+                if band is None:
+                    continue
+
+                source_id = self._ensure_band_suffix(raw_source_id, band)
+                t_map = np.asarray(data["T"][idx], dtype=self.config.dtype_np_real)
+                if not check_zero_fraction(t_map, source_id, max_zero_fraction=self.config.max_zero_fraction):
+                    continue
+
+                yield SourceMapRecord(
+                    source_id=source_id,
+                    band=band,
+                    t=t_map,
+                    q=np.asarray(data["Q"][idx], dtype=self.config.dtype_np_real),
+                    u=np.asarray(data["U"][idx], dtype=self.config.dtype_np_real),
+                    weight=WeightMaps(
+                        TT=np.asarray(data["WTT"][idx], dtype=self.config.dtype_np_real),
+                        QQ=np.asarray(data["WQQ"][idx], dtype=self.config.dtype_np_real),
+                        UU=np.asarray(data["WUU"][idx], dtype=self.config.dtype_np_real),
+                        TQ=self._optional_weight(data, "WTQ", idx, t_map.shape),
+                        TU=self._optional_weight(data, "WTU", idx, t_map.shape),
+                        QU=self._optional_weight(data, "WQU", idx, t_map.shape),
+                    ),
+                    res=self._resolution_from_npz(data, idx),
+                )
+
+    def _bands_from_npz(self, data, n_record: int) -> list[Optional[str]]:
+        """Return band labels, falling back to source ID parsing when needed."""
+        if "band" in data.files:
+            raw_bands = np.asarray(data["band"]).astype(str)
+            return [band if band in self.config.bands else None for band in raw_bands]
+        source_ids = np.asarray(data["source_id"]).astype(str)
+        return [self._get_band_from_id(source_id) for source_id in source_ids[:n_record]]
+
+    def _ensure_band_suffix(self, source_id: str, band: str) -> str:
+        """Return an ID compatible with the fitter's multiband matching convention."""
+        suffix = f"-{band}"
+        return source_id if source_id.endswith(suffix) else f"{source_id}{suffix}"
+
+    def _optional_weight(self, data, key: str, idx: int, shape: Tuple[int, int]) -> np.ndarray:
+        """Read an optional off-diagonal weight map, defaulting to zeros."""
+        if key in data.files:
+            return np.asarray(data[key][idx], dtype=self.config.dtype_np_real)
+        return np.zeros(shape, dtype=self.config.dtype_np_real)
+
+    def _resolution_from_npz(self, data, idx: int) -> float:
+        """Read scalar or per-record pixel resolution in radians."""
+        res_rad = np.asarray(data["res_rad"], dtype=float)
+        if res_rad.ndim == 0:
+            return float(res_rad)
+        return float(res_rad[idx])
