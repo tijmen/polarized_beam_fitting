@@ -117,9 +117,7 @@ print(best_fit_params["beams"])
 create_diagnostic_plots(fitter, best_fit_params)
 ```
 
-## Runtime Expectations
-
-Dependencies:
+## Dependencies
 
 - `jax`
 - `numpy`
