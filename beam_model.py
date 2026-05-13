@@ -312,7 +312,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
     - Gaussian has variable sigma
     - B-splines start at 0.5 arcmin (no central region)
     - B-splines are orthonormalized with 2D area normalization: ∫phi_i(r)2πr dr = 1
-    - No boundary conditions on B-splines
+    - Endpoint constraints on B-splines
     """
 
     def __init__(self, config, y_grid, x_grid, band):
@@ -323,10 +323,13 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             "bspline_coeffs_P",
         ]
         self.spline_k = config.spline_k
-        self.spline_rmax_arcmin = config.spline_rmax_arcmin
+        self.bspline_rmax_arcmin = config.bspline_rmax_arcmin
+        self.spline_rmax_arcmin = self.bspline_rmax_arcmin
         self.knot_spacing_arcmin = config.knot_spacing_arcmin
         self.spline_rmin_arcmin = config.bsplines_gaussian_rmin_arcmin
         self.baseline = config.bsplines_gaussian_baseline[self.band]
+        self.bspline_rmax_value = self._get_bspline_rmax_value()
+        self.bspline_force_rmax_derivative_zero = bool(getattr(config, "bspline_force_rmax_derivative_zero", True))
 
         # Setup the B-spline basis (area-normalized, no boundary conditions)
         (
@@ -365,11 +368,36 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         measured_interp = np.interp(r_target, r_measured, beam_measured, left=beam_measured[0], right=beam_measured[-1])
         return measured_interp
 
+    def _get_bspline_rmax_value(self):
+        rmax_values = getattr(self.config, "bspline_rmax_values", {})
+        if isinstance(rmax_values, dict):
+            return float(rmax_values.get(self.band, 0.0))
+        return float(rmax_values)
+
+    def _bspline_rmax_offset(self, r_values, gaussian_sigma=None):
+        target = self.bspline_rmax_value
+        if gaussian_sigma is not None:
+            r_max = self.bspline_rmax_arcmin
+            target -= self.baseline + jnp.exp(-0.5 * (r_max / gaussian_sigma) ** 2)
+
+        profile = self.bspline_rmax_profile_jax * target
+        return linear_interp_differentiable(r_values, self.r_fine_jax, profile, self.config)
+
+    def _bspline_rmax_offset_np(self, r_values, gaussian_sigma=None):
+        target = self.bspline_rmax_value
+        if gaussian_sigma is not None:
+            r_max = self.bspline_rmax_arcmin
+            target -= self.baseline + np.exp(-0.5 * (r_max / gaussian_sigma) ** 2)
+
+        profile = self.bspline_rmax_profile_np * target
+        r_fine = np.asarray(self.r_fine_jax, dtype=self.config.dtype_np_real)
+        return np.interp(r_values, r_fine, profile, left=0.0, right=profile[-1])
+
     def _count_bspline_coeffs(self):
         """Count how many B-spline coefficients we'll have."""
         degree = self.spline_k - 1
         r_min = self.spline_rmin_arcmin
-        r_max = self.spline_rmax_arcmin
+        r_max = self.bspline_rmax_arcmin
 
         # Interior knots
         delta_r = self.knot_spacing_arcmin
@@ -384,13 +412,13 @@ class BeamModelBSplinesGaussian(BeamModelBase):
     def _setup_bspline_lut(self):
         """
         Setup area-normalized orthogonal B-splines with endpoint constraints.
-        We enforce B(r_min) = B'(r_min) = B(r_max) = B'(r_max) = 0 so the
-        profile smoothly matches the Gaussian-only inner/outer regions.
+        We enforce B(r_min) = B'(r_min) = B(r_max) = 0. By default we also
+        enforce B'(r_max) = 0 for backward compatibility.
         """
         print("Setting up area-normalized orthogonal B-splines...")
         degree = self.spline_k - 1  # degree = 3 for cubic spline
         r_min = self.spline_rmin_arcmin
-        r_max = self.spline_rmax_arcmin
+        r_max = self.bspline_rmax_arcmin
 
         # Interior knots
         delta_r = self.knot_spacing_arcmin
@@ -407,13 +435,19 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         for i in range(n_coeffs_total):
             basis_functions.append(interpolate.BSpline(self.r_knots, identity_coeffs[i], degree))
 
-        # Constrain the spline correction to vanish smoothly at both boundaries:
-        #   B(r_min) = B'(r_min) = B(r_max) = B'(r_max) = 0.
+        # Constrain the spline correction at both boundaries.
         value_row_rmin = np.array([bf(r_min) for bf in basis_functions])
         deriv_row_rmin = np.array([bf.derivative()(r_min) for bf in basis_functions])
         value_row_rmax = np.array([bf(r_max) for bf in basis_functions])
-        deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
-        constraint_matrix = np.vstack([value_row_rmin, deriv_row_rmin, value_row_rmax, deriv_row_rmax])
+        constraint_rows = [value_row_rmin, deriv_row_rmin, value_row_rmax]
+        if self.bspline_force_rmax_derivative_zero:
+            deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+            constraint_rows.append(deriv_row_rmax)
+        constraint_matrix = np.vstack(constraint_rows)
+
+        rmax_targets = np.zeros(len(constraint_rows))
+        rmax_targets[2] = 1.0
+        rmax_coeffs = np.linalg.lstsq(constraint_matrix, rmax_targets, rcond=None)[0]
 
         print(f"Constraint matrix condition number: {np.linalg.cond(constraint_matrix):.2e}")
 
@@ -487,14 +521,17 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         # Check value at r_max
         boundary_check_rmax = basis_matrix[-1, :] @ orthogonal_coeffs
         max_rmax_violation = np.max(np.abs(boundary_check_rmax))
-        derivative_at_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
-        boundary_check_derivative_rmax = derivative_at_rmax @ orthogonal_coeffs
-        max_derivative_rmax_violation = np.max(np.abs(boundary_check_derivative_rmax))
 
         print(f"Boundary condition B(r_min) = 0: max violation = {max_rmin_violation:.2e}")
         print(f"Boundary condition B'(r_min) = 0: max violation = {max_derivative_violation:.2e}")
         print(f"Boundary condition B(r_max) = 0: max violation = {max_rmax_violation:.2e}")
-        print(f"Boundary condition B'(r_max) = 0: max violation = {max_derivative_rmax_violation:.2e}")
+        if self.bspline_force_rmax_derivative_zero:
+            derivative_at_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+            boundary_check_derivative_rmax = derivative_at_rmax @ orthogonal_coeffs
+            max_derivative_rmax_violation = np.max(np.abs(boundary_check_derivative_rmax))
+            print(f"Boundary condition B'(r_max) = 0: max violation = {max_derivative_rmax_violation:.2e}")
+        else:
+            print("Boundary condition B'(r_max): not enforced")
         # Store coefficients for reconstruction
         self.n_bspline_coeffs = orthogonal_coeffs.shape[1]
         self.orthogonal_coeffs = orthogonal_coeffs
@@ -504,6 +541,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
 
         # Orthonormal B-spline basis functions (only defined for r >= r_min)
         ortho_basis_funcs = np.zeros((len(r_fine), self.n_bspline_coeffs))
+        rmax_profile = np.zeros(len(r_fine))
 
         # Only evaluate B-splines where r >= r_min
         mask_spline_region = r_fine >= r_min
@@ -519,15 +557,21 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             for j in range(self.n_bspline_coeffs):
                 ortho_func_spline = spline_basis_matrix @ orthogonal_coeffs[:, j]
                 ortho_basis_funcs[mask_spline_region, j] = ortho_func_spline
+            rmax_profile[mask_spline_region] = spline_basis_matrix @ rmax_coeffs
 
         # Convert to JAX arrays
         r_fine_jax = jax.device_put(r_fine.astype(self.config.dtype_jax_real))
         ortho_basis_funcs_jax = jax.device_put(ortho_basis_funcs.astype(self.config.dtype_jax_real))
+        self.bspline_rmax_profile_np = rmax_profile.astype(self.config.dtype_np_real)
+        self.bspline_rmax_profile_jax = jax.device_put(rmax_profile.astype(self.config.dtype_jax_real))
 
         print("Area-normalized B-spline basis setup complete:")
         print(f"  {len(self.r_knots)} knots, {n_coeffs_total} total B-spline coefficients")
         print(f"  {self.n_bspline_coeffs} orthonormal basis functions")
-        print("  Endpoint constraints: B=B'=0 at r_min and r_max")
+        if self.bspline_force_rmax_derivative_zero:
+            print("  Endpoint constraints: B=B'=0 at r_min, B=B'=0 at r_max")
+        else:
+            print("  Endpoint constraints: B=B'=0 at r_min, B=0 at r_max")
         print(f"  B-splines active over r = [{r_min:.1f}, {r_max:.1f}] arcmin")
 
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
@@ -542,8 +586,9 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             r_fine_np = np.array(self.r_fine_jax, dtype=self.config.dtype_np_real)
             gaussian_component_np = self.baseline + np.exp(-0.5 * (r_fine_np / initial_sigma) ** 2)
             basis_np = np.array(self.ortho_basis_funcs_jax, dtype=self.config.dtype_np_real)
+            rmax_offset_np = self._bspline_rmax_offset_np(r_fine_np, initial_sigma)
 
-            target_profile = self.measured_beam_profile - gaussian_component_np
+            target_profile = self.measured_beam_profile - gaussian_component_np - rmax_offset_np
 
             weight = 2.0 * np.pi * r_fine_np
             integrand = target_profile[:, None] * basis_np * weight[:, None]
@@ -595,9 +640,10 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         # B-spline component (beam-specific)
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
+        bspline_component = bspline_component + self._bspline_rmax_offset(r_values, gaussian_sigma)
         # Enforce compact support of the B-spline correction so the outer tail
         # is controlled only by the Gaussian baseline model.
-        bspline_component = jnp.where(r_values >= self.spline_rmax_arcmin, 0.0, bspline_component)
+        bspline_component = jnp.where(r_values >= self.bspline_rmax_arcmin, self.bspline_rmax_value - gaussian_component, bspline_component)
 
         # Combined beam
         total_beam = gaussian_component + bspline_component
@@ -626,8 +672,9 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         r_fine = np.array(self.r_fine_jax)
         gaussian_component = self.baseline + np.exp(-0.5 * (r_fine / gaussian_sigma) ** 2)
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
-        bspline_component_T = ortho_funcs @ bspline_coeffs_T
-        bspline_component_P = ortho_funcs @ bspline_coeffs_P
+        rmax_offset = self._bspline_rmax_offset_np(r_fine, gaussian_sigma)
+        bspline_component_T = ortho_funcs @ bspline_coeffs_T + rmax_offset
+        bspline_component_P = ortho_funcs @ bspline_coeffs_P + rmax_offset
         profile_T_fine = gaussian_component + bspline_component_T
         profile_P_fine = gaussian_component + bspline_component_P
         info = {
@@ -649,9 +696,12 @@ class BeamModelBSplinesPlusMain(BeamModelBase):
         super().__init__(config, y_grid, x_grid, band)
         self.param_names = ["bspline_coeffs_P"]
         self.spline_k = config.spline_k
-        self.spline_rmax_arcmin = config.spline_rmax_arcmin
+        self.bspline_rmax_arcmin = config.bspline_rmax_arcmin
+        self.spline_rmax_arcmin = self.bspline_rmax_arcmin
         self.knot_spacing_arcmin = config.knot_spacing_arcmin
         self.spline_rmin_arcmin = getattr(config, "bsplines_main_rmin_arcmin", 0.75)
+        self.bspline_rmax_value = BeamModelBSplinesGaussian._get_bspline_rmax_value(self)
+        self.bspline_force_rmax_derivative_zero = bool(getattr(config, "bspline_force_rmax_derivative_zero", True))
 
         # Load the pre-calculated beam profiles
         data_path = config.betapol_data_path
@@ -701,6 +751,7 @@ class BeamModelBSplinesPlusMain(BeamModelBase):
 
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
+        bspline_component = bspline_component + BeamModelBSplinesGaussian._bspline_rmax_offset(self, r_values)
         base_profile = linear_interp_differentiable(r_values, self.r_fine_betapol_jax, self.Bmain_r_norm_jax, self.config)
 
         return base_profile + bspline_component
@@ -722,7 +773,7 @@ class BeamModelBSplinesPlusMain(BeamModelBase):
         bspline_coeffs = np.array(params["bspline_coeffs_P"])
         r_fine = np.array(self.r_fine_jax)
         ortho_funcs = np.array(self.ortho_basis_funcs_jax)
-        bspline_component = ortho_funcs @ bspline_coeffs
+        bspline_component = ortho_funcs @ bspline_coeffs + BeamModelBSplinesGaussian._bspline_rmax_offset_np(self, r_fine)
         base_profile = np.interp(r_fine, self.r_fine_np, self.Bmain_r_norm_np)
         profile_P_fine = base_profile + bspline_component
         profile_T_fine = np.interp(r_fine, self.r_fine_np, self.BT_r_norm_np)

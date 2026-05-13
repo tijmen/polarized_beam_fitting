@@ -375,7 +375,7 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ Gaussian + B-splines model test successful.")
 
-    def test_bspline_plus_gaussian_tail_matches_baseline(self, *mocks):
+    def test_bspline_plus_gaussian_default_rmax_boundary_is_zero(self, *mocks):
         config = get_test_config(beam_model_type="bsplines_plus_gaussian")
         ny = nx = config.map_size_pix
         y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
@@ -383,11 +383,49 @@ class TestEndToEndRecovery(unittest.TestCase):
 
         sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
         coeffs = np.full(beam_model.n_bspline_coeffs, 0.2, dtype=config.dtype_np_real)
-        r_query = jnp.array([beam_model.spline_rmax_arcmin, beam_model.spline_rmax_arcmin + 0.25], dtype=config.dtype_jax_real)
+        r_query = jnp.array([beam_model.bspline_rmax_arcmin], dtype=config.dtype_jax_real)
 
         profile = beam_model.evaluate_beam_profile(sigma, coeffs, r_query)
-        expected = beam_model.baseline + jnp.exp(-0.5 * (r_query / sigma) ** 2)
+        expected = jnp.array([0.0], dtype=config.dtype_jax_real)
         np.testing.assert_allclose(np.asarray(profile), np.asarray(expected), rtol=0.0, atol=1e-10)
+
+    def test_bspline_plus_gaussian_tail_uses_configured_rmax_value(self, *mocks):
+        config = get_test_config(
+            beam_model_type="bsplines_plus_gaussian",
+            bspline_rmax_values={"150GHz": 0.03},
+        )
+        ny = nx = config.map_size_pix
+        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
+        beam_model = create_beam_model(config, y, x, config.bands[0])
+
+        sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
+        coeffs = np.zeros(beam_model.n_bspline_coeffs, dtype=config.dtype_np_real)
+        r_query = jnp.array([beam_model.spline_rmin_arcmin, beam_model.bspline_rmax_arcmin], dtype=config.dtype_jax_real)
+
+        profile = beam_model.evaluate_beam_profile(sigma, coeffs, r_query)
+        gaussian_rmin = beam_model.baseline + jnp.exp(-0.5 * (beam_model.spline_rmin_arcmin / sigma) ** 2)
+        expected = jnp.array([gaussian_rmin, 0.03], dtype=config.dtype_jax_real)
+        np.testing.assert_allclose(np.asarray(profile), np.asarray(expected), rtol=0.0, atol=1e-10)
+
+    def test_bspline_plus_gaussian_can_leave_rmax_derivative_free(self, *mocks):
+        config = get_test_config(
+            beam_model_type="bsplines_plus_gaussian",
+            bspline_force_rmax_derivative_zero=False,
+        )
+        ny = nx = config.map_size_pix
+        y, x = np.ogrid[-ny // 2 : ny // 2, -nx // 2 : nx // 2]
+        beam_model = create_beam_model(config, y, x, config.bands[0])
+
+        degree = beam_model.spline_k - 1
+        r_max = beam_model.bspline_rmax_arcmin
+        n_coeffs_total = len(beam_model.r_knots) - degree - 1
+        identity_coeffs = np.eye(n_coeffs_total)
+        basis_functions = [interpolate.BSpline(beam_model.r_knots, identity_coeffs[i], degree) for i in range(n_coeffs_total)]
+
+        value_row_rmax = np.array([bf(r_max) for bf in basis_functions])
+        deriv_row_rmax = np.array([bf.derivative()(r_max) for bf in basis_functions])
+        np.testing.assert_allclose(value_row_rmax @ beam_model.orthogonal_coeffs, 0.0, atol=1e-10, rtol=0.0)
+        self.assertGreater(np.max(np.abs(deriv_row_rmax @ beam_model.orthogonal_coeffs)), 1e-6)
 
     def test_bspline_plus_gaussian_basis_has_smooth_endpoints(self, *mocks):
         config = get_test_config(beam_model_type="bsplines_plus_gaussian")
@@ -397,7 +435,7 @@ class TestEndToEndRecovery(unittest.TestCase):
 
         degree = beam_model.spline_k - 1
         r_min = beam_model.spline_rmin_arcmin
-        r_max = beam_model.spline_rmax_arcmin
+        r_max = beam_model.bspline_rmax_arcmin
         n_coeffs_total = len(beam_model.r_knots) - degree - 1
         identity_coeffs = np.eye(n_coeffs_total)
         basis_functions = [interpolate.BSpline(beam_model.r_knots, identity_coeffs[i], degree) for i in range(n_coeffs_total)]
