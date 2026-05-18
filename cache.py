@@ -33,7 +33,6 @@ class CacheManager:
             "leakage_template_dir": self.config.leakage_template_dir,  # leakage template subtraction detail
             "use_cdrc": self.config.use_cdrc,  # CDRC preprocessing affects cached maps
             "chi2_method": self.config.chi2_method,  # different chi2 calculation. if this is real_space, we don't need to take FFTs
-            "precision_n_pca": self.config.precision_n_pca,
             "precision_model_cmb": self.config.precision_model_cmb,
             "precision_datadriven_offdiagonals": self.config.precision_datadriven_offdiagonals,
             "precision_white_noise": self.config.precision_white_noise,

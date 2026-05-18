@@ -43,7 +43,6 @@ class BeamFittingConfig:
         # "targeted1": ["/home/tijmen/cmb_analysis/beam_analysis/data/J1924-2914.g3"],
         # "targeted2": ["/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3"],  # these targeted sources are sus
     }
-    noise_psd_path = "/home/tijmen/cmb_analysis/beam_analysis/data/subfield_noise_PSD_{band}GHz_mean_sub2.fits"
     betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
     leakage_template_dir = os.path.join(cache_dir, "leakage_templates")
     data_loader_class = None  # Optional DataLoader subclass for non-SPT input formats
@@ -171,7 +170,6 @@ class BeamFittingConfig:
     chi2_method = "fourier"  # "fourier" or "real_space"
 
     # === Precision estimation settings ===
-    precision_n_pca = 0  # Number of PCA components for modeling per-source noise variation. 0 = simple mean
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision

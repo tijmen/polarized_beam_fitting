@@ -237,7 +237,6 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
     debug : dict or None
         Debug information if config.debug is True, None otherwise
     """
-    assert config.precision_n_pca == 0, "PCA regularization is no longer supported."
     n_src, ny_full, nx_full, n_bands, n_stokes = maps.shape
     ell_y_full, ell_x_full, ell_y_grid_full, ell_x_grid_full = ell_grid((ny_full, nx_full), config.reso_arcmin)
     idx_y, idx_x = compute_rectangular_ell_cut_indices((ny_full, nx_full), config.reso_arcmin, config.ellmax)
