@@ -67,10 +67,12 @@ class BeamFittingConfig:
     bsplines_gaussian_rmin_arcmin = 0.5
     bsplines_main_rmin_arcmin = 0.75
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
-    bsplines_gaussian_baseline = {"90GHz": 9e-5, "150GHz": 4e-5, "220GHz": 5e-5}
     bspline_rmax_arcmin = 15.0
-    bspline_rmax_values = {"90GHz": 0.0, "150GHz": 0.0, "220GHz": 0.0}
-    bspline_force_rmax_derivative_zero = True
+    # Gaussian+B-spline models can be forced to some value at bspline_rmax_arcmin.
+    # Leave as None to free the outer endpoint
+    bspline_rmax_values = {"90GHz": None, "150GHz": None, "220GHz": None}
+    # If bspline_rmax_values is finite, can set this to also enforce B'(rmax)=0.
+    bspline_force_rmax_derivative_zero = False
 
     beam_model_bounds = {
         "gaussian": {"T_width_arcmin": (0.5, 2.0), "P_width_arcmin": (0.5, 2.0)},
@@ -173,7 +175,7 @@ class BeamFittingConfig:
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
-    use_legacy_phi_convention = True  # True reproduces dH26 phi handling; False fixes the bug and enables IAU phi
+    use_legacy_phi_convention = True  # True reproduces dH26 historical handling; False uses corrected SPT-3G/IAU + CAMB TE signs
     use_legacy_cmb_window_norm = True  # True reproduces dH26 (ell-cut) apod-window normalization; False fixes this bug
 
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
