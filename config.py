@@ -199,7 +199,7 @@ class BeamFittingConfig:
     bootstrap_confidence_levels = [68, 95]  # Confidence levels to report (percentiles)
 
     # === Diagnostics and plotting ===
-    n_diagnostic_plots = 3  # Number of highest chi2 sources to plot diagnostics for.
+    n_diagnostic_plots = 3  # top-n highest chi2 sources will get diagnostic plots
     # Can be an integer (default 3), "all" to plot all sources,
     # or 0 to disable diagnostic plots entirely
 
