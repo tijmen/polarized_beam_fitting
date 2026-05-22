@@ -115,32 +115,20 @@ def _compute_cmb_covariance(config, ny: int, nx: int) -> np.ndarray:
     cl_bb_grid = interp(cl_bb)
     cl_te_grid = interp(cl_te)
 
+    # IAU angle convention, as in spt3g.mapspectra.basicmaputils
+    phi = np.arctan2(-ell_x_grid_highres, ell_y_grid_highres)
+    c2phi = np.cos(2.0 * phi)
+    s2phi = _apply_spt3g_nyquist_sine_fix(np.sin(2.0 * phi))
     if config.use_legacy_phi_convention:
-        # Match spt3g.mapspectra.basicmaputils IAU angle convention:
-        #   phi = atan2(-kx, ky)
-        phi = np.arctan2(-ell_x_grid_highres, ell_y_grid_highres)
-        c2phi = np.cos(2.0 * phi)
-        s2phi = _apply_spt3g_nyquist_sine_fix(np.sin(2.0 * phi))
-    else:
-        # Legacy convention used for the paper-era results.
-        phi = np.arctan2(ell_y_grid_highres, ell_x_grid_highres)
-        c2phi = np.cos(2.0 * phi)
-        s2phi = np.sin(2.0 * phi)
+        s2phi *= -1.0  # This is what was erroneously used in https://arxiv.org/abs/2602.06334v1
 
     cov_tqu_highres = np.zeros((ny_highres, nx_highres, 3, 3), dtype=config.dtype_np_real)
     cov_tqu_highres[..., 0, 0] = cl_tt_grid
-    cov_tqu_highres[..., 0, 1] = cov_tqu_highres[..., 1, 0] = cl_te_grid * c2phi
-    if config.use_legacy_phi_convention:
-        cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = -cl_te_grid * s2phi
-    else:
-        cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = cl_te_grid * s2phi
     cov_tqu_highres[..., 1, 1] = cl_ee_grid * c2phi**2 + cl_bb_grid * s2phi**2
     cov_tqu_highres[..., 2, 2] = cl_ee_grid * s2phi**2 + cl_bb_grid * c2phi**2
-    if config.use_legacy_phi_convention:
-        cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = -(cl_ee_grid - cl_bb_grid) * s2phi * c2phi
-    else:
-        cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi
-
+    cov_tqu_highres[..., 0, 1] = cov_tqu_highres[..., 1, 0] = cl_te_grid * c2phi
+    cov_tqu_highres[..., 0, 2] = cov_tqu_highres[..., 2, 0] = cl_te_grid * s2phi
+    cov_tqu_highres[..., 1, 2] = cov_tqu_highres[..., 2, 1] = (cl_ee_grid - cl_bb_grid) * s2phi * c2phi
     cov_tqu_highres_shifted = np.fft.fftshift(cov_tqu_highres)
     cov_tqu_highres_shifted = 0.5 * np.roll(cov_tqu_highres_shifted, (-1, -1), axis=(0, 1)) + 0.5 * cov_tqu_highres_shifted
     cov_tqu_shifted = cov_tqu_highres_shifted.reshape(ny, ss, nx, ss, 3, 3).sum(axis=(1, 3))
