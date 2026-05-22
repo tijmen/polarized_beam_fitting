@@ -44,7 +44,7 @@ class BeamFittingConfig:
         # "targeted2": ["/home/tijmen/cmb_analysis/beam_analysis/data/J2258-2758.g3"],  # these targeted sources are sus
     }
     betapol_data_path = "/home/tijmen/cmb_analysis/beam_analysis/polarized_beam_fitting/data/betapol_TdH.npz"
-    leakage_template_dir = os.path.join(cache_dir, "leakage_templates")
+    leakage_template_dir = "/home/tijmen/cmb_analysis/beam_analysis/leakage_templates/"
     data_loader_class = None  # Optional DataLoader subclass for non-SPT input formats
 
     for this_dir in [output_dir, cache_dir, leakage_template_dir]:
@@ -53,7 +53,7 @@ class BeamFittingConfig:
     # === Run selection & numerics ===
     bands = ["90GHz", "150GHz", "220GHz"]  # Frequency bands for analysis
     double_precision = True  # Use 64-bit precision for all calculations
-    debug = False
+    debug = False  # save additional outputs
 
     # === Map geometry ===
     map_size_pix = 300
@@ -175,8 +175,8 @@ class BeamFittingConfig:
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
-    use_legacy_phi_convention = True  # True reproduces dH26 historical handling; False uses corrected SPT-3G/IAU + CAMB TE signs
-    use_legacy_cmb_window_norm = True  # True reproduces dH26 (ell-cut) apod-window normalization; False fixes this bug
+    use_legacy_phi_convention = False  # True reproduces https://arxiv.org/abs/2602.06334v1 False fixes the bug
+    use_legacy_cmb_window_norm = False  # True reproduces https://arxiv.org/abs/2602.06334v1 False fixes the bug
 
     noise_hole_radius_arcmin = 4.0  # Radius of central hole for noise calculation (arcmin)
     chi2_normalization = 1.0

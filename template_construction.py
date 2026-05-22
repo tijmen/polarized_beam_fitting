@@ -1,24 +1,18 @@
 """Construct shifted T->P leakage templates for multiple fields and bands.
 
-This script reproduces the template construction workflow that previously
-lived in the notebook, but makes it repeatable via a command-line entry
-point. It applies a radial low-pass filter using the TOD Nyquist estimate,
-recenters residual maps with bilinear interpolation, and stores source
-offsets alongside each template so they can be re-used later.
-
-Run with:
-```bash
-python -m polarized_beam_fitting.template_construction
-```
+This script allows command-line regeneration of the T->P leakage template maps.
+It applies a radial low-pass filter using the TOD Nyquist estimate, recenters
+residual maps with bilinear interpolation, and stores source offsets alongside
+each template so they can be used as initial guesses in later optimization runs.
 """
 
 from __future__ import annotations
 
-import os
 import pickle
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
+from copy import copy
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,23 +32,6 @@ from polarized_beam_fitting.utils import (
     predict_nyquist_ell_x,
     shift_map_bilinear,
 )
-
-# Default bands and coadd files to process
-BANDS: Tuple[str, ...] = ("90GHz", "150GHz", "220GHz")
-FIELD_COADD_PATHS = {
-    "winter": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3",
-    # "summer_a": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summera.g3",
-    # "summer_b": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerb.g3",
-    # "summer_c": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_summerc.g3",
-    # "winter_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_19-20_winter.g3",
-    # "summer_a_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summera.g3",
-    # "summer_b_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerb.g3",
-    # "summer_c_nodecon": "/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_summerc.g3",
-}
-OUTPUT_DIR = Path("/home/tijmen/cmb_analysis/beam_analysis/cache/leakage_templates")
-# WEIGHTING_SCHEMES = ("median", "flat", "linear", "quadratic")
-WEIGHTING_SCHEMES = ("linear",)
-USE_CDRC = False
 
 
 def plot_templates(templates: Dict[str, Dict[str, np.ndarray]], title: str, filename: Path) -> None:
@@ -182,160 +159,160 @@ def load_raw_maps_for_band(config: BeamFittingConfig, fitter: PolarizedBeamFitte
     return raw_maps_data
 
 
-def construct_templates_for_combination(field: str, band: str, output_dir: Path, make_plots: bool) -> None:
-    """Build templates for a single (field, band) combination."""
-    print(f"Processing field={field}, band={band} ...")
+def construct_templates(config, make_plots):
+    """Loop over fields and bands to build T->P leakage templates."""
 
-    config = BeamFittingConfig()
-    config.bands = [band]
-    config.coadd_filenames = {field: [FIELD_COADD_PATHS[field]]}
-    config.use_precomputed_leakage_templates = True  # for subsequent iterations. Set to False for the first run
-    config.use_cdrc = USE_CDRC
-    if config.use_cdrc and field not in ["winter", "winter_nodecon"]:
-        print(f"Skipping field={field} for CDRC template construction (winter-only).")
-        return
+    fields_to_process = copy(config.coadd_filenames.keys())
+    bands_to_process = copy(config.bands)
 
-    fitter = PolarizedBeamFitter(config)
-    best_fit_params = fitter.run_fit()
-    all_source_ids = np.asarray(fitter.source_ids)
+    # Templates are built for single-band, single-field processing
+    for field in fields_to_process:
+        for band in bands_to_process:
+            config.coadd_filenames = {field: [config.coadd_filenames[field][0]]}
+            config.bands = [band]
+            msg = f"= Processing field={field}, band={band} ... ="
+            print((len(msg)) * "=")
+            print(msg)
+            print((len(msg)) * "=")
 
-    map_shape = (config.map_size_pix, config.map_size_pix)
-    y_coords = np.arange(-map_shape[0] // 2, map_shape[0] // 2)
-    x_coords = np.arange(-map_shape[1] // 2, map_shape[1] // 2)
-    y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing="ij")
-    beam_model = create_beam_model(config, y_grid, x_grid, band)
-    band_beam_params = best_fit_params["beams"][0]
+            fitter = PolarizedBeamFitter(config)
+            best_fit_params = fitter.run_fit()
+            all_source_ids = np.asarray(fitter.source_ids)
 
-    apod_mask = make_apodization_mask(map_shape, config.apodization_width_pix)
-    ell_radius, _, taper_width_cpd = prepare_frequency_grids(map_shape, config.reso_arcmin)
-    raw_maps_data = load_raw_maps_for_band(config, fitter, field)
+            map_shape = (config.map_size_pix, config.map_size_pix)
+            y_coords = np.arange(-map_shape[0] // 2, map_shape[0] // 2)
+            x_coords = np.arange(-map_shape[1] // 2, map_shape[1] // 2)
+            y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing="ij")
+            beam_model = create_beam_model(config, y_grid, x_grid, band)
+            band_beam_params = best_fit_params["beams"][0]
 
-    normalized_q_maps = []
-    normalized_u_maps = []
-    source_t_amps = []
-    source_offsets: Dict[str, Dict[str, float]] = {}
-    source_flux: Dict[str, Dict[str, np.ndarray]] = {}
-    source_kmax: Dict[str, float | None] = {}
+            apod_mask = make_apodization_mask(map_shape, config.apodization_width_pix)
+            ell_radius, _, taper_width_cpd = prepare_frequency_grids(map_shape, config.reso_arcmin)
+            raw_maps_data = load_raw_maps_for_band(config, fitter, field)
 
-    for source_base, raw_maps in raw_maps_data.items():
-        match = np.where(all_source_ids == source_base)[0]
-        if match.size == 0:
-            print(f"  Warning: Could not find '{source_base}' in best-fit results. Skipping source.")
-            continue
-        source_idx = int(match[0])
+            normalized_q_maps = []
+            normalized_u_maps = []
+            source_t_amps = []
+            source_offsets: Dict[str, Dict[str, float]] = {}
+            source_flux: Dict[str, Dict[str, np.ndarray]] = {}
+            source_kmax: Dict[str, float | None] = {}
 
-        yoff = safe_float(best_fit_params["sources"]["yoff"][source_idx])
-        xoff = safe_float(best_fit_params["sources"]["xoff"][source_idx])
-        flux = np.asarray(best_fit_params["sources"]["flux"][source_idx, 0, :], dtype=float)
-        t_amp, q_amp, u_amp = flux
+            for source_base, raw_maps in raw_maps_data.items():
+                match = np.where(all_source_ids == source_base)[0]
+                if match.size == 0:
+                    print(f"  Warning: Could not find '{source_base}' in best-fit results. Skipping source.")
+                    continue
+                source_idx = int(match[0])
 
-        if abs(t_amp) <= 1e-6:
-            print(f"  Warning: T-amplitude for {source_base} is too small ({t_amp}). Skipping source.")
-            continue
+                yoff = safe_float(best_fit_params["sources"]["yoff"][source_idx])
+                xoff = safe_float(best_fit_params["sources"]["xoff"][source_idx])
+                flux = np.asarray(best_fit_params["sources"]["flux"][source_idx, 0, :], dtype=float)
+                t_amp, q_amp, u_amp = flux
 
-        _, p_beam_map = beam_model.evaluate_beam_maps(band_beam_params, yoff, xoff)
-        p_beam_map = np.array(p_beam_map)
+                if abs(t_amp) <= 1e-6:
+                    print(f"  Warning: T-amplitude for {source_base} is too small ({t_amp}). Skipping source.")
+                    continue
 
-        q_model = q_amp * p_beam_map
-        u_model = u_amp * p_beam_map
+                _, p_beam_map = beam_model.evaluate_beam_maps(band_beam_params, yoff, xoff)
+                p_beam_map = np.array(p_beam_map)
 
-        q_residual = raw_maps["Q"] - q_model
-        u_residual = raw_maps["U"] - u_model
+                q_model = q_amp * p_beam_map
+                u_model = u_amp * p_beam_map
 
-        declination = parse_declination(source_base)
-        nyquist_ell_x = predict_nyquist_ell_x(declination)
-        ellmax = 0.85 * nyquist_ell_x if np.isfinite(nyquist_ell_x) else np.inf
-        source_kmax[source_base] = None if not np.isfinite(ellmax) else float(ellmax / 360.0)  # Keep as k for compatibility
+                q_residual = raw_maps["Q"] - q_model
+                u_residual = raw_maps["U"] - u_model
 
-        taper_width_ell = 360.0 * taper_width_cpd
-        q_filtered = apply_radial_lowpass(q_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
-        u_filtered = apply_radial_lowpass(u_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
+                declination = parse_declination(source_base)
+                nyquist_ell_x = predict_nyquist_ell_x(declination)
+                ellmax = 0.85 * nyquist_ell_x if np.isfinite(nyquist_ell_x) else np.inf
+                source_kmax[source_base] = None if not np.isfinite(ellmax) else float(ellmax / 360.0)  # Keep as k for compatibility
 
-        q_normalized = q_filtered / t_amp
-        u_normalized = u_filtered / t_amp
+                taper_width_ell = 360.0 * taper_width_cpd
+                q_filtered = apply_radial_lowpass(q_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
+                u_filtered = apply_radial_lowpass(u_residual, apod_mask, ell_radius, ellmax, taper_width_ell)
 
-        normalized_q_maps.append(shift_map_bilinear(q_normalized, -yoff, -xoff))
-        normalized_u_maps.append(shift_map_bilinear(u_normalized, -yoff, -xoff))
-        source_t_amps.append(t_amp)
-        source_offsets[source_base] = {"y_offset": float(yoff), "x_offset": float(xoff)}
-        per_source_flux = source_flux.setdefault(source_base, {})
-        per_source_flux[band] = flux.copy()
+                q_normalized = q_filtered / t_amp
+                u_normalized = u_filtered / t_amp
 
-    if len(normalized_q_maps) < 2:
-        raise ValueError("Fewer than 2 sources available after processing. Cannot build a robust template.")
+                normalized_q_maps.append(shift_map_bilinear(q_normalized, -yoff, -xoff))
+                normalized_u_maps.append(shift_map_bilinear(u_normalized, -yoff, -xoff))
+                source_t_amps.append(t_amp)
+                source_offsets[source_base] = {"y_offset": float(yoff), "x_offset": float(xoff)}
+                per_source_flux = source_flux.setdefault(source_base, {})
+                per_source_flux[band] = flux.copy()
 
-    q_stack = np.stack(normalized_q_maps, axis=0)
-    u_stack = np.stack(normalized_u_maps, axis=0)
-    t_amps = np.asarray(source_t_amps, dtype=float)
+            if len(normalized_q_maps) < 2:
+                raise ValueError("Fewer than 2 sources available after processing. Cannot build a robust template.")
 
-    templates: Dict[str, Dict[str, np.ndarray]] = {}
-    templates["median"] = {"Q": np.median(q_stack, axis=0), "U": np.median(u_stack, axis=0)}
-    templates["flat"] = {"Q": np.mean(q_stack, axis=0), "U": np.mean(u_stack, axis=0)}
+            q_stack = np.stack(normalized_q_maps, axis=0)
+            u_stack = np.stack(normalized_u_maps, axis=0)
+            t_amps = np.asarray(source_t_amps, dtype=float)
 
-    weights_lin = t_amps[:, np.newaxis, np.newaxis]
-    templates["linear"] = {
-        "Q": np.sum(q_stack * weights_lin, axis=0) / np.sum(weights_lin),
-        "U": np.sum(u_stack * weights_lin, axis=0) / np.sum(weights_lin),
-    }
+            templates: Dict[str, Dict[str, np.ndarray]] = {}
+            templates["median"] = {"Q": np.median(q_stack, axis=0), "U": np.median(u_stack, axis=0)}
+            templates["flat"] = {"Q": np.mean(q_stack, axis=0), "U": np.mean(u_stack, axis=0)}
 
-    weights_sq = t_amps[:, np.newaxis, np.newaxis] ** 2
-    templates["quadratic"] = {
-        "Q": np.sum(q_stack * weights_sq, axis=0) / np.sum(weights_sq),
-        "U": np.sum(u_stack * weights_sq, axis=0) / np.sum(weights_sq),
-    }
+            weights_lin = t_amps[:, np.newaxis, np.newaxis]
+            templates["linear"] = {
+                "Q": np.sum(q_stack * weights_lin, axis=0) / np.sum(weights_lin),
+                "U": np.sum(u_stack * weights_lin, axis=0) / np.sum(weights_lin),
+            }
 
-    suffix = "_cdrc" if config.use_cdrc else ""
-    plotting_title = f"Filtered Leakage Templates\n{field} - {band}{suffix}"
-    if make_plots:
-        plot_path = output_dir / f"templates_{field}_{band}{suffix}.png"
-        plot_templates(templates, plotting_title, plot_path)
+            weights_sq = t_amps[:, np.newaxis, np.newaxis] ** 2
+            templates["quadratic"] = {
+                "Q": np.sum(q_stack * weights_sq, axis=0) / np.sum(weights_sq),
+                "U": np.sum(u_stack * weights_sq, axis=0) / np.sum(weights_sq),
+            }
 
-    metadata = {
-        "coadd": field,
-        "band": band,
-        "apod_width_pix": config.apodization_width_pix,
-        "taper_width_pixels": 5,
-        "reso_arcmin": config.reso_arcmin,
-        "use_cdrc": config.use_cdrc,
-    }
+            suffix = "_cdrc" if config.use_cdrc else ""
+            plotting_title = f"Filtered Leakage Templates\n{field} - {band}{suffix}"
+            if make_plots:
+                plot_path = Path(config.leakage_template_dir) / f"templates_{field}_{band}{suffix}.png"
+                plot_templates(templates, plotting_title, plot_path)
 
-    for scheme, scheme_maps in templates.items():
-        payload = {
-            "Q": scheme_maps["Q"],
-            "U": scheme_maps["U"],
-            "source_offsets": {
-                sid: {"y_offset": float(offsets["y_offset"]), "x_offset": float(offsets["x_offset"])}
-                for sid, offsets in source_offsets.items()
-            },
-            "source_flux": {
-                sid: {band_key: {"T": float(vec[0]), "Q": float(vec[1]), "U": float(vec[2])} for band_key, vec in per_band.items()}
-                for sid, per_band in source_flux.items()
-            },
-            "source_kmax_cpd": {sid: (None if value is None else float(value)) for sid, value in source_kmax.items()},
-            "metadata": metadata,
-        }
+            metadata = {
+                "coadd": field,
+                "band": band,
+                "apod_width_pix": config.apodization_width_pix,
+                "taper_width_pixels": 5,
+                "reso_arcmin": config.reso_arcmin,
+                "use_cdrc": config.use_cdrc,
+            }
 
-        output_path = output_dir / f"leakage_template_{field}_{band}_{scheme}{suffix}.pkl"
-        with output_path.open("wb") as handle:
-            pickle.dump(payload, handle)
-        print(f"  Saved {scheme} template to {output_path}")
+            for scheme, scheme_maps in templates.items():
+                payload = {
+                    "Q": scheme_maps["Q"],
+                    "U": scheme_maps["U"],
+                    "source_offsets": {
+                        sid: {"y_offset": float(offsets["y_offset"]), "x_offset": float(offsets["x_offset"])}
+                        for sid, offsets in source_offsets.items()
+                    },
+                    "source_flux": {
+                        sid: {band_key: {"T": float(vec[0]), "Q": float(vec[1]), "U": float(vec[2])} for band_key, vec in per_band.items()}
+                        for sid, per_band in source_flux.items()
+                    },
+                    "source_kmax_cpd": {sid: (None if value is None else float(value)) for sid, value in source_kmax.items()},
+                    "metadata": metadata,
+                }
 
-
-def main():
-    fields = sorted(FIELD_COADD_PATHS.keys())
-
-    for field in fields:
-        if field not in FIELD_COADD_PATHS:
-            raise ValueError(f"Unknown field '{field}'. Known fields: {sorted(FIELD_COADD_PATHS.keys())}")
-        if not os.path.exists(FIELD_COADD_PATHS[field]):
-            raise FileNotFoundError(f"Coadd file for field '{field}' does not exist: {FIELD_COADD_PATHS[field]}")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    for field in fields:
-        for band in BANDS:
-            construct_templates_for_combination(field, band, OUTPUT_DIR, make_plots=True)
+                output_path = Path(config.leakage_template_dir) / f"leakage_template_{field}_{band}_{scheme}{suffix}.pkl"
+                with output_path.open("wb") as handle:
+                    pickle.dump(payload, handle)
+                print(f"  Saved {scheme} template to {output_path}")
 
 
 if __name__ == "__main__":
-    main()
+    from polarized_beam_fitting import BeamFittingConfig
+
+    config = BeamFittingConfig()
+
+    # Important! Set this to False for the first run. True for subsequent iterations.
+    config.use_precomputed_leakage_templates = False
+
+    # example modifications to the config:
+    # config.bands = ["90GHz"]
+    # config.coadd_filenames = {"winter": ["/home/tijmen/cmb_analysis/beam_analysis/data/bright_thumb_coadd_subfieldall_masked_thumbnails_res0p1_tau_decon_winter.g3"]}
+    # config.use_cdrc = True
+    # config.leakage_template_dir = "/home/tijmen/cmb_analysis/beam_analysis/leakage_templates"
+
+    construct_templates(config, make_plots=True)
