@@ -700,6 +700,16 @@ class PolarizedBeamFitter:
             return carry, get_hessian_diag_element(i)
 
         _, diag_hessian_flat = jax.lax.scan(body_fn, None, jnp.arange(len(flattened_params)))
+        diag_hessian_flat_np = np.asarray(jax.device_get(diag_hessian_flat))
+        nonfinite_mask = ~np.isfinite(diag_hessian_flat_np)
+        if np.any(nonfinite_mask):
+            bad_indices = np.flatnonzero(nonfinite_mask)
+            bad_preview = ", ".join(str(int(idx)) for idx in bad_indices[:10])
+            raise FloatingPointError(
+                "Non-finite diagonal Hessian entries encountered while preparing "
+                f"the whitening transform: {bad_indices.size}/{diag_hessian_flat_np.size} "
+                f"entries are non-finite. First bad flattened indices: {bad_preview}."
+            )
 
         # Unflatten the diagonal Hessian back into a pytree
         curvature = unflatten_fn(diag_hessian_flat)

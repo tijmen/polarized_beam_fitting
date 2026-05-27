@@ -20,8 +20,6 @@ from .utils import (
 CMB_SUPERSAMPLING = 4
 COVARIANCE_EIGEN_EPS = 1e-4
 
-CMB_CORRELATION_MAX = 0.95
-
 
 def _apply_spt3g_nyquist_sine_fix(sine_grid: np.ndarray) -> np.ndarray:
     """
@@ -304,7 +302,8 @@ def calculate_precision(maps: np.ndarray, config) -> Tuple[np.ndarray, Optional[
                 dsqrt = np.sqrt(d)
                 invdsqrt = 1.0 / dsqrt
                 correlation = this_covariance_symm * (invdsqrt[:, None] * invdsqrt[None, :])
-                correlation = np.clip(correlation, -CMB_CORRELATION_MAX, CMB_CORRELATION_MAX)
+                correlation_max = config.cmb_correlation_max
+                correlation = np.clip(correlation, -correlation_max, correlation_max)
                 np.fill_diagonal(correlation, 1.0)  # restore the unit diagonal
                 this_covariance = correlation * (dsqrt[:, None] * dsqrt[None, :])
                 covariance_model[iy, ix] = this_covariance.reshape(n_bands, n_stokes, n_bands, n_stokes)

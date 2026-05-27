@@ -276,10 +276,3 @@ if __name__ == "__main__":
     # config.leakage_template_dir = "/home/tijmen/cmb_analysis/beam_analysis/leakage_templates"
 
     construct_templates(config, make_plots=True)
-
-# zeroth iteration (use_precomputed_leakage_templates = False) not recorded. First iteration and following iterations gave:
-# Fit completed. Beam parameters: [{'beta_pol': Array(0.89037869, dtype=float64)}, {'beta_pol': Array(1.04699452, dtype=float64)}, {'beta_pol': Array(0.9493098, dtype=float64)}]
-# Fit completed. Beam parameters: [{'beta_pol': Array(0.91121695, dtype=float64)}, {'beta_pol': Array(1.07801201, dtype=float64)}, {'beta_pol': Array(1.01878369, dtype=float64)}]
-# Fit completed. Beam parameters: [{'beta_pol': Array(0.91357483, dtype=float64)}, {'beta_pol': Array(1.08405853, dtype=float64)}, {'beta_pol': Array(1.02768173, dtype=float64)}]
-# Fit completed. Beam parameters: [{'beta_pol': Array(0.90961916, dtype=float64)}, {'beta_pol': Array(1.08147858, dtype=float64)}, {'beta_pol': Array(1.02064844, dtype=float64)}]
-# Fit completed. Beam parameters: [{'beta_pol': Array(0.91005814, dtype=float64)}, {'beta_pol': Array(1.08331914, dtype=float64)}, {'beta_pol': Array(1.01653497, dtype=float64)}]

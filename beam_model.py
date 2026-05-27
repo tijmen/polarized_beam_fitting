@@ -610,9 +610,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
         bspline_component = bspline_component + self._bspline_rmax_offset(r_values, gaussian_sigma)
-        # If an rmax value is configured, enforce compact support of the B-spline
-        # correction so the outer tail is controlled by that endpoint value.
-        # If the rmax value is None, leave the outer endpoint unconstrained.
+        # If an rmax value is configured, set the total beam to that value for r >= rmax
         if self.bspline_rmax_value is not None:
             bspline_component = jnp.where(
                 r_values >= self.bspline_rmax_arcmin, self.bspline_rmax_value - gaussian_component, bspline_component

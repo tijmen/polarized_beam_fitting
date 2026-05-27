@@ -175,6 +175,7 @@ class BeamFittingConfig:
     precision_model_cmb = True  # Use CAMB to estimate CMB contribution to off-diagonals
     precision_datadriven_offdiagonals = False  # Use data-driven band-band-stokes-stokes off-diagonals
     precision_white_noise = False  # Use simple white noise precision
+    cmb_correlation_max = 0.8  # Maximum absolute model-CMB correlation used when clipping covariance off-diagonals
     use_legacy_phi_convention = False  # True reproduces https://arxiv.org/abs/2602.06334v1 False fixes the bug
     use_legacy_cmb_window_norm = False  # True reproduces https://arxiv.org/abs/2602.06334v1 False fixes the bug
 

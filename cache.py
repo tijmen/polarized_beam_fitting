@@ -36,6 +36,7 @@ class CacheManager:
             "precision_model_cmb": self.config.precision_model_cmb,
             "precision_datadriven_offdiagonals": self.config.precision_datadriven_offdiagonals,
             "precision_white_noise": self.config.precision_white_noise,
+            "cmb_correlation_max": getattr(self.config, "cmb_correlation_max", 0.95),
             "use_legacy_phi_convention": getattr(self.config, "use_legacy_phi_convention", True),
             "use_legacy_cmb_window_norm": getattr(self.config, "use_legacy_cmb_window_norm", True),
         }
