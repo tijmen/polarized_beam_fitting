@@ -64,10 +64,10 @@ class BeamFittingConfig:
     knot_spacing_arcmin = 0.4
     spline_k = 4  # Cubic B-spline
     beam_model_type = "beta_pol"  # 'gaussian', 'beta_pol', 'beta_T', 'bsplines_plus_gaussian', or 'bsplines_plus_main'
-    bsplines_gaussian_rmin_arcmin = 0.5
-    bsplines_main_rmin_arcmin = 0.75
+    bsplines_gaussian_rmin_arcmin = 0.25
+    bsplines_main_rmin_arcmin = 0.75  # Only for bsplines_plus_main
     band_fwhm_arcmin = {"90GHz": 1.509, "150GHz": 1.108, "220GHz": 0.938}
-    bspline_rmax_arcmin = 15.0
+    bspline_rmax_arcmin = 10.0
     # Gaussian+B-spline models can be forced to some value at bspline_rmax_arcmin.
     # Leave as None to free the outer endpoint
     bspline_rmax_values = {"90GHz": None, "150GHz": None, "220GHz": None}
@@ -134,6 +134,10 @@ class BeamFittingConfig:
     leakage_weighting = "linear"  # "flat", "linear", "quadratic", or "median"
     use_precomputed_leakage_templates = True  # Use offline templates stored on disk
 
+    refit_position = False  # False keeps source positions at the initially determined values
+    refit_Tflux = False  # False keeps T fluxes at the initially determined values
+    fit_T_only = False  # True means we ignore polarization data in the minimizer
+
     # === CMB calibration factors ===
     # Tcal https://sptlocal.grid.uchicago.edu/~yomori/20192020_lensing/Tcal/v3/spt3g20192020_tcal.html#updated-calibration
     # Pcal https://pole.uchicago.edu/spt3g/index.php/File:20231009_EETETT_Updates.pdf
@@ -184,7 +188,7 @@ class BeamFittingConfig:
     ellmax = 31_000  # Multipole cutoff used when operating in Fourier space. 31000 is below 0.85 Nyquist of TOD for all winter/summer data
 
     # === Optimization and convergence ===
-    solver = "tuned"  # "optimistix_bfgs", "optax_adam", "newton_pcg", "tuned"
+    solver = "tuned"  # "optimistix_bfgs", "optax_adam", or "tuned"
     bfgs_kwargs = {"atol": 1e-24, "rtol": 1e-24, "verbose": frozenset({"step_size", "loss"})}
     adam_variant = "adam"  # Optax optimizer name ("adam", "amsgrad", ...)
     adam_kwargs = {"learning_rate": 0.001}

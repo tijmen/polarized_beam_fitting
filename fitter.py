@@ -6,17 +6,16 @@ and NUTS sampling, supports single and multi-band configurations, and provides
 efficient parallelization across devices.
 """
 
+import copy
 import time
+import warnings
 from typing import Dict, Optional, Tuple
 
-import blackjax
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
 import numpy as np
 import optax
-import optimistix as optx
-from numpyro.infer import MCMC, NUTS
 
 from .beam_model import create_beam_model
 from .cache import CacheManager
@@ -28,7 +27,6 @@ from .utils import (
     compute_rectangular_ell_cut_indices,
     init_convergence_state,
     make_apodization_mask,
-    newton_step_pcg_whitened,
     params_from_logit,
     params_to_logit,
 )
@@ -53,7 +51,19 @@ class ObjectiveFunctions:
 
     def _build_fourier_objective(self):
         """Build Fourier-space objective."""
-        vmap_chi2 = jax.vmap(self._chi2_fourier_single, in_axes=(None, 0, 0, 0, 0, 0))
+        T_only = getattr(self.config, "fit_T_only", False)
+        vmap_chi2 = jax.vmap(
+            lambda beam_params_list, yoff, xoff, flux, data_fft, precision: self._chi2_fourier_single(
+                beam_params_list,
+                yoff,
+                xoff,
+                flux,
+                data_fft,
+                precision,
+                T_only=T_only,
+            ),
+            in_axes=(None, 0, 0, 0, 0, 0),
+        )
 
         def objective(params_logit, data, extra_args=None):
             maps_fft, precision = data
@@ -73,7 +83,19 @@ class ObjectiveFunctions:
 
     def _build_real_space_objective(self):
         """Build real-space objective."""
-        vmap_chi2 = jax.vmap(self._chi2_real_single, in_axes=(None, 0, 0, 0, 0, 0))
+        T_only = getattr(self.config, "fit_T_only", False)
+        vmap_chi2 = jax.vmap(
+            lambda beam_params_list, yoff, xoff, flux, data, weight: self._chi2_real_single(
+                beam_params_list,
+                yoff,
+                xoff,
+                flux,
+                data,
+                weight,
+                T_only=T_only,
+            ),
+            in_axes=(None, 0, 0, 0, 0, 0),
+        )
 
         def objective(params_logit, data, extra_args=None):
             maps, weights = data
@@ -91,14 +113,18 @@ class ObjectiveFunctions:
 
         return objective
 
-    def _chi2_real_single(self, beam_params_list, yoff, xoff, flux, data, weight):
+    def _chi2_real_single(self, beam_params_list, yoff, xoff, flux, data, weight, T_only=False):
         """Chi2 for single source in real space."""
         model = self._build_model(beam_params_list, yoff, xoff, flux)
+        if T_only:
+            data = data[..., :1]
+            model = model[..., :1]
+            weight = weight[..., :1, :1]
         residual = data - model
         chi2 = jnp.einsum("...i,...ij,...j->...", residual, weight, residual)
         return jnp.sum(chi2)
 
-    def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, precision):
+    def _chi2_fourier_single(self, beam_params_list, yoff, xoff, flux, data_fft, precision, T_only=False):
         """Chi2 for single source in Fourier space."""
         model = self._build_model(beam_params_list, yoff, xoff, flux)
         model_apod = model * self.fitter.apod_mask_broadcast
@@ -106,13 +132,11 @@ class ObjectiveFunctions:
         if self.fitter.idx_y is not None and self.fitter.idx_x is not None:
             model_fft = jnp.take(model_fft, self.fitter.idx_y, axis=0)
             model_fft = jnp.take(model_fft, self.fitter.idx_x, axis=1)
+        if T_only:
+            data_fft = data_fft[..., :1]
+            model_fft = model_fft[..., :1]
+            precision = precision[..., :1, :, :1]
         residual_fft = data_fft - model_fft
-        if precision.ndim == 4:
-            raise ValueError("Precision is 4D, which is no longer supported.")
-            # # chi2 = (jnp.abs(residual_fft)**2) * precision
-            # chi2 = jnp.real(residual_fft * jnp.conj(residual_fft)) * precision  # better derivatives?
-            # chi2_per_mode = jnp.sum(chi2, axis=(-2, -1))
-            # return jnp.mean(chi2_per_mode)
 
         # Multi-band precision matrices arrive per source with axes (ny, nx, n_bands, n_stokes, n_bands, n_stokes)
         ny, nx = residual_fft.shape[:2]
@@ -149,6 +173,21 @@ class ObjectiveFunctions:
         return model
 
 
+def marginalized_linear_flux_chi2(data, template, weight):
+    """Weighted chi2 with a single linear amplitude profiled out."""
+    numerator = jnp.sum(weight * data * template)
+    denominator = jnp.sum(weight * template * template)
+    flux = numerator / denominator
+    residual = data - flux * template
+    chi2 = jnp.sum(weight * residual * residual)
+    return chi2, flux
+
+
+def peak_misnorm_fraction(band_flux, template, data_peak):
+    """Fitted amplitude times template peak, divided by data peak."""
+    return band_flux * jnp.max(template) / data_peak
+
+
 class PolarizedBeamFitter:
     """
     Refactored polarized beam fitting class.
@@ -165,27 +204,15 @@ class PolarizedBeamFitter:
 
         # Initialize components
         self._initialize_state()
-        self.beam_models = self._create_beam_models()
+        self.beam_models = None
         self._cache_manager = None
         self._prepared_data_cache = None
+        self._last_opt_state = None
+        self._last_opt_variant = None
 
         # Load data
         self._load_data()
-
-        # Build objective functions
-        obj_builder = ObjectiveFunctions(self.config, self, self.beam_models)
-        self.objective_function = obj_builder.build_objective()
-
-        # Compile optimization functions
-        self._loss_and_grad = jax.jit(jax.value_and_grad(lambda params_logit, data: self.objective_function(params_logit, data, None)))
-
-        # Initialize parameters
-        self.params_physical = self._initialize_parameters()
-        self.params_logit = params_to_logit(self.params_physical, self.config)
-
-        # Initialize last optimizer state and variant
-        self._last_opt_state = None
-        self._last_opt_variant = None
+        self._configure_fit_context()
 
     def _setup_jax(self):
         """Configure JAX settings."""
@@ -249,18 +276,38 @@ class PolarizedBeamFitter:
             models[band] = create_beam_model(self.config, self.y_grid, self.x_grid, band)
         return models
 
+    def _configure_fit_context(self):
+        """Build beam models, objective, compiled loss, and initial parameters."""
+        self.beam_models = self._create_beam_models()
+        self.objective_function = ObjectiveFunctions(self.config, self, self.beam_models).build_objective()
+        self._loss_and_grad = jax.jit(jax.value_and_grad(lambda params_logit, data: self.objective_function(params_logit, data, None)))
+        self.params_physical = self._initialize_parameters()
+        self.params_logit = params_to_logit(self.params_physical, self.config)
+
     def _load_data(self):
         """Load and prepare data using cache if available."""
         print("Loading data...")
 
-        # Use cache manager
         cache = CacheManager(self.config)
         loader_class = self.config.data_loader_class or DataLoader
         loader = loader_class(self.config)
 
-        data = cache.load_or_create(loader.load_and_prepare)
+        data = cache.load()
+        cache_hit = data is not None
+        if data is None:
+            data = loader.load_and_prepare()
         data_list = list(data)
 
+        self._cache_manager = cache
+        self._assign_prepared_data(data_list)
+
+        if not cache_hit:
+            self._add_gaussian_source_prefit_to_cache(data_list)
+            self._assign_prepared_data(data_list)
+            cache.save(tuple(data_list))
+
+    def _assign_prepared_data(self, data_list):
+        """Install a prepared-data tuple/list into this fitter's data state."""
         (
             gaussfit_yoff,
             gaussfit_xoff,
@@ -277,7 +324,6 @@ class PolarizedBeamFitter:
             debug_precision,
         ) = data_list
 
-        self._cache_manager = cache
         self._prepared_data_cache = data_list
 
         # Store in state
@@ -299,6 +345,52 @@ class PolarizedBeamFitter:
             self._setup_fourier_data(maps_fft, precision)
         else:
             self._setup_real_space_data(weights)
+
+    def _add_gaussian_source_prefit_to_cache(self, data_list):
+        """Run a Gaussian, T-only source prefit and store y/x/T initial values."""
+        print("Preparing Gaussian T-only source-parameter cache...")
+        original_state = (
+            self.config,
+            self.beam_models,
+            getattr(self, "objective_function", None),
+            getattr(self, "_loss_and_grad", None),
+            getattr(self, "params_physical", None),
+            getattr(self, "params_logit", None),
+            self._last_opt_state,
+            self._last_opt_variant,
+        )
+
+        try:
+            prefit_config = copy.copy(self.config)
+            prefit_config.beam_model_type = "gaussian"
+            prefit_config.fit_T_only = True
+            prefit_config.refit_position = True
+            prefit_config.refit_Tflux = True
+            prefit_config.solver = "tuned"
+
+            self.config = prefit_config
+            self._last_opt_state = None
+            self._last_opt_variant = None
+            self._configure_fit_context()
+
+            best_fit = self.run_fit()
+        finally:
+            (
+                self.config,
+                self.beam_models,
+                self.objective_function,
+                self._loss_and_grad,
+                self.params_physical,
+                self.params_logit,
+                self._last_opt_state,
+                self._last_opt_variant,
+            ) = original_state
+
+        data_list[0] = np.asarray(best_fit["sources"]["yoff"], dtype=self.config.dtype_np_real)
+        data_list[1] = np.asarray(best_fit["sources"]["xoff"], dtype=self.config.dtype_np_real)
+        data_list[2] = np.asarray(data_list[2], dtype=self.config.dtype_np_real).copy()
+        data_list[2][..., 0] = np.asarray(best_fit["sources"]["flux"][..., 0], dtype=self.config.dtype_np_real)
+        print("Gaussian T-only source parameters added to prepared-data cache.")
 
     def _setup_fourier_data(self, maps_fft, precision: np.ndarray):
         """Setup cached Fourier-space arrays for optimization."""
@@ -346,7 +438,45 @@ class PolarizedBeamFitter:
 
         return params
 
-    def run_fit(self) -> Dict:
+    def _uses_reduced_adam_parameter_space(self):
+        return not (getattr(self.config, "refit_position", True) and getattr(self.config, "refit_Tflux", True))
+
+    def _adam_fit_params_from_full(self, params_logit):
+        if not self._uses_reduced_adam_parameter_space():
+            return params_logit
+
+        fit_params = {"beams": params_logit["beams"], "sources": {}}
+        if getattr(self.config, "refit_position", True):
+            fit_params["sources"]["yoff"] = params_logit["sources"]["yoff"]
+            fit_params["sources"]["xoff"] = params_logit["sources"]["xoff"]
+        if getattr(self.config, "refit_Tflux", True):
+            fit_params["sources"]["flux"] = params_logit["sources"]["flux"]
+        else:
+            fit_params["sources"]["flux_QU"] = params_logit["sources"]["flux"][..., 1:]
+        return fit_params
+
+    def _full_params_from_adam_fit_params(self, fit_params_logit, fixed_params_logit):
+        if not self._uses_reduced_adam_parameter_space():
+            return fit_params_logit
+
+        full_params = {"beams": fit_params_logit["beams"], "sources": {}}
+        if getattr(self.config, "refit_position", True):
+            full_params["sources"]["yoff"] = fit_params_logit["sources"]["yoff"]
+            full_params["sources"]["xoff"] = fit_params_logit["sources"]["xoff"]
+        else:
+            full_params["sources"]["yoff"] = fixed_params_logit["sources"]["yoff"]
+            full_params["sources"]["xoff"] = fixed_params_logit["sources"]["xoff"]
+
+        if getattr(self.config, "refit_Tflux", True):
+            full_params["sources"]["flux"] = fit_params_logit["sources"]["flux"]
+        else:
+            full_params["sources"]["flux"] = jnp.concatenate(
+                [fixed_params_logit["sources"]["flux"][..., :1], fit_params_logit["sources"]["flux_QU"]],
+                axis=-1,
+            )
+        return full_params
+
+    def run_fit(self):
         """
         Run optimization to find best-fit parameters.
 
@@ -359,8 +489,6 @@ class PolarizedBeamFitter:
             self._run_bfgs()
         elif self.config.solver == "optax_adam":
             self._run_adam()
-        elif self.config.solver == "newton_pcg":
-            self._run_newton_pcg()
         elif self.config.solver == "tuned":
             self._run_tuned_optimization()
         else:
@@ -370,13 +498,35 @@ class PolarizedBeamFitter:
 
     def _run_bfgs(self):
         """Run BFGS optimization."""
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"jax\.interpreters\.batching\.NotMapped is deprecated\.", category=DeprecationWarning
+            )
+            import optimistix as optx
+
         solver = optx.BFGS(**self.config.bfgs_kwargs)
+        use_reduced_space = self._uses_reduced_adam_parameter_space()
+        if use_reduced_space:
+            fixed_params_logit = self.params_logit
+            fit_params_logit = self._adam_fit_params_from_full(self.params_logit)
+
+            def objective_fit_params(params_logit_fit, args, extra_args=None):
+                fixed_params_logit, data = args
+                params_logit_full = self._full_params_from_adam_fit_params(params_logit_fit, fixed_params_logit)
+                return self.objective_function(params_logit_full, data, extra_args)
+
+            objective_args = (fixed_params_logit, self.objective_data)
+        else:
+            fit_params_logit = self.params_logit
+            fixed_params_logit = None
+            objective_fit_params = self.objective_function
+            objective_args = self.objective_data
 
         sol = optx.minimise(
-            self.objective_function,
+            objective_fit_params,
             solver,
-            self.params_logit,
-            args=self.objective_data,
+            fit_params_logit,
+            args=objective_args,
             max_steps=self.config.n_steps,
             throw=False,
         )
@@ -384,7 +534,7 @@ class PolarizedBeamFitter:
         if sol.result != optx.RESULTS.successful:
             raise RuntimeError(f"BFGS failed: {optx.RESULTS[sol.result]}")
 
-        self.params_logit = sol.value
+        self.params_logit = self._full_params_from_adam_fit_params(sol.value, fixed_params_logit) if use_reduced_space else sol.value
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
         print(f"Optimization finished after {sol.stats['num_steps']} steps.")
@@ -399,8 +549,30 @@ class PolarizedBeamFitter:
         """
         variant = self.config.adam_variant
         print(f"Starting optimization with optax variant {variant}.")
+        use_reduced_space = self._uses_reduced_adam_parameter_space()
+        if use_reduced_space:
+            fixed_params_logit = self.params_logit
+            fit_params_logit = self._adam_fit_params_from_full(self.params_logit)
+
+            def objective_fit_params(params_logit_fit, fixed_params_logit, data):
+                params_logit_full = self._full_params_from_adam_fit_params(params_logit_fit, fixed_params_logit)
+                return self.objective_function(params_logit_full, data, None)
+
+            loss_and_grad = jax.jit(jax.value_and_grad(objective_fit_params))
+
+            def evaluate_loss_and_grad(params_logit_fit):
+                return loss_and_grad(params_logit_fit, fixed_params_logit, self.objective_data)
+
+        else:
+            fit_params_logit = self.params_logit
+            fixed_params_logit = None
+            loss_and_grad = self._loss_and_grad
+
+            def evaluate_loss_and_grad(params_logit_fit):
+                return loss_and_grad(params_logit_fit, self.objective_data)
+
         optimizer = getattr(optax, variant)(**self.config.adam_kwargs)
-        opt_state = optimizer.init(self.params_logit)
+        opt_state = optimizer.init(fit_params_logit)
 
         if self._last_opt_state is not None:
             print("Continuing from previous optimizer state.")
@@ -412,7 +584,7 @@ class PolarizedBeamFitter:
 
         # Initialize convergence tracking
         convergence_state = init_convergence_state()
-        initial_loss, initial_grads = self._loss_and_grad(self.params_logit, self.objective_data)
+        initial_loss, initial_grads = evaluate_loss_and_grad(fit_params_logit)
         initial_grad_norm = optax.global_norm(initial_grads)
         print(f"Initial loss: {initial_loss:.2f}, Initial gradient norm: {initial_grad_norm:.2f}")
 
@@ -422,18 +594,19 @@ class PolarizedBeamFitter:
             print("Debug mode: storing optimization history in fitter.opt_history")
 
         for i in range(self.config.n_steps):
-            loss, grads = self._loss_and_grad(self.params_logit, self.objective_data)
+            loss, grads = evaluate_loss_and_grad(fit_params_logit)
             grad_norm = optax.global_norm(grads)
 
             # Store history if debug is enabled
             if self.config.debug:
-                params_phys = params_from_logit(self.params_logit, self.config)
+                params_logit_full = self._full_params_from_adam_fit_params(fit_params_logit, fixed_params_logit)
+                params_phys = params_from_logit(params_logit_full, self.config)
                 history_entry = {
                     "step": i,
                     "loss": float(loss),
                     "grad_norm": float(grad_norm),
                     "params_physical": jax.device_get(params_phys),
-                    "params_logit": jax.device_get(self.params_logit),
+                    "params_logit": jax.device_get(params_logit_full),
                     "gradients": jax.device_get(grads),
                     "mu": jax.device_get(opt_state[0].mu) if hasattr(opt_state[0], "mu") else None,
                     "nu": jax.device_get(opt_state[0].nu) if hasattr(opt_state[0], "nu") else None,
@@ -449,7 +622,7 @@ class PolarizedBeamFitter:
                 self.config,
                 convergence_state,
                 initial_grad_norm,
-                self.params_logit,
+                fit_params_logit,
             )
             if converged:
                 print(f"Converged at step {i}: {message}")
@@ -458,13 +631,16 @@ class PolarizedBeamFitter:
                 break
 
             updates, opt_state = optimizer.update(grads, opt_state)
-            self.params_logit = optax.apply_updates(self.params_logit, updates)
+            fit_params_logit = optax.apply_updates(fit_params_logit, updates)
             if i % 10 == 0:  # Print every 10 steps
                 print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2f}")
 
         # Use best parameters if available, otherwise use current parameters
         if convergence_state["best_params"] is not None:
-            self.params_logit = convergence_state["best_params"]
+            fit_params_logit = convergence_state["best_params"]
+        self.params_logit = (
+            self._full_params_from_adam_fit_params(fit_params_logit, fixed_params_logit) if use_reduced_space else fit_params_logit
+        )
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
         # Remember optimizer state/variant for possible warm-start next time
@@ -497,74 +673,14 @@ class PolarizedBeamFitter:
         self.config.loss_history_length = 10  # go until AMSGrad isn't improving anymore
         self._run_adam()
 
-    def _run_newton_pcg(self):
-        """Run Newton-PCG optimization using whitened parameter space."""
-        # Prepare whitening transform using existing NUTS infrastructure
-        print("Computing whitening transform from Hessian at MAP...")
-        self._prepare_nuts_transform()
-        print("Whitening transform ready.")
-
-        # Define loss function in whitened space
-        def loss_whitened(params_white):
-            params_phys = self.from_whitened(params_white)
-            params_logit = params_to_logit(params_phys, self.config)
-            return self.objective_function(params_logit, self.objective_data)
-
-        # Transform initial parameters to whitened space
-        params_white = self.to_whitened(self.params_physical)
-
-        # Initialize convergence tracking
-        convergence_state = init_convergence_state()
-
-        # Compute initial gradient norm
-        initial_loss = loss_whitened(params_white)
-        initial_grad_norm = jnp.linalg.norm(jax.grad(loss_whitened)(params_white))
-
-        print(f"Initial loss: {initial_loss:.2f}, Initial gradient norm: {initial_grad_norm:.2e}")
-
-        # Newton iteration in whitened space
-        for i in range(self.config.n_steps):
-            # Compute loss before step
-            prev_params_white = params_white
-            loss = loss_whitened(prev_params_white)
-
-            # Take Newton step with PCG in whitened space
-            params_white, cg_res, grad_norm = newton_step_pcg_whitened(
-                loss_whitened,
-                params_white,
-                damping=getattr(self.config, "newton_damping", 1e-6),
-                cg_tol=getattr(self.config, "newton_cg_tol", 1e-12),
-                cg_maxiter=getattr(self.config, "newton_cg_maxiter", 1000),
-            )
-
-            # Check convergence
-            converged, message, convergence_state = check_convergence(
-                loss, grad_norm, i, self.config, convergence_state, initial_grad_norm, prev_params_white
-            )
-
-            if converged:
-                print(f"Converged at step {i}: {message}")
-                if self.config.convergence_criterion == "loss_history":
-                    print(f"Returning best loss found: {convergence_state['best_loss']:.2f}")
-                break
-
-            if i % 1 == 0:
-                print(f"Step {i}/{self.config.n_steps}: loss={loss:.2f}, |grad|={grad_norm:.2e}, CG res={cg_res:.2e}")
-
-        # Use best parameters if available, otherwise use current
-        if convergence_state["best_params"] is not None:
-            params_white = convergence_state["best_params"]
-
-        # Transform back to physical space
-        self.params_physical = self.from_whitened(params_white)
-        self.params_logit = params_to_logit(self.params_physical, self.config)
-
-        print("Newton-PCG optimization finished.")
-
     def sample_with_mclmc(self):
         """
         Single-chain MCLMC
         """
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="JAXopt is no longer maintained.*", category=DeprecationWarning)
+            import blackjax
+
         self._prepare_nuts_transform()
         chi2_norm = jnp.asarray(self.config.chi2_normalization, dtype=self.config.dtype_jax_real)
         log_det = jnp.asarray(self.log_det_jacobian, dtype=self.config.dtype_jax_real)
@@ -760,6 +876,8 @@ class PolarizedBeamFitter:
         """
         Run NUTS sampling for uncertainty estimation.
         """
+        from numpyro.infer import MCMC, NUTS
+
         num_chains = max(1, jax.local_device_count())
 
         # Prepare for NUTS sampling by calculating the Hessian for the whitening transform

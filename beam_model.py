@@ -548,7 +548,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
             print("  Endpoint constraints: B=B'=0 at r_min, B=B'=0 at r_max")
         else:
             print("  Endpoint constraints: B=B'=0 at r_min, B=0 at r_max")
-        print(f"  B-splines active over r = [{r_min:.1f}, {r_max:.1f}] arcmin")
+        print(f"  B-splines active over r = [{r_min:.2f}, {r_max:.2f}] arcmin")
 
         return r_fine_jax, ortho_basis_funcs_jax, self.n_bspline_coeffs, self.r_knots
 
@@ -610,11 +610,7 @@ class BeamModelBSplinesGaussian(BeamModelBase):
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
         bspline_component = bspline_component + self._bspline_rmax_offset(r_values, gaussian_sigma)
-        # If an rmax value is configured, set the total beam to that value for r >= rmax
-        if self.bspline_rmax_value is not None:
-            bspline_component = jnp.where(
-                r_values >= self.bspline_rmax_arcmin, self.bspline_rmax_value - gaussian_component, bspline_component
-            )
+        bspline_component = jnp.where(r_values > self.bspline_rmax_arcmin, 0.0, bspline_component)
 
         # Combined beam
         total_beam = gaussian_component + bspline_component
@@ -724,6 +720,7 @@ class BeamModelBSplinesPlusMain(BeamModelBase):
         bspline_profile_fine = jnp.dot(self.ortho_basis_funcs_jax, bspline_coeffs)
         bspline_component = linear_interp_differentiable(r_values, self.r_fine_jax, bspline_profile_fine, self.config)
         bspline_component = bspline_component + BeamModelBSplinesGaussian._bspline_rmax_offset(self, r_values)
+        bspline_component = jnp.where(r_values > self.bspline_rmax_arcmin, 0.0, bspline_component)
         base_profile = linear_interp_differentiable(r_values, self.r_fine_betapol_jax, self.Bmain_r_norm_jax, self.config)
 
         return base_profile + bspline_component

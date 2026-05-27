@@ -5,15 +5,15 @@ It applies a radial low-pass filter using the TOD Nyquist estimate, recenters
 residual maps with bilinear interpolation, and stores source offsets alongside
 each template so they can be used as initial guesses in later optimization runs.
 
-One important thing to note is that this uses the fitter, which itself uses 
-cached leakage-cleaned inputs. For iterative cleaning like we did for dH26, 
+One important thing to note is that this uses the fitter, which itself uses
+cached leakage-cleaned inputs. For iterative cleaning like we did for dH26,
 the procedure is:
 
 First iteration:
  - Clear cache directory
  - Set `use_precomputed_leakage_templates = False` at the bottom of this script
  - Run this script
- 
+
 Subsequent iterations:
  - Clear cache directory
  - Set `use_precomputed_leakage_templates = True` at the bottom of this script

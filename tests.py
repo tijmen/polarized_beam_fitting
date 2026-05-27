@@ -14,6 +14,7 @@ from scipy import interpolate
 matplotlib.use("Agg")
 
 from polarized_beam_fitting.beam_model import create_beam_model
+from polarized_beam_fitting.cache import CacheManager
 from polarized_beam_fitting.config import BeamFittingConfig
 from polarized_beam_fitting.data_loader import DataLoader
 from polarized_beam_fitting.fitter import PolarizedBeamFitter
@@ -285,9 +286,12 @@ class TestEndToEndRecovery(unittest.TestCase):
         else:
             jax.config.update("jax_enable_x64", False)
 
+        config.refit_position = True
+        config.refit_Tflux = True
         mock_data = generate_mock_data(config, true_beam_params)
         true_source_params = mock_data[-1]  # Last element is true_source_params
         # Pass only the first 13 elements to fitter (exclude true_source_params)
+        CacheManager(config).save(mock_data[:-1])
         mock_data_loader.return_value.load_and_prepare.return_value = mock_data[:-1]
 
         fitter = PolarizedBeamFitter(config=config)
@@ -354,6 +358,38 @@ class TestEndToEndRecovery(unittest.TestCase):
         )
         print("✓ Gaussian model test successful.")
 
+    def test_source_prefit_cache_and_refit_flags_fix_configured_parameters(self, mock_data_loader):
+        print("\n--- Testing source prefit cache with final refit flags ---")
+        config = get_test_config(
+            beam_model_type="beta_pol",
+            refit_position=False,
+            refit_Tflux=False,
+            solver="optax_adam",
+            n_steps=1,
+            convergence_criterion="absolute_gtol",
+            absolute_gtol=-1.0,
+        )
+        true_params = {"beta_pol": 0.75}
+        mock_data = generate_mock_data(config, true_params, n_sources=3)
+        mock_data_loader.return_value.load_and_prepare.return_value = mock_data[:-1]
+
+        with patch.object(PolarizedBeamFitter, "_run_tuned_optimization", lambda self: self._run_adam()):
+            fitter = PolarizedBeamFitter(config=config)
+            cached_sources = {key: np.array(value) for key, value in fitter.params_physical["sources"].items()}
+            best_fit_params = fitter.run_fit()
+
+        np.testing.assert_allclose(np.array(best_fit_params["sources"]["yoff"]), cached_sources["yoff"])
+        np.testing.assert_allclose(np.array(best_fit_params["sources"]["xoff"]), cached_sources["xoff"])
+        np.testing.assert_allclose(np.array(best_fit_params["sources"]["flux"][..., 0]), cached_sources["flux"][..., 0])
+
+        cached_data = CacheManager(config).load()
+        self.assertIsNotNone(cached_data)
+        np.testing.assert_allclose(cached_data[0], cached_sources["yoff"])
+        np.testing.assert_allclose(cached_data[1], cached_sources["xoff"])
+        np.testing.assert_allclose(cached_data[2][..., 0], cached_sources["flux"][..., 0])
+        mock_data_loader.return_value.load_and_prepare.assert_called_once()
+        print("✓ Source prefit cache and final refit flags test successful.")
+
     def test_beam_model_bspline_plus_gaussian(self, *mocks):
         print("\n--- Testing Beam Model: Gaussian + B-splines ---")
         config = get_test_config(beam_model_type="bsplines_plus_gaussian")
@@ -403,11 +439,15 @@ class TestEndToEndRecovery(unittest.TestCase):
 
         sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
         coeffs = np.zeros(beam_model.n_bspline_coeffs, dtype=config.dtype_np_real)
-        r_query = jnp.array([beam_model.spline_rmin_arcmin, beam_model.bspline_rmax_arcmin], dtype=config.dtype_jax_real)
+        r_query = jnp.array(
+            [beam_model.spline_rmin_arcmin, beam_model.bspline_rmax_arcmin, beam_model.bspline_rmax_arcmin + 1.0],
+            dtype=config.dtype_jax_real,
+        )
 
         profile = beam_model.evaluate_beam_profile(sigma, coeffs, r_query)
         gaussian_rmin = jnp.exp(-0.5 * (beam_model.spline_rmin_arcmin / sigma) ** 2)
-        expected = jnp.array([gaussian_rmin, 0.03], dtype=config.dtype_jax_real)
+        gaussian_tail = jnp.exp(-0.5 * ((beam_model.bspline_rmax_arcmin + 1.0) / sigma) ** 2)
+        expected = jnp.array([gaussian_rmin, 0.03, gaussian_tail], dtype=config.dtype_jax_real)
         np.testing.assert_allclose(np.asarray(profile), np.asarray(expected), rtol=0.0, atol=1e-10)
 
     def test_bspline_plus_gaussian_can_leave_rmax_derivative_free(self, *mocks):
@@ -454,9 +494,10 @@ class TestEndToEndRecovery(unittest.TestCase):
 
         sigma = config.band_fwhm_arcmin[config.bands[0]] / (2 * np.sqrt(2 * np.log(2)))
         coeffs = np.full(beam_model.n_bspline_coeffs, 0.2, dtype=config.dtype_np_real)
-        r_query = jnp.array([beam_model.bspline_rmax_arcmin], dtype=config.dtype_jax_real)
+        r_query = jnp.array([beam_model.bspline_rmax_arcmin, beam_model.bspline_rmax_arcmin + 1.0], dtype=config.dtype_jax_real)
         profile = beam_model.evaluate_beam_profile(sigma, coeffs, r_query)
         self.assertGreater(abs(float(profile[0])), 1e-6)
+        np.testing.assert_allclose(np.asarray(profile[1]), 0.0, rtol=0.0, atol=1e-10)
 
     def test_bspline_plus_gaussian_basis_has_smooth_endpoints(self, *mocks):
         config = get_test_config(
