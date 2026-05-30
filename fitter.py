@@ -539,6 +539,11 @@ class PolarizedBeamFitter:
                 stacklevel=2,
             )
 
+    @staticmethod
+    def _clone_optimizer_state(opt_state):
+        """Create a tree copy of an Optax optimizer state."""
+        return jax.tree_util.tree_map(lambda x: jnp.array(x), opt_state)
+
     def run_fit(self):
         """
         Run optimization to find best-fit parameters.
@@ -639,15 +644,30 @@ class PolarizedBeamFitter:
         opt_state = optimizer.init(fit_params_logit)
 
         if self._last_opt_state is not None:
-            print("Continuing from previous optimizer state.")
-            s_prev = self._last_opt_state[0]  # has .count, .mu, .nu
+            if self._last_opt_variant == variant:
+                print("Continuing from previous best optimizer state.")
+            else:
+                print(f"Continuing from previous best optimizer state for {self._last_opt_variant} -> {variant}.")
+            s_prev = self._last_opt_state[0]
             s_cur = opt_state[0]
-            kwargs = dict(count=s_prev.count, mu=s_prev.mu, nu=s_prev.nu)
+            kwargs = {}
+            for name in ("count", "mu", "nu"):
+                if hasattr(s_prev, name) and hasattr(s_cur, name):
+                    kwargs[name] = getattr(s_prev, name)
             s_new0 = s_cur._replace(**kwargs)
+
+            # Adam -> AMSGrad: seed AMSGrad's running max from Adam's second moment.
+            if hasattr(s_new0, "nu_max") and hasattr(s_prev, "nu"):
+                s_new0 = s_new0._replace(nu_max=s_prev.nu)
+
+            if self._last_opt_variant != variant and hasattr(s_new0, "mu"):
+                zero_mu = jax.tree_util.tree_map(jnp.zeros_like, s_new0.mu)
+                s_new0 = s_new0._replace(mu=zero_mu)
             opt_state = (s_new0,) + opt_state[1:]
 
         # Initialize convergence tracking
         convergence_state = init_convergence_state()
+        best_opt_state = None
         initial_loss, initial_grads = evaluate_loss_and_grad(fit_params_logit)
         initial_grad_norm = optax.global_norm(initial_grads)
         print(f"Initial loss: {initial_loss:.2f}, Initial gradient norm: {initial_grad_norm:.2f}")
@@ -688,6 +708,8 @@ class PolarizedBeamFitter:
                 initial_grad_norm,
                 fit_params_logit,
             )
+            if convergence_state["best_step"] == i:
+                best_opt_state = self._clone_optimizer_state(opt_state)
             if converged:
                 print(f"Converged at step {i}: {message}")
                 if self.config.convergence_criterion == "loss_history":
@@ -708,7 +730,7 @@ class PolarizedBeamFitter:
         self.params_physical = params_from_logit(self.params_logit, self.config)
 
         # Remember optimizer state/variant for possible warm-start next time
-        self._last_opt_state = opt_state
+        self._last_opt_state = best_opt_state if best_opt_state is not None else opt_state
         self._last_opt_variant = variant
 
     def _run_tuned_optimization(self):
