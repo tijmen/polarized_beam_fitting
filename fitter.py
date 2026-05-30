@@ -476,6 +476,69 @@ class PolarizedBeamFitter:
             )
         return full_params
 
+    def _iter_final_logit_physical_bounds(self):
+        active_model_bounds = self.config.active_beam_model_bounds
+        for band_idx, (beam_logit, beam_physical) in enumerate(zip(self.params_logit["beams"], self.params_physical["beams"])):
+            for param_name, logit_value in beam_logit.items():
+                yield (
+                    f"params_logit.beams[{band_idx}].{param_name}",
+                    logit_value,
+                    beam_physical[param_name],
+                    active_model_bounds[param_name],
+                )
+
+        yoff_bounds, xoff_bounds = self.config.source_position_bounds
+        source_bounds = {
+            "yoff": yoff_bounds,
+            "xoff": xoff_bounds,
+            "flux": self.config.source_flux_bounds,
+        }
+        for param_name, bounds in source_bounds.items():
+            yield (
+                f"params_logit.sources.{param_name}",
+                self.params_logit["sources"][param_name],
+                self.params_physical["sources"][param_name],
+                bounds,
+            )
+
+    def _warn_if_final_logit_out_of_range(self):
+        offending_params = []
+        total_offending = 0
+        for name, logit_value, physical_value, bounds in self._iter_final_logit_physical_bounds():
+            logit_values = np.asarray(jax.device_get(logit_value))
+            if logit_values.size == 0:
+                continue
+            mask = (logit_values < -50.0) | (logit_values > 50.0)
+            if not np.any(mask):
+                continue
+
+            physical_values = np.asarray(jax.device_get(physical_value))
+            lower, upper = bounds
+            lower = np.broadcast_to(np.asarray(jax.device_get(lower)), physical_values.shape)
+            upper = np.broadcast_to(np.asarray(jax.device_get(upper)), physical_values.shape)
+
+            offending_logit_values = logit_values[mask]
+            offending_physical_values = physical_values[mask]
+            offending_lower = lower[mask]
+            offending_upper = upper[mask]
+            total_offending += int(offending_logit_values.size)
+            offending_params.append(
+                f"{name}: count={offending_logit_values.size}, "
+                f"logit=[{np.min(offending_logit_values):.3g}, {np.max(offending_logit_values):.3g}], "
+                f"physical=[{np.min(offending_physical_values):.6g}, {np.max(offending_physical_values):.6g}], "
+                f"bounds=[{np.min(offending_lower):.6g}, {np.max(offending_upper):.6g}]"
+            )
+
+        if offending_params:
+            warnings.warn(
+                "Final best-fit logit parameters outside [-50, 50]: "
+                + "; ".join(offending_params)
+                + f". Total offending entries: {total_offending}. "
+                "These parameters are extremely close to their configured physical bounds.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def run_fit(self):
         """
         Run optimization to find best-fit parameters.
@@ -494,6 +557,7 @@ class PolarizedBeamFitter:
         else:
             raise ValueError(f"Unknown solver: {self.config.solver}")
 
+        self._warn_if_final_logit_out_of_range()
         return self.params_physical
 
     def _run_bfgs(self):
