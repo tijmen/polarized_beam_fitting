@@ -152,9 +152,11 @@ class DataLoader:
             raise ValueError("CDRC is only supported with chi2_method='fourier'.")
         if self.config.use_cdrc:
             fields = set(self.config.coadd_filenames.keys())
-            if fields not in [{"winter"}, {"winter_nodecon"}]:
+            configured_fields = set(self.config.cdrc_params)
+            if not fields.issubset(configured_fields):
                 raise ValueError(
-                    f"CDRC is only configured for winter coadds; expected coadd_filenames keys {{'winter', 'winter_nodecon'}}, got {sorted(fields)}."
+                    f"CDRC is not configured for coadd field(s) {sorted(fields - configured_fields)}; "
+                    f"configured fields are {sorted(configured_fields)}."
                 )
         gaussfit_results = self._load_and_fit_sources()
 
@@ -321,11 +323,12 @@ class DataLoader:
 
     def _get_cdrc_params(self, source_id: str, band: str, field_name: str) -> Tuple[Dict[str, float], str]:
         """Return CDRC parameters and matched subfield name for a source."""
-        if field_name not in ["winter", "winter_nodecon"]:
-            raise ValueError(f"CDRC is only configured for the winter field; got field='{field_name}'.")
+        field_params = self.config.cdrc_params.get(field_name)
+        if field_params is None:
+            raise ValueError(f"CDRC is not configured for field='{field_name}'.")
 
-        subfield_name = match_subfield_by_declination(source_id, self.config.cdrc_winter_params.keys())
-        band_params = self.config.cdrc_winter_params[subfield_name].get(band)
+        subfield_name = match_subfield_by_declination(source_id, field_params.keys())
+        band_params = field_params[subfield_name].get(band)
         if band_params is None:
             raise ValueError(f"No CDRC parameters found for band '{band}' in subfield '{subfield_name}'.")
 
@@ -333,20 +336,19 @@ class DataLoader:
 
     def _build_cdrc_transform(self, band: str, params: Dict[str, float]) -> np.ndarray:
         """Build the 3x3 CDRC transform matrix for (T, Q, U)."""
-        tcal = self.config.cmb_calibration_factors["T"][band]
-        pcal = self.config.cmb_calibration_factors["Q"][band]
+        tcal = float(params.get("tcal", self.config.cmb_calibration_factors["T"][band]))
+        pcal = float(params.get("pcal", self.config.cmb_calibration_factors["Q"][band] / self.config.cmb_calibration_factors["T"][band]))
         eps_q = float(params["epsilon_q_tt"])
         eps_u = float(params["epsilon_u_tt"])
-        psi = float(params["delta_psi"])
+        psi = 2.0 * float(params["delta_psi"])
 
         c = np.cos(psi)
         s = np.sin(psi)
-        pscale = pcal / tcal
 
         a1 = np.diag([tcal, tcal, tcal])
         a2 = np.array([[1.0, 0.0, 0.0], [-eps_q, 1.0, 0.0], [-eps_u, 0.0, 1.0]], dtype=self.config.dtype_np_real)
-        a3 = np.array([[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]], dtype=self.config.dtype_np_real)
-        a4 = np.diag([1.0, pscale, pscale])
+        a3 = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=self.config.dtype_np_real)
+        a4 = np.diag([1.0, pcal, pcal])
         return a4 @ a3 @ a2 @ a1
 
     def _apply_cdrc_to_source_data(self, source_data: Dict) -> None:

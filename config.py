@@ -149,26 +149,104 @@ class BeamFittingConfig:
 
     # === CDRC deprojection/rotation/calibration ===
     use_cdrc = False  # Enable Wei's CDRC procedure for deprojecting, rotating, and calibrating T/Q/U maps.
-    cdrc_winter_params = {
-        "ra0hdec-44.75": {
-            "90GHz": {"delta_psi": 0.0062, "epsilon_q_tt": 0.0025, "epsilon_u_tt": 0.0054},
-            "150GHz": {"delta_psi": 0.0051, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0072},
-            "220GHz": {"delta_psi": -0.0113, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0081},
+    cdrc_params = {
+        "winter_nodecon": {
+            "ra0hdec-44.75": {
+                "90GHz": {"tcal": 1.07, "pcal": 1.05 / 1.07, "delta_psi": 0.0062, "epsilon_q_tt": 0.0025, "epsilon_u_tt": 0.0054},
+                "150GHz": {"tcal": 1.02, "pcal": 1.06 / 1.02, "delta_psi": 0.0051, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0072},
+                "220GHz": {"tcal": 1.01, "pcal": 1.17 / 1.01, "delta_psi": -0.0113, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0081},
+            },
+            "ra0hdec-52.25": {
+                "90GHz": {"tcal": 1.07, "pcal": 1.05 / 1.07, "delta_psi": 0.0080, "epsilon_q_tt": 0.0031, "epsilon_u_tt": 0.0060},
+                "150GHz": {"tcal": 1.02, "pcal": 1.06 / 1.02, "delta_psi": 0.0062, "epsilon_q_tt": 0.0030, "epsilon_u_tt": 0.0070},
+                "220GHz": {"tcal": 1.01, "pcal": 1.17 / 1.01, "delta_psi": -0.0122, "epsilon_q_tt": 0.0038, "epsilon_u_tt": 0.0065},
+            },
+            "ra0hdec-59.75": {
+                "90GHz": {"tcal": 1.07, "pcal": 1.05 / 1.07, "delta_psi": 0.0099, "epsilon_q_tt": 0.0076, "epsilon_u_tt": 0.0089},
+                "150GHz": {"tcal": 1.02, "pcal": 1.06 / 1.02, "delta_psi": 0.0087, "epsilon_q_tt": 0.0094, "epsilon_u_tt": 0.0130},
+                "220GHz": {"tcal": 1.01, "pcal": 1.17 / 1.01, "delta_psi": 0.0016, "epsilon_q_tt": 0.0186, "epsilon_u_tt": 0.0111},
+            },
+            "ra0hdec-67.25": {
+                "90GHz": {"tcal": 1.07, "pcal": 1.05 / 1.07, "delta_psi": 0.0093, "epsilon_q_tt": 0.0065, "epsilon_u_tt": 0.0087},
+                "150GHz": {"tcal": 1.02, "pcal": 1.06 / 1.02, "delta_psi": 0.0078, "epsilon_q_tt": 0.0088, "epsilon_u_tt": 0.0118},
+                "220GHz": {"tcal": 1.01, "pcal": 1.17 / 1.01, "delta_psi": 0.0060, "epsilon_q_tt": 0.0181, "epsilon_u_tt": 0.0132},
+            },
         },
-        "ra0hdec-52.25": {
-            "90GHz": {"delta_psi": 0.0080, "epsilon_q_tt": 0.0031, "epsilon_u_tt": 0.0060},
-            "150GHz": {"delta_psi": 0.0062, "epsilon_q_tt": 0.0030, "epsilon_u_tt": 0.0070},
-            "220GHz": {"delta_psi": -0.0122, "epsilon_q_tt": 0.0038, "epsilon_u_tt": 0.0065},
+        "summer_a_nodecon": {
+            "ra5hdec-59.5": {
+                "90GHz": {"tcal": 1.0840, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0032, "epsilon_u_tt": 0.0060},
+                "150GHz": {"tcal": 0.9952, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0027, "epsilon_u_tt": 0.0079},
+                "220GHz": {"tcal": 1.0028, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0005, "epsilon_u_tt": 0.0067},
+            },
+            "ra5hdec-52.5": {
+                "90GHz": {"tcal": 1.0423, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0032, "epsilon_u_tt": 0.0060},
+                "150GHz": {"tcal": 1.0188, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0027, "epsilon_u_tt": 0.0079},
+                "220GHz": {"tcal": 0.9560, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0005, "epsilon_u_tt": 0.0067},
+            },
+            "ra5hdec-45.5": {
+                "90GHz": {"tcal": 1.0606, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0032, "epsilon_u_tt": 0.0060},
+                "150GHz": {"tcal": 0.9990, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0027, "epsilon_u_tt": 0.0079},
+                "220GHz": {"tcal": 0.9778, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0005, "epsilon_u_tt": 0.0067},
+            },
+            "ra5hdec-38.5": {
+                "90GHz": {"tcal": 1.0577, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0032, "epsilon_u_tt": 0.0060},
+                "150GHz": {"tcal": 1.0035, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0027, "epsilon_u_tt": 0.0079},
+                "220GHz": {"tcal": 0.9695, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0005, "epsilon_u_tt": 0.0067},
+            },
+            "ra5hdec-33.25": {
+                "90GHz": {"tcal": 1.1271, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0009, "epsilon_u_tt": 0.0116},
+                "150GHz": {"tcal": 0.9896, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0053, "epsilon_u_tt": 0.0147},
+                "220GHz": {"tcal": 0.9975, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0139, "epsilon_u_tt": 0.0257},
+            },
+            "ra5hdec-29.75": {
+                "90GHz": {"tcal": 1.1210, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0009, "epsilon_u_tt": 0.0116},
+                "150GHz": {"tcal": 1.0165, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0053, "epsilon_u_tt": 0.0147},
+                "220GHz": {"tcal": 1.0320, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0139, "epsilon_u_tt": 0.0257},
+            },
         },
-        "ra0hdec-59.75": {
-            "90GHz": {"delta_psi": 0.0099, "epsilon_q_tt": 0.0076, "epsilon_u_tt": 0.0089},
-            "150GHz": {"delta_psi": 0.0087, "epsilon_q_tt": 0.0094, "epsilon_u_tt": 0.0130},
-            "220GHz": {"delta_psi": 0.0016, "epsilon_q_tt": 0.0186, "epsilon_u_tt": 0.0111},
+        "summer_b_nodecon": {
+            "ra1h40dec-40.25": {
+                "90GHz": {"tcal": 1.0718, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0008, "epsilon_u_tt": 0.0102},
+                "150GHz": {"tcal": 1.0112, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0135},
+                "220GHz": {"tcal": 0.9686, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0059, "epsilon_u_tt": 0.0171},
+            },
+            "ra1h40dec-36.75": {
+                "90GHz": {"tcal": 1.0854, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0008, "epsilon_u_tt": 0.0102},
+                "150GHz": {"tcal": 1.0138, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0135},
+                "220GHz": {"tcal": 1.0044, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0059, "epsilon_u_tt": 0.0171},
+            },
+            "ra1h40dec-33.25": {
+                "90GHz": {"tcal": 1.1420, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0008, "epsilon_u_tt": 0.0102},
+                "150GHz": {"tcal": 0.9854, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0135},
+                "220GHz": {"tcal": 0.9844, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0059, "epsilon_u_tt": 0.0171},
+            },
+            "ra1h40dec-29.75": {
+                "90GHz": {"tcal": 1.1464, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0008, "epsilon_u_tt": 0.0102},
+                "150GHz": {"tcal": 0.9890, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0026, "epsilon_u_tt": 0.0135},
+                "220GHz": {"tcal": 0.9697, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0059, "epsilon_u_tt": 0.0171},
+            },
         },
-        "ra0hdec-67.25": {
-            "90GHz": {"delta_psi": 0.0093, "epsilon_q_tt": 0.0065, "epsilon_u_tt": 0.0087},
-            "150GHz": {"delta_psi": 0.0078, "epsilon_q_tt": 0.0088, "epsilon_u_tt": 0.0118},
-            "220GHz": {"delta_psi": 0.0060, "epsilon_q_tt": 0.0181, "epsilon_u_tt": 0.0132},
+        "summer_c_nodecon": {
+            "ra12h30dec-40.25": {
+                "90GHz": {"tcal": 1.1218, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0015, "epsilon_u_tt": 0.0093},
+                "150GHz": {"tcal": 0.9979, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0021, "epsilon_u_tt": 0.0162},
+                "220GHz": {"tcal": 0.9654, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0040, "epsilon_u_tt": 0.0156},
+            },
+            "ra12h30dec-36.75": {
+                "90GHz": {"tcal": 1.1359, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0015, "epsilon_u_tt": 0.0093},
+                "150GHz": {"tcal": 0.9892, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0021, "epsilon_u_tt": 0.0162},
+                "220GHz": {"tcal": 0.9578, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0040, "epsilon_u_tt": 0.0156},
+            },
+            "ra12h30dec-33.25": {
+                "90GHz": {"tcal": 1.1385, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0015, "epsilon_u_tt": 0.0093},
+                "150GHz": {"tcal": 0.9838, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0021, "epsilon_u_tt": 0.0162},
+                "220GHz": {"tcal": 0.9987, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0040, "epsilon_u_tt": 0.0156},
+            },
+            "ra12h30dec-29.75": {
+                "90GHz": {"tcal": 1.1313, "pcal": 0.9783, "delta_psi": 0.00806, "epsilon_q_tt": 0.0015, "epsilon_u_tt": 0.0093},
+                "150GHz": {"tcal": 1.0055, "pcal": 1.1026, "delta_psi": 0.00675, "epsilon_q_tt": 0.0021, "epsilon_u_tt": 0.0162},
+                "220GHz": {"tcal": 0.9859, "pcal": 1.0896, "delta_psi": -0.00563, "epsilon_q_tt": 0.0040, "epsilon_u_tt": 0.0156},
+            },
         },
     }
 
